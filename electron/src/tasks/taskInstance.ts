@@ -663,14 +663,47 @@ export class TaskInstance extends EventEmitter<EventMap> {
     })
   }
 
+  private async executePostRunCommand(
+    command: string,
+  ): Promise<ExecuteCommandResult> {
+    try {
+      return await this.executeCmd(command)
+    }
+    catch (error) {
+      console.debug('TaskInstance failed to execute post-run validation command', {
+        taskId: this.task.id,
+        command,
+        error,
+      })
+
+      return {
+        command,
+        stdout: '',
+        stderr: String(error),
+        exitCode: -1,
+      }
+    }
+  }
+
   private async onTurnComplete(): Promise<void> {
+    const previousTurn = this.task.turns[this.task.turns.length - 1]
+    if (!previousTurn) {
+      console.debug('TaskInstance onTurnComplete called without an active turn', {
+        taskId: this.task.id,
+      })
+      await this.updateTask({
+        state: 'AwaitingReview',
+      })
+      await this.doNextQueue()
+      return
+    }
+
     const now = Date.now()
-    const previous = this.task.turns[this.task.turns.length - 1]
 
     await this.updateTurn(
-      this.task.turns[this.task.turns.length - 1].id,
+      previousTurn.id,
       {
-        timeTaken: now - previous.createdAt.getTime(),
+        timeTaken: now - previousTurn.createdAt.getTime(),
         finishedAt: new Date(now),
       },
     )
@@ -689,7 +722,7 @@ export class TaskInstance extends EventEmitter<EventMap> {
     })
 
     for (const command of postRunCommands) {
-      const commandResult = await this.executeCmd(command)
+      const commandResult = await this.executePostRunCommand(command)
 
       if (commandResult.exitCode !== 0) {
         console.debug('TaskInstance post-run validation command failed', {
