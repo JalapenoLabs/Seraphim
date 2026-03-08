@@ -116,6 +116,28 @@ export function ViewIssueTrackingPage(props: Props) {
     enabled: isCreateMode,
   })
 
+  const accountNamePlaceholder = provider === 'Github'
+    ? 'Team GitHub'
+    : 'Team Jira'
+  const baseUrlPlaceholder = provider === 'Github'
+    ? 'https://api.github.com'
+    : 'https://company.atlassian.net'
+  const accountIdentityLabel = provider === 'Github'
+    ? 'Organization / owner'
+    : 'Account email'
+  const accountIdentityPlaceholder = provider === 'Github'
+    ? 'jalapenolabs'
+    : 'team@company.io'
+  const targetBoardLabel = provider === 'Github'
+    ? 'Repository'
+    : 'Target board'
+  const targetBoardPlaceholder = provider === 'Github'
+    ? 'seraphim'
+    : 'SER'
+  const tokenPlaceholder = provider === 'Github'
+    ? 'github_personal_access_token'
+    : 'jira_api_token'
+
   return <Card className='w-full'>
     <header className='compact level'>
       <h1 className='text-2xl font-bold'>
@@ -135,7 +157,7 @@ export function ViewIssueTrackingPage(props: Props) {
         <Input
           fullWidth
           label='Account name'
-          placeholder='Team Jira'
+          placeholder={accountNamePlaceholder}
           isInvalid={Boolean(form.formState.errors.name)}
           errorMessage={form.formState.errors.name?.message}
           value={form.watch('name')}
@@ -149,7 +171,7 @@ export function ViewIssueTrackingPage(props: Props) {
         <Input
           fullWidth
           label='Base URL'
-          placeholder='https://company.atlassian.net'
+          placeholder={baseUrlPlaceholder}
           isInvalid={Boolean(form.formState.errors.baseUrl)}
           errorMessage={form.formState.errors.baseUrl?.message}
           value={form.watch('baseUrl')}
@@ -162,8 +184,8 @@ export function ViewIssueTrackingPage(props: Props) {
       <div className='compact'>
         <Input
           fullWidth
-          label='Account email'
-          placeholder='team@company.io'
+          label={accountIdentityLabel}
+          placeholder={accountIdentityPlaceholder}
           isInvalid={Boolean(form.formState.errors.email)}
           errorMessage={form.formState.errors.email?.message}
           value={form.watch('email')}
@@ -176,8 +198,8 @@ export function ViewIssueTrackingPage(props: Props) {
       <div className='compact'>
         <Input
           fullWidth
-          label='Target board'
-          placeholder='SER'
+          label={targetBoardLabel}
+          placeholder={targetBoardPlaceholder}
           isInvalid={Boolean(form.formState.errors.targetBoard)}
           errorMessage={form.formState.errors.targetBoard?.message}
           value={form.watch('targetBoard')}
@@ -190,7 +212,7 @@ export function ViewIssueTrackingPage(props: Props) {
       <div className='compact'>
         <Input
           label='Access token'
-          placeholder='jira_api_token'
+          placeholder={tokenPlaceholder}
           fullWidth
           type='password'
           autoComplete='off'

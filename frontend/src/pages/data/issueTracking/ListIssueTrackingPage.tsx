@@ -22,7 +22,7 @@ import {
   DropdownMenu,
   DropdownTrigger,
 } from '@heroui/react'
-import { SiJirasoftware } from 'react-icons/si'
+import { SiGithub, SiJirasoftware } from 'react-icons/si'
 import {
   PlusIcon,
   EllipsisIcon,
@@ -41,7 +41,28 @@ import { UrlTree } from '@common/urls'
 
 const IconByProvider = {
   Jira: <SiJirasoftware className='icon' size={38} />,
+  Github: <SiGithub className='icon' size={38} />,
 } as const satisfies Record<IssueTracking['provider'], ReactNode>
+
+const ProviderOptions = [
+  {
+    key: 'jira',
+    provider: 'Jira',
+    icon: <SiJirasoftware className='icon' />,
+    label: 'Jira',
+  },
+  {
+    key: 'github',
+    provider: 'Github',
+    icon: <SiGithub className='icon' />,
+    label: 'GitHub',
+  },
+] as const satisfies {
+  key: string
+  provider: IssueTracking['provider']
+  icon: ReactNode
+  label: string
+}[]
 
 export function ListIssueTrackingPage() {
   // Input
@@ -50,6 +71,7 @@ export function ListIssueTrackingPage() {
 
   // State
   const [ selectedItem, select ] = useState<'new' | IssueTracking | null>(null)
+  const [ selectedProvider, setSelectedProvider ] = useState<IssueTracking['provider']>('Jira')
 
   // State maintenance
   useEffect(() => {
@@ -84,6 +106,11 @@ export function ListIssueTrackingPage() {
     navigate(UrlTree.tasks)
   }, [ navigate, selectedItem ])
 
+  function openCreateIssueTracking(provider: IssueTracking['provider']) {
+    setSelectedProvider(provider)
+    select('new')
+  }
+
   // Hotkeys
   useHotkey([ 'Escape' ], deselectAll, {
     preventDefault: true,
@@ -105,20 +132,22 @@ export function ListIssueTrackingPage() {
               </span>
             </Button>
           </DropdownTrigger>
-          <DropdownMenu aria-label='Static Actions'>
-            <DropdownItem
-              key='jira'
-              onPress={() => {
-                select('new')
-              }}
-            >
-              <div className='level-left w-full'>
-                <span className='icon'>
-                  <SiJirasoftware className='icon' />
-                </span>
-                <span>Jira</span>
-              </div>
-            </DropdownItem>
+          <DropdownMenu aria-label='Issue tracking providers'>
+            { ProviderOptions.map((providerOption) => (
+              <DropdownItem
+                key={providerOption.key}
+                onPress={() => {
+                  openCreateIssueTracking(providerOption.provider)
+                }}
+              >
+                <div className='level-left w-full'>
+                  <span className='icon'>
+                    {providerOption.icon}
+                  </span>
+                  <span>{providerOption.label}</span>
+                </div>
+              </DropdownItem>
+            ))}
           </DropdownMenu>
         </Dropdown>
       </div>
@@ -200,7 +229,7 @@ export function ListIssueTrackingPage() {
             : undefined
           }
           provider={selectedItem === 'new'
-            ? 'Jira'
+            ? selectedProvider
             : selectedItem.provider
           }
           close={() => select(null)}

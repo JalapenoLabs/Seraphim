@@ -3,14 +3,51 @@
 import { z } from 'zod'
 import { IssueTrackingProvider } from '@prisma/client'
 
+const optionalStringSchema = z.string().trim().optional()
+
+function hasValue(value?: string) {
+  return Boolean(value?.trim())
+}
+
 export const upsertIssueTrackingSchema = z
   .object({
     name: z.string().trim().min(1).optional(),
     provider: z.nativeEnum(IssueTrackingProvider),
     baseUrl: z.string().trim().url().optional(),
-    email: z.string().trim().email().optional(),
-    accessToken: z.string().trim().optional(),
+    email: optionalStringSchema,
+    accessToken: optionalStringSchema,
     targetBoard: z.string().trim().min(1).optional(),
+  })
+  .superRefine((value, context) => {
+    const ownerOrEmail = value.email?.trim()
+    const targetBoard = value.targetBoard?.trim()
+
+    if (value.provider === 'Jira') {
+      if (hasValue(ownerOrEmail) && !z.string().email().safeParse(ownerOrEmail).success) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [ 'email' ],
+          message: 'Jira account email must be a valid email address',
+        })
+      }
+      return
+    }
+
+    if (!hasValue(ownerOrEmail)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [ 'email' ],
+        message: 'GitHub organization or owner is required',
+      })
+    }
+
+    if (!hasValue(targetBoard)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [ 'targetBoard' ],
+        message: 'GitHub repository is required',
+      })
+    }
   })
 
 export type UpsertIssueTrackingRequest = z.infer<typeof upsertIssueTrackingSchema>

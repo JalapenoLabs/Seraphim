@@ -8933,6 +8933,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "common@workspace:common"
   dependencies:
+    "@octokit/core": "npm:^7.0.6"
+    "@octokit/request-error": "npm:^7.0.2"
     "@openai/codex-sdk": "npm:^0.98.0"
     glob: "npm:^13.0.0"
     jira.js: "npm:^5.3.0"

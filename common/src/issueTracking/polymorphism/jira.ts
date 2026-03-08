@@ -23,7 +23,10 @@ export class JiraIssueTracker extends IssueTracker {
     super(issueTracking)
 
     const clientConfig = {
-      host: IssueTracker.resolveIssueTrackingBaseUrl(this.issueTracking.baseUrl),
+      host: IssueTracker.resolveIssueTrackingBaseUrl(
+        this.issueTracking.baseUrl,
+        this.issueTracking.provider,
+      ),
       authentication: {
         basic: {
           email: this.issueTracking.email,

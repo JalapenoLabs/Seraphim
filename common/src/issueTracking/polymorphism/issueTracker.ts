@@ -1,6 +1,6 @@
 // Copyright © 2026 Jalapeno Labs
 
-import type { IssueTracking } from '@prisma/client'
+import type { IssueTracking, IssueTrackingProvider } from '@prisma/client'
 import type {
   IssueTrackingIssue,
   IssueTrackingIssueList,
@@ -11,20 +11,33 @@ import type {
 } from '../types'
 
 // Misc
-import { DEFAULT_JIRA_CLOUD_BASE_URL } from '@common/constants'
+import {
+  DEFAULT_GITHUB_API_BASE_URL,
+  DEFAULT_JIRA_CLOUD_BASE_URL,
+} from '@common/constants'
 
 export class IssueTracker {
   protected readonly issueTracking: IssueTracking
 
-  public static resolveIssueTrackingBaseUrl(baseUrl?: string | null) {
+  public static resolveIssueTrackingBaseUrl(
+    baseUrl?: string | null,
+    provider: IssueTrackingProvider = 'Jira',
+  ) {
     const trimmed = baseUrl?.trim()
+
+    let providerDefaultBaseUrl: string = DEFAULT_JIRA_CLOUD_BASE_URL
+    if (provider === 'Github') {
+      providerDefaultBaseUrl = DEFAULT_GITHUB_API_BASE_URL
+    }
+
     const resolvedBaseUrl = trimmed?.length
       ? trimmed
-      : DEFAULT_JIRA_CLOUD_BASE_URL
+      : providerDefaultBaseUrl
 
     if (!trimmed?.length) {
-      console.debug('Issue tracking baseUrl missing, using default Jira base URL', {
-        defaultBaseUrl: DEFAULT_JIRA_CLOUD_BASE_URL,
+      console.debug('Issue tracking baseUrl missing, using default provider base URL', {
+        provider,
+        defaultBaseUrl: providerDefaultBaseUrl,
       })
     }
 

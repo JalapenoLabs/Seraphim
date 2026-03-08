@@ -107,6 +107,7 @@ export async function handleUpsertIssueTrackingRequest(
 
   const resolvedBaseUrl = IssueTracker.resolveIssueTrackingBaseUrl(
     payload.baseUrl ?? existingIssueTracking?.baseUrl,
+    payload.provider,
   )
   const resolvedAccessToken = payload.accessToken
     || existingIssueTracking?.accessToken

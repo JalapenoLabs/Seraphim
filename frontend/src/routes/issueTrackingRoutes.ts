@@ -40,7 +40,7 @@ export async function listIssueTracking(): Promise<ListIssueTrackingResponse> {
 
 
 // /////////////////////////////// //
-//        List Jira Issues         //
+//        List provider issues         //
 // /////////////////////////////// //
 
 type ListIssueTrackingIssuesResponse = IssueTrackingIssueList & {

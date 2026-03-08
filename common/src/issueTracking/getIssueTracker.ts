@@ -5,12 +5,14 @@ import type { IssueTracking, IssueTrackingProvider } from '@prisma/client'
 // Core
 import { IssueTracker } from './polymorphism/issueTracker'
 import { JiraIssueTracker } from './polymorphism/jira'
+import { GithubIssueTracker } from './polymorphism/github'
 
 const IssueTrackingProviderToTrackerMap: Record<
   IssueTrackingProvider,
   new (issueTracking: IssueTracking) => IssueTracker
 > = {
   Jira: JiraIssueTracker,
+  Github: GithubIssueTracker,
 }
 
 export function getIssueTracker(issueTracking: IssueTracking): IssueTracker {

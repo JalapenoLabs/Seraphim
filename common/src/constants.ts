@@ -97,6 +97,7 @@ export const GITHUB_AUTH_PROVIDER_REQUIRED_SCOPES = [
 
 // Issue tracking
 export const DEFAULT_JIRA_CLOUD_BASE_URL = 'https://api.atlassian.com' as const
+export const DEFAULT_GITHUB_API_BASE_URL = 'https://api.github.com' as const
 export const JIRA_CLOUD_REQUIRED_SCOPES = [
   'read:jira-work',
   'write:jira-work',

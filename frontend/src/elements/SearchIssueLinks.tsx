@@ -39,7 +39,7 @@ export function SearchIssueLinks(props: Props) {
     <Autocomplete
       className='w-full'
       fullWidth
-      label='Jira issue link'
+      label='Issue link'
       placeholder='PROJ-123'
       allowsCustomValue
       isLoading={issueSearch.isLoading}
@@ -54,7 +54,7 @@ export function SearchIssueLinks(props: Props) {
         props.onSelection(selectedValue)
       }}
       isDisabled={props.isDisabled || !props.issueTrackingId}
-      errorMessage={issueSearch.error ? 'Unable to load Jira issues right now.' : undefined}
+      errorMessage={issueSearch.error ? 'Unable to load issues right now.' : undefined}
       isInvalid={!!issueSearch.error && Boolean(search)}
     >{ issueSearch.issues.map((issue) => (
       <AutocompleteItem
@@ -72,13 +72,13 @@ export function SearchIssueLinks(props: Props) {
       selectedKeys={[ mode ]}
       onSelectionChange={(selection: Selection) => {
         if (selection === 'all') {
-          console.debug('SearchJiraIssueLinks received invalid mode selection "all"')
+          console.debug('SearchIssueLinks received invalid mode selection "all"')
           return
         }
 
         const [ selectedKey ] = Array.from(selection)
         if (selectedKey !== 'text' && selectedKey !== 'jql') {
-          console.debug('SearchJiraIssueLinks received unknown mode selection key', {
+          console.debug('SearchIssueLinks received unknown mode selection key', {
             selectedKey,
           })
           return
