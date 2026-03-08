@@ -10,6 +10,7 @@ import { parseRequestParams } from '../../validation'
 import { z } from 'zod'
 
 // Utility
+import { issueTrackingIdSchema } from '@electron/validators'
 import { requireDatabaseClient } from '@electron/database'
 import { sanitizeIssueTracking } from './utils'
 
@@ -22,7 +23,7 @@ type GetIssueTrackingResponse = {
 }
 
 const getIssueTrackingParamsSchema = z.object({
-  issueTrackingId: z.string().trim().uuid(),
+  issueTrackingId: issueTrackingIdSchema,
 })
 
 export async function handleGetIssueTrackingRequest(

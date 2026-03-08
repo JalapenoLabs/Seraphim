@@ -10,6 +10,7 @@ import { parseRequestParams } from '../../validation'
 import { z } from 'zod'
 
 // Utility
+import { gitAccountIdSchema } from '@electron/validators'
 import { requireDatabaseClient } from '@electron/database'
 import { sanitizeAccount } from './utils'
 
@@ -22,7 +23,7 @@ type GetAccountResponse = {
 }
 
 const getAccountParamsSchema = z.object({
-  accountId: z.string().trim().uuid(),
+  accountId: gitAccountIdSchema,
 })
 
 export async function handleGetGitAccountRequest(

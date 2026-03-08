@@ -12,6 +12,7 @@ import { z } from 'zod'
 // Utility
 import { getCallableLLM } from '@common/llms/call'
 import { requireDatabaseClient } from '@electron/database'
+import { llmIdSchema } from '@electron/validators'
 import { sanitizeLlm } from './utils'
 
 type RouteParams = {
@@ -23,7 +24,7 @@ type GetLlmResponse = {
 }
 
 const llmParamsSchema = z.object({
-  llmId: z.string().trim().min(1),
+  llmId: llmIdSchema,
 })
 
 export async function handleGetLlmRequest(
