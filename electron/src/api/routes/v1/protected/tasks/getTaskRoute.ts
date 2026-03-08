@@ -10,13 +10,14 @@ import { parseRequestParams } from '../../validation'
 
 // Misc
 import { requireDatabaseClient } from '@electron/database'
+import { taskIdSchema } from '@electron/validators'
 
 type RouteParams = {
   taskId: string
 }
 
 const taskParamsSchema = z.object({
-  taskId: z.string().trim().min(1),
+  taskId: taskIdSchema,
 })
 
 export async function handleGetTaskRequest(
