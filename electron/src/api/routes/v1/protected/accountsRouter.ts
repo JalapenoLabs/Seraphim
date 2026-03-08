@@ -6,6 +6,7 @@ import type { Router } from 'express'
 import { Router as createRouter } from 'express'
 
 // Misc
+import { handleGetGitAccountRequest } from './accounts/getAccountRoute'
 import { handleListGitAccountsRequest } from './accounts/listAccountsRoute'
 import { handleListBranchesRequest } from './accounts/listBranchesRoute'
 import { handleListReposRequest } from './accounts/listReposRoute'
@@ -33,6 +34,9 @@ export function createGitAccountsRouter(): Router {
 
   // /api/v1/protected/git-accounts/repos/:githubUsername
   gitAccountsRouter.get('/repos/:githubUsername', handleListReposRequest)
+
+  // /api/v1/protected/git-accounts/:accountId
+  gitAccountsRouter.get('/:accountId', handleGetGitAccountRequest)
 
   return gitAccountsRouter
 }

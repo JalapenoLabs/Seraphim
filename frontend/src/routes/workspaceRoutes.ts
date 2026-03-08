@@ -34,6 +34,27 @@ export async function listWorkspaces() {
   return response
 }
 
+
+// /////////////////////////////// //
+//         Get Workspace          //
+// /////////////////////////////// //
+
+type GetWorkspaceResponse = {
+  workspace: WorkspaceWithEnv
+}
+
+export async function getWorkspace(workspaceId: string) {
+  const response = await frontendClient
+    .get(`v1/protected/workspaces/${workspaceId}`)
+    .json<GetWorkspaceResponse>()
+
+  dispatch(
+    workspaceActions.upsertWorkspace(response.workspace),
+  )
+
+  return response
+}
+
 // /////////////////////////////// //
 //         Upsert Workspace        //
 // /////////////////////////////// //
