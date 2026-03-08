@@ -1,4 +1,4 @@
-// Copyright 2026 Jalapeno Labs
+// Copyright © 2026 Jalapeno Labs
 
 import type { IssueTracking } from '@common/types'
 

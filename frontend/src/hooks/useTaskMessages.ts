@@ -14,13 +14,17 @@ import { getTaskMessagesSseUrl } from '@frontend/routes/taskRoutes'
 export function useTaskMessages(taskId: string) {
   const [ messages, setMessages ] = useState<Message[]>([])
 
+  function noopCleanup() {
+    return undefined
+  }
+
   useEffect(function manageTaskMessagesSseConnection() {
     if (!taskId?.trim()) {
       console.debug('useTaskMessages received empty taskId, skipping SSE connection', {
         taskId,
       })
       setMessages([])
-      return
+      return noopCleanup
     }
 
     const taskMessagesUrl = getTaskMessagesSseUrl(taskId)
