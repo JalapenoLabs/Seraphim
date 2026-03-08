@@ -18,6 +18,7 @@ import { notFoundMiddleware } from './middleware/notFoundMiddleware'
 import { errorMiddleware } from './middleware/errorMiddleware'
 import { createPublicRouter } from './routes/public/publicRouter'
 import { createProtectedRouter } from './routes/v1/protected/protectedRouter'
+import { handleStreamTaskMessagesRequest } from './routes/v1/protected/tasks/streamTaskMessagesRoute'
 
 // Misc
 import { API_BASE_PATH } from '../constants'
@@ -43,8 +44,12 @@ export function createApiApp(): Application {
 
   const publicRouter = createPublicRouter()
   const protectedRouter = createProtectedRouter()
-
   apiApplication.use(publicRouter)
+  apiApplication.get(
+    `${API_BASE_PATH}/tasks/:taskId/messages`,
+    protectedApiMiddleware,
+    handleStreamTaskMessagesRequest,
+  )
   apiApplication.use(
     `${API_BASE_PATH}/protected`,
     protectedApiMiddleware,
