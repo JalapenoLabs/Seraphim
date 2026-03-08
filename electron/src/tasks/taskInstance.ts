@@ -620,6 +620,96 @@ export class TaskInstance extends EventEmitter<EventMap> {
   }
 
   private subscription: ((message: InboundCodexEvent) => void) | null = null
+
+  private getPostRunCommands(postScript: string): string[] {
+    if (!postScript?.trim()) {
+      console.debug('TaskInstance onTurnComplete has no post script commands to run', {
+        taskId: this.task.id,
+      })
+      return []
+    }
+
+    const postRunCommands = postScript
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => Boolean(line))
+
+    return postRunCommands
+  }
+
+  private async queuePostRunFailureTurn(
+    commandResult: ExecuteCommandResult,
+  ): Promise<void> {
+    const commandFailureMessage = [
+      'A post-run validation command failed. Please fix the workspace so this validation command passes.',
+      `Failed command: ${commandResult.command}`,
+      `Exit code: ${String(commandResult.exitCode)}`,
+      '',
+      'STDOUT:',
+      commandResult.stdout || '(empty)',
+      '',
+      'STDERR:',
+      commandResult.stderr || '(empty)',
+    ].join('\n')
+
+    await this.updateTask({
+      state: 'AwaitingReview',
+    })
+
+    await this.queueUserMessage({
+      role: 'System',
+      type: 'text',
+      content: commandFailureMessage,
+    })
+  }
+
+  private async onTurnComplete(): Promise<void> {
+    const now = Date.now()
+    const previous = this.task.turns[this.task.turns.length - 1]
+
+    await this.updateTurn(
+      this.task.turns[this.task.turns.length - 1].id,
+      {
+        timeTaken: now - previous.createdAt.getTime(),
+        finishedAt: new Date(now),
+      },
+    )
+
+    const postRunCommands = this.getPostRunCommands(this.task.workspace.postScript)
+    if (!postRunCommands.length) {
+      await this.updateTask({
+        state: 'AwaitingReview',
+      })
+      await this.doNextQueue()
+      return
+    }
+
+    await this.updateTask({
+      state: 'Validating',
+    })
+
+    for (const command of postRunCommands) {
+      const commandResult = await this.executeCmd(command)
+
+      if (commandResult.exitCode !== 0) {
+        console.debug('TaskInstance post-run validation command failed', {
+          taskId: this.task.id,
+          command: commandResult.command,
+          exitCode: commandResult.exitCode,
+        })
+
+        await this.queuePostRunFailureTurn(commandResult)
+        return
+      }
+    }
+
+    await this.updateTask({
+      state: 'AwaitingReview',
+    })
+
+    await this.doNextQueue()
+  }
+
   protected attachCodexSubscriptions() {
     if (this.subscription) {
       this.removeListener('message', this.subscription)
@@ -657,21 +747,7 @@ export class TaskInstance extends EventEmitter<EventMap> {
           )
           console.log('Rate limits:', this.rateLimits)
           console.log('Usage:', this.usage)
-          const now = Date.now()
-          const previous = this.task.turns[this.task.turns.length - 1]
-          await Promise.all([
-            this.updateTask({
-              state: 'AwaitingReview',
-            }),
-            this.updateTurn(
-              this.task.turns[this.task.turns.length - 1].id,
-              {
-                timeTaken: now - previous.createdAt.getTime(),
-                finishedAt: new Date(now),
-              },
-            ),
-          ])
-          await this.doNextQueue()
+          await this.onTurnComplete()
           break
         case 'turn/diff/updated':
           await this.saveCodexMessage({
