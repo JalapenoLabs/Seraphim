@@ -62,23 +62,16 @@ class TaskManager {
         continue
       }
 
-      if (!task.container || task.container === 'pending') {
-        console.debug('TaskManager initialized task without a persisted container id', {
-          taskId: task.id,
-          containerId: task.container,
-        })
-        continue
-      }
-
-      console.debug('TaskManager marked task as ContainerBroken during initialization', {
+      console.debug('TaskManager deleting task during initialization because container was not found', {
         taskId: task.id,
         containerId: task.container,
       })
 
-      const updatedTask = await updateTaskState(task.id, 'ContainerBroken')
-      if (!updatedTask) {
-        console.debug('TaskManager failed to persist ContainerBroken task state during initialization', {
+      const deletedTask = await this.deleteTask(task.id)
+      if (deletedTask.status !== 'deleted') {
+        console.debug('TaskManager failed to delete task during initialization after missing container', {
           taskId: task.id,
+          deleteStatus: deletedTask.status,
         })
       }
     }
@@ -405,3 +398,4 @@ const taskManager: TaskManager = new TaskManager()
 export function getTaskManager(): TaskManager {
   return taskManager
 }
+

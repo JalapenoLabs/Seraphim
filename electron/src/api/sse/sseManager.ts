@@ -30,7 +30,6 @@ function createSseManager() {
 
   function broadcastEvent(eventName: string, data: string): void {
     if (clientsById.size === 0) {
-      console.debug('SSE broadcast skipped because no clients are connected', { eventName })
       return
     }
 

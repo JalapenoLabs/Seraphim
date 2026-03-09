@@ -139,6 +139,15 @@ export class TaskInstance extends EventEmitter<EventMap> {
       return false
     }
 
+    if (containerId === 'pending') {
+      console.debug('TaskInstance skipping container refresh for pending container id', {
+        taskId: this.task.id,
+        containerId,
+      })
+      this.containerExists = false
+      return false
+    }
+
     try {
       const dockerClient = getDockerClient()
       this.container ||= dockerClient.getContainer(containerId)
@@ -148,10 +157,26 @@ export class TaskInstance extends EventEmitter<EventMap> {
       return true
     }
     catch (error) {
-      console.debug('Container existence check failed', {
-        containerId,
-        error,
-      })
+      const errorStatusCode = typeof error === 'object' && error !== null
+        ? Reflect.get(error, 'statusCode')
+        : null
+      const errorReason = typeof error === 'object' && error !== null
+        ? Reflect.get(error, 'reason')
+        : null
+
+      if (errorStatusCode === 404 && errorReason === 'no such container') {
+        console.debug('TaskInstance container does not exist during refresh', {
+          taskId: this.task.id,
+          containerId,
+        })
+      }
+      else {
+        console.debug('Container existence check failed', {
+          taskId: this.task.id,
+          containerId,
+          error,
+        })
+      }
 
       this.containerExists = false
       return false
