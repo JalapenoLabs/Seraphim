@@ -15,6 +15,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { updateCurrentUserSettings } from '@frontend/routes/userRoutes'
 
 // UI
+import { Switch } from '@heroui/react'
 import { Card } from '@frontend/elements/Card'
 import { ThemeInput } from '@frontend/elements/ThemeInput'
 import { LanguageInput } from '@frontend/elements/LanguageInput'
@@ -71,7 +72,7 @@ export function GeneralSettingsPage() {
       errors={form.formState.errors['']?.message}
       className='relaxed'
     />
-    <Card>
+    <Card className='relaxed'>
       <div className='level-centered'>
         <ThemeInput
           className='w-full'
@@ -91,7 +92,7 @@ export function GeneralSettingsPage() {
         />
       </div>
     </Card>
-    <Card className='relaxed'>
+    <Card className='relaxed' label='Voice Settings'>
       <SelectVoiceSettings
         selectedVoiceType={form.watch('voiceProvider')}
         voiceTypeError={form.formState.errors.voiceProvider?.message}
@@ -115,11 +116,26 @@ export function GeneralSettingsPage() {
         }}
       />
     </Card>
-    <Card className='relaxed'>
-      <AudioFileUploadButton
-        audioFor={AudioFor.DONE_SOUND}
-        label='Done Sound'
-      />
+    <Card className='relaxed' label='Audio Settings'>
+      <div className='relaxed'>
+
+        <Switch
+          isSelected={form.watch('playSounds')}
+          onValueChange={(checked: boolean) => {
+            form.setValue('playSounds', checked, { shouldDirty: true })
+          }}
+        >
+          <span>Enable sound playback</span>
+        </Switch>
+      </div>
+
+      <div className='relaxed'>
+        <h3 className='mb-1'>Customize sounds that play</h3>
+        <AudioFileUploadButton
+          audioFor={AudioFor.DONE_SOUND}
+          label='Done Sound'
+        />
+      </div>
     </Card>
   </article>
 }

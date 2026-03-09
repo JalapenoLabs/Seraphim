@@ -296,7 +296,7 @@ model UserSettings {
   userId String @unique @map("user_id")
   user   User   @relation(fields: [userId], references: [id])
 
-  playDoneSound Boolean @default(true) @map("play_done_sound")
+  playSounds Boolean @default(true) @map("play_sounds")
 
   voiceEnabled Boolean @default(true)
   voiceHotkey  String  @default("Control+Num0")

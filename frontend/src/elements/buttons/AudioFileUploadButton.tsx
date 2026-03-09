@@ -105,7 +105,7 @@ export function AudioFileUploadButton(props: Props) {
   const buttonText = isBusy
     ? `Loading ${props.label}`
     : !currentAudioFile
-      ? `Upload ${props.label}`
+      ? `Select ${props.label}`
       : `Change ${props.label} (${currentAudioFile.fileName})`
 
   return <>

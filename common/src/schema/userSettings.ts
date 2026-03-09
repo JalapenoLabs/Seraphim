@@ -23,7 +23,7 @@ const userSettingsBaseSchema = z
     theme: userThemeSchema,
     codeEditor: z.string().trim().optional(),
     voiceEnabled: z.boolean(),
-    playDoneSound: z.boolean(),
+    playSounds: z.boolean(),
     voiceHotkey: z.string().trim().min(1),
     voiceProvider: userVoiceProviderSchema,
     voiceLlmId: z.string().uuid().nullable().optional(),
