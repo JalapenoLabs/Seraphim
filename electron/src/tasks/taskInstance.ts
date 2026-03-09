@@ -5,7 +5,11 @@ import type { LlmUsage, TaskWithFullContext } from '@common/types'
 import type { Container } from 'dockerode'
 import type { SetOptional } from 'type-fest'
 import type { ClientRequest, ClientNotification, ServerNotification } from '@common/vendor/codex-protocol'
-import type { RateLimitSnapshot, ThreadTokenUsage, ThreadStartResponse } from '@common/vendor/codex-protocol/v2'
+import type {
+  RateLimitSnapshot,
+  ThreadTokenUsage,
+  ThreadStartResponse,
+} from '@common/vendor/codex-protocol/v2'
 
 // Core
 import { requireDatabaseClient } from '@electron/database'
@@ -67,6 +71,7 @@ export class TaskInstance extends EventEmitter<EventMap> {
   private rateLimits: RateLimitSnapshot | null = null
   private usage: ThreadTokenUsage | null = null
   private userMessageQueue: CreateMessage[] = []
+  private codexTurnId: string | null = null
 
   constructor(options: TaskInstanceOptions) {
     super()
@@ -464,6 +469,46 @@ export class TaskInstance extends EventEmitter<EventMap> {
     }
   }
 
+  public async interruptAndStop(): Promise<boolean> {
+    this.userMessageQueue = []
+
+    const codexThreadId = this.codexThreadId?.trim()
+    if (!codexThreadId) {
+      console.debug('TaskInstance interrupt requested without thread id', {
+        taskId: this.task.id,
+      })
+      return false
+    }
+
+    const codexTurnId = this.codexTurnId?.trim()
+    if (!codexTurnId) {
+      console.debug('TaskInstance interrupt requested without active turn id', {
+        taskId: this.task.id,
+        codexThreadId,
+      })
+      return false
+    }
+
+    const interruptId = this.getRequestId()
+    this.sendRequest({
+      method: 'turn/interrupt',
+      id: interruptId,
+      params: {
+        threadId: codexThreadId,
+        turnId: codexTurnId,
+      },
+    })
+
+    await this.waitForResponse(interruptId)
+
+    this.codexTurnId = null
+    await this.updateTask({
+      state: 'AwaitingReview',
+    })
+
+    return true
+  }
+
   private async doNextQueue() {
     if (this.task.state !== 'AwaitingReview') {
       return
@@ -647,11 +692,13 @@ export class TaskInstance extends EventEmitter<EventMap> {
       // "turn" = the whole “job” kicked off by one user input
       switch (method) {
         case 'turn/started':
+          this.codexTurnId = params.turn.id
           await this.updateTask({
             state: 'Working',
           })
           break
         case 'turn/completed':
+          this.codexTurnId = null
           console.log(
             chalk.green('Task completed!!'),
           )

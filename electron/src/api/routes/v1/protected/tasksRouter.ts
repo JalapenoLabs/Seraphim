@@ -10,10 +10,12 @@ import { handleCreateTaskRequest } from './tasks/createTaskRoute'
 import { handleDeleteTaskRequest } from './tasks/deleteTaskRoute'
 import { handleGetTaskRequest } from './tasks/getTaskRoute'
 import { handleListTasksRequest } from './tasks/listTasksRoute'
-import { handleReUpTaskGitRequest } from './tasks/postReUpTaskGitRoute'
-import { handleRefreshTaskGitRequest } from './tasks/postRefreshTaskGitRoute'
-import { handleTaskPullRequestRequest } from './tasks/postTaskPullRequestRoute'
-import { handleViewTaskRepositoryRequest } from './tasks/postViewTaskRepositoryRoute'
+import { handleReUpTaskGitRequest } from './tasks/reUpTaskGitRoute'
+import { handleRefreshTaskGitRequest } from './tasks/refreshTaskGitRoute'
+import { handleInterruptTaskRequest } from './tasks/interruptTaskRoute'
+import { handleTaskNewMessageRequest } from './tasks/taskNewMessageRoute'
+import { handleTaskPullRequestRequest } from './tasks/taskPullRequestRoute'
+import { handleViewTaskRepositoryRequest } from './tasks/viewTaskRepositoryRoute'
 import { handleStreamTaskLogsRequest } from './tasks/streamTaskLogsRoute'
 import { handleUpdateTaskRequest } from './tasks/updateTaskRoute'
 
@@ -36,6 +38,10 @@ export function createTasksRouter(): Router {
   tasksRouter.post('/:taskId/git/refresh', handleRefreshTaskGitRequest)
   // /api/v1/protected/tasks/:taskId/git/re-up
   tasksRouter.post('/:taskId/git/re-up', handleReUpTaskGitRequest)
+  // /api/v1/protected/tasks/:taskId/new-message
+  tasksRouter.post('/:taskId/new-message', handleTaskNewMessageRequest)
+  // /api/v1/protected/tasks/:taskId/interrupt
+  tasksRouter.post('/:taskId/interrupt', handleInterruptTaskRequest)
   // /api/v1/protected/tasks/:taskId/git/pull-request
   tasksRouter.post('/:taskId/git/pull-request', handleTaskPullRequestRequest)
   // /api/v1/protected/tasks/:taskId/git/view-repository

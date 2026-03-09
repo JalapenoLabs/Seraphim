@@ -1,7 +1,11 @@
 // Copyright © 2026 Jalapeno Labs
 
 import type { Message, Task } from '@common/types'
-import type { TaskCreateRequest, TaskUpdateRequest } from '@common/schema/task'
+import type {
+  TaskCreateRequest,
+  TaskNewMessageRequest,
+  TaskUpdateRequest,
+} from '@common/schema/task'
 
 // Core
 import { parseRequestBeforeSend } from '@common/api'
@@ -12,7 +16,11 @@ import { taskActions } from '@frontend/framework/redux/stores/tasks'
 import { dispatch } from '@frontend/framework/store'
 
 // Schema
-import { taskCreateSchema, taskUpdateSchema } from '@common/schema/task'
+import {
+  taskCreateSchema,
+  taskNewMessageSchema,
+  taskUpdateSchema,
+} from '@common/schema/task'
 
 // /////////////////////////////// //
 //           List Tasks            //
@@ -145,4 +153,26 @@ export function createOrUpdateTaskPullRequest(taskId: string) {
 
 export function viewTaskRepository(taskId: string) {
   return postTaskGitAction(taskId, 'view-repository')
+}
+
+// /////////////////////////////// //
+//         Task Messaging         //
+// /////////////////////////////// //
+
+type TaskMessageResponse = {
+  message: string
+}
+
+export function queueTaskMessage(taskId: string, raw: TaskNewMessageRequest) {
+  const json = parseRequestBeforeSend(taskNewMessageSchema, raw)
+
+  return frontendClient
+    .post(`v1/protected/tasks/${taskId}/new-message`, { json })
+    .json<TaskMessageResponse>()
+}
+
+export function interruptTask(taskId: string) {
+  return frontendClient
+    .post(`v1/protected/tasks/${taskId}/interrupt`)
+    .json<TaskMessageResponse>()
 }
