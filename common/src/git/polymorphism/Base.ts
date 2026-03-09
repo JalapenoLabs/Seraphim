@@ -5,9 +5,19 @@ import type {
   GitTokenValidation,
   GitListBranchesOptions,
   GitListBranchesResult,
+  GitCreatePullRequestOptions,
+  GitCreatePullRequestResult,
+  GitPullRequestLocator,
+  GitPullRequestInfo,
+  GitPullRequestLifecycle,
+  GitPullRequestCiStatus,
 } from '../types'
 import type { GithubBranchSummary } from '@common/types'
-import type { GithubRepoPayload } from '../schema'
+import type {
+  GithubCommitStatusPayload,
+  GithubPullRequestPayload,
+  GithubRepoPayload,
+} from '../schema'
 
 // Lib
 import { Octokit } from '@octokit/core'
@@ -15,7 +25,12 @@ import { RequestError } from '@octokit/request-error'
 
 // Utility
 import { Cloner } from '@common/cloning/polymorphism/cloner'
-import { githubBranchSchema, githubRepoSchema } from '../schema'
+import {
+  githubBranchSchema,
+  githubCommitStatusSchema,
+  githubPullRequestSchema,
+  githubRepoSchema,
+} from '../schema'
 
 const GITHUB_BRANCH_PAGE_SIZE = 100
 
@@ -26,6 +41,11 @@ type RepoDetails = {
 type RepoBranchPage = {
   branches: GithubBranchSummary[]
   hasNextPage: boolean
+}
+
+type ParsedRepositoryDetails = {
+  owner: string
+  repo: string
 }
 
 export class BaseGit {
@@ -88,6 +108,19 @@ export class BaseGit {
     return new Set(items)
   }
 
+  protected resolveRepositoryDetails(repoPath: string): ParsedRepositoryDetails | null {
+    const cloner = new Cloner(repoPath)
+    const repositoryDetails = cloner.getParsedRepositoryDetails()
+    if (!repositoryDetails) {
+      console.debug('GitHub operation failed because repository path could not be parsed', {
+        repoPath,
+      })
+      return null
+    }
+
+    return repositoryDetails
+  }
+
   // ////////////////////////////// //
   //        Listing branches        //
   // ////////////////////////////// //
@@ -95,8 +128,7 @@ export class BaseGit {
   public async listBranches(
     options: GitListBranchesOptions,
   ): Promise<GitListBranchesResult | null> {
-    const cloner = new Cloner(options.repoPath)
-    const repo = cloner.getParsedRepositoryDetails()
+    const repo = this.resolveRepositoryDetails(options.repoPath)
     if (!repo) {
       return null
     }
@@ -208,6 +240,224 @@ export class BaseGit {
     const endIndex = startIndex + limit
 
     return branches.slice(startIndex, endIndex)
+  }
+
+  // ////////////////////////////// //
+  //         Pull requests          //
+  // ////////////////////////////// //
+
+  public async createPullRequest(
+    options: GitCreatePullRequestOptions,
+  ): Promise<GitCreatePullRequestResult | null> {
+    const repo = this.resolveRepositoryDetails(options.repoPath)
+    if (!repo) {
+      return null
+    }
+
+    const title = options.title.trim()
+    const sourceBranch = options.sourceBranch.trim()
+    const targetBranch = options.targetBranch.trim()
+
+    if (!title || !sourceBranch || !targetBranch) {
+      console.debug('Create pull request failed because required fields are missing', {
+        title,
+        sourceBranch,
+        targetBranch,
+      })
+      return null
+    }
+
+    try {
+      const response = await this.octokit.request('POST /repos/{owner}/{repo}/pulls', {
+        owner: repo.owner,
+        repo: repo.repo,
+        title,
+        head: sourceBranch,
+        base: targetBranch,
+        body: options.description?.trim(),
+        draft: options.draft ?? false,
+        maintainer_can_modify: options.maintainersCanModify ?? true,
+      })
+
+      const parsed = githubPullRequestSchema.safeParse(response.data)
+      if (!parsed.success) {
+        console.debug('GitHub create pull request payload failed validation', {
+          owner: repo.owner,
+          repo: repo.repo,
+          error: parsed.error,
+        })
+        return null
+      }
+
+      return {
+        pullRequestNumber: parsed.data.number,
+        url: parsed.data.html_url,
+      }
+    }
+    catch (error) {
+      console.debug('Create pull request failed', {
+        owner: repo.owner,
+        repo: repo.repo,
+        error,
+      })
+      return null
+    }
+  }
+
+  public async getPullRequestInfo(
+    locator: GitPullRequestLocator,
+  ): Promise<GitPullRequestInfo | null> {
+    const pullRequestPayload = await this.fetchPullRequestPayload(locator)
+    if (!pullRequestPayload) {
+      return null
+    }
+
+    const lifecycle = this.resolvePullRequestLifecycle(pullRequestPayload)
+
+    return {
+      pullRequestNumber: pullRequestPayload.number,
+      title: pullRequestPayload.title,
+      description: pullRequestPayload.body,
+      state: pullRequestPayload.state,
+      lifecycle,
+      isDraft: pullRequestPayload.draft,
+      isMerged: Boolean(pullRequestPayload.merged_at),
+      url: pullRequestPayload.html_url,
+      authorUsername: pullRequestPayload.user?.login ?? null,
+      authorUrl: pullRequestPayload.user?.html_url ?? null,
+      sourceBranch: pullRequestPayload.head.ref,
+      targetBranch: pullRequestPayload.base.ref,
+      sourceSha: pullRequestPayload.head.sha,
+      createdAt: pullRequestPayload.created_at,
+      updatedAt: pullRequestPayload.updated_at,
+      closedAt: pullRequestPayload.closed_at,
+      mergedAt: pullRequestPayload.merged_at,
+    }
+  }
+
+  public async getPullRequestCiStatus(
+    locator: GitPullRequestLocator,
+  ): Promise<GitPullRequestCiStatus | null> {
+    const repo = this.resolveRepositoryDetails(locator.repoPath)
+    if (!repo) {
+      return null
+    }
+
+    const pullRequestInfo = await this.getPullRequestInfo(locator)
+    if (!pullRequestInfo) {
+      return null
+    }
+
+    try {
+      const response = await this.octokit.request('GET /repos/{owner}/{repo}/commits/{ref}/status', {
+        owner: repo.owner,
+        repo: repo.repo,
+        ref: pullRequestInfo.sourceSha,
+      })
+
+      const parsed = githubCommitStatusSchema.safeParse(response.data)
+      if (!parsed.success) {
+        console.debug('GitHub commit status payload failed validation', {
+          owner: repo.owner,
+          repo: repo.repo,
+          ref: pullRequestInfo.sourceSha,
+          error: parsed.error,
+        })
+        return null
+      }
+
+      return {
+        status: this.mapCommitStateToCiStatus(parsed.data.state),
+        sourceSha: pullRequestInfo.sourceSha,
+      }
+    }
+    catch (error) {
+      console.debug('Get pull request CI status failed', {
+        owner: repo.owner,
+        repo: repo.repo,
+        pullRequestNumber: locator.pullRequestNumber,
+        error,
+      })
+      return null
+    }
+  }
+
+  protected resolvePullRequestLifecycle(
+    pullRequest: GithubPullRequestPayload,
+  ): GitPullRequestLifecycle {
+    if (pullRequest.merged_at) {
+      return 'merged'
+    }
+
+    if (pullRequest.state === 'closed') {
+      return 'closed'
+    }
+
+    if (pullRequest.draft) {
+      return 'draft'
+    }
+
+    return 'open'
+  }
+
+  protected mapCommitStateToCiStatus(
+    state: GithubCommitStatusPayload['state'],
+  ): GitPullRequestCiStatus['status'] {
+    if (state === 'success') {
+      return 'success'
+    }
+
+    if (state === 'pending') {
+      return 'pending'
+    }
+
+    return 'failure'
+  }
+
+  protected async fetchPullRequestPayload(
+    locator: GitPullRequestLocator,
+  ): Promise<GithubPullRequestPayload | null> {
+    const repo = this.resolveRepositoryDetails(locator.repoPath)
+    if (!repo) {
+      return null
+    }
+
+    if (!Number.isInteger(locator.pullRequestNumber) || locator.pullRequestNumber <= 0) {
+      console.debug('Get pull request failed because pull request number is invalid', {
+        pullRequestNumber: locator.pullRequestNumber,
+      })
+      return null
+    }
+
+    try {
+      const response = await this.octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner: repo.owner,
+        repo: repo.repo,
+        pull_number: locator.pullRequestNumber,
+      })
+
+      const parsed = githubPullRequestSchema.safeParse(response.data)
+      if (!parsed.success) {
+        console.debug('GitHub pull request payload failed validation', {
+          owner: repo.owner,
+          repo: repo.repo,
+          pullRequestNumber: locator.pullRequestNumber,
+          error: parsed.error,
+        })
+        return null
+      }
+
+      return parsed.data
+    }
+    catch (error) {
+      console.debug('Get pull request failed', {
+        owner: repo.owner,
+        repo: repo.repo,
+        pullRequestNumber: locator.pullRequestNumber,
+        error,
+      })
+      return null
+    }
   }
 
   protected async fetchRepoDetails(

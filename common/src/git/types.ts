@@ -35,3 +35,54 @@ export type GitListBranchesResult = StandardPaginatedResponseData & {
   branches: GithubBranchSummary[]
   defaultBranch: string | null
 }
+
+export type GitPullRequestLifecycle =
+  | 'open'
+  | 'draft'
+  | 'merged'
+  | 'closed'
+
+export type GitCreatePullRequestOptions = {
+  repoPath: string
+  title: string
+  description?: string
+  sourceBranch: string
+  targetBranch: string
+  draft?: boolean
+  maintainersCanModify?: boolean
+}
+
+export type GitCreatePullRequestResult = {
+  pullRequestNumber: number
+  url: string
+}
+
+export type GitPullRequestLocator = {
+  repoPath: string
+  pullRequestNumber: number
+}
+
+export type GitPullRequestInfo = {
+  pullRequestNumber: number
+  title: string
+  description: string | null
+  state: 'open' | 'closed'
+  lifecycle: GitPullRequestLifecycle
+  isDraft: boolean
+  isMerged: boolean
+  url: string
+  authorUsername: string | null
+  authorUrl: string | null
+  sourceBranch: string
+  targetBranch: string
+  sourceSha: string
+  createdAt: string
+  updatedAt: string
+  closedAt: string | null
+  mergedAt: string | null
+}
+
+export type GitPullRequestCiStatus = {
+  status: 'pending' | 'success' | 'failure'
+  sourceSha: string
+}
