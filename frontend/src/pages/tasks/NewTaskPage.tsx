@@ -207,6 +207,11 @@ export function NewTaskPage() {
         value={form.watch('message')}
         onChange={(value) => form.setValue('message', value, formMode)}
         getMonaco={(context) => monaco.current = context}
+        options={{
+          wordWrap: 'on',
+          wrappingIndent: 'same', // optional: indent wrapped lines nicely
+          automaticLayout: true, // optional: helps when container resizes
+        }}
       />
     </article>
     <article className='flex flex-col items-stretch min-w-lg max-w-lg w-full h-full'>
