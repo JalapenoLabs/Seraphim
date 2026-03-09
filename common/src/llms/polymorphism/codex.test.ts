@@ -14,9 +14,9 @@ type Context = {
   errorMock: ReturnType<typeof vi.spyOn>
 }
 
-function hasRequiredEnvValues() {
-  return Boolean(process.env.VITEST_CODEX_AUTH_JSON)
-}
+// function hasRequiredEnvValues() {
+//   return Boolean(process.env.VITEST_CODEX_AUTH_JSON)
+// }
 
 function buildLlm(overrides: Partial<Llm> = {}): Llm {
   return {
@@ -39,7 +39,7 @@ function buildLlm(overrides: Partial<Llm> = {}): Llm {
 }
 
 describe('CallableCodex', () => {
-  const invalidEnvironment = !hasRequiredEnvValues()
+  // const invalidEnvironment = !hasRequiredEnvValues()
 
   beforeEach<Context>((context) => {
     context.debugMock = vi.spyOn(console, 'debug').mockImplementation(() => {})
