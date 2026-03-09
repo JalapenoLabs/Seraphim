@@ -9,6 +9,7 @@ import { parseRequestBody, parseRequestParams } from '../../validation'
 import { broadcastSseChange } from '@electron/api/sse/sseEvents'
 import { requireDatabaseClient } from '@electron/database'
 import { getCallableLLM } from '@common/llms/call'
+import { llmIdSchema } from '@electron/validators'
 
 // Lib
 import { z } from 'zod'
@@ -20,7 +21,7 @@ import { upsertLlmSchema } from '@common/schema/llm'
 import { sanitizeLlm, setNewDefaultLlm } from './utils'
 
 const upsertLlmParamsSchema = z.object({
-  llmId: z.string().trim().min(1).optional(),
+  llmId: llmIdSchema.optional(),
 })
 
 type UpsertLlmRouteParams = z.infer<typeof upsertLlmParamsSchema>

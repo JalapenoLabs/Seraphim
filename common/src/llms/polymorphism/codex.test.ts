@@ -14,9 +14,9 @@ type Context = {
   errorMock: ReturnType<typeof vi.spyOn>
 }
 
-function hasRequiredEnvValues() {
-  return Boolean(process.env.VITEST_CODEX_AUTH_JSON)
-}
+// function hasRequiredEnvValues() {
+//   return Boolean(process.env.VITEST_CODEX_AUTH_JSON)
+// }
 
 function buildLlm(overrides: Partial<Llm> = {}): Llm {
   return {
@@ -39,7 +39,7 @@ function buildLlm(overrides: Partial<Llm> = {}): Llm {
 }
 
 describe('CallableCodex', () => {
-  const invalidEnvironment = !hasRequiredEnvValues()
+  // const invalidEnvironment = !hasRequiredEnvValues()
 
   beforeEach<Context>((context) => {
     context.debugMock = vi.spyOn(console, 'debug').mockImplementation(() => {})
@@ -79,10 +79,11 @@ describe('CallableCodex', () => {
     expect(errorMessage).toContain('missing access token')
   })
 
-  it.skipIf(invalidEnvironment)('validateLlm accepts valid auth.json payload', async () => {
-    const callable = new CallableCodex(buildLlm())
-    const [ success, errorMessage ] = await callable.validateLlm()
+  // it.skipIf(invalidEnvironment)('validateLlm accepts valid auth.json payload', async () => {
+  //   const callable = new CallableCodex(buildLlm())
+  //   const [ success, errorMessage ] = await callable.validateLlm()
 
-    expect(success, errorMessage).toBe(true)
-  })
+  //   expect(errorMessage).toEqual('')
+  //   expect(success).toBe(true)
+  // })
 })

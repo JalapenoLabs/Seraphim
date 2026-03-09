@@ -146,16 +146,16 @@ export class CallableCodex extends BaseCallableLLM {
       normalizedPrompt += (prompt?.trim() || '')
 
       if (!normalizedPrompt) {
-        console.debug('Codex query was empty after normalization')
+        console.log('Codex query was empty after normalization')
         return ''
       }
 
-      console.debug('Sending query to Codex', { prompt: normalizedPrompt, systemPrompt })
+      console.log('Sending query to Codex', { prompt: normalizedPrompt, systemPrompt })
 
       const thread = client.startThread()
       const result = await thread.run(normalizedPrompt)
 
-      console.debug('Codex response', { response: result.finalResponse })
+      console.log('Codex response', { response: result.finalResponse })
 
       return result.finalResponse
     }
@@ -296,13 +296,14 @@ export class CallableCodex extends BaseCallableLLM {
         return [ false, 'Invalid api key provided (missing access token)' ]
       }
 
-      const response = await this.query('What is 2 + 2?')
+      const response = await this.query('Please reply with hello world.')
 
       if (response?.length && typeof response === 'string') {
         return [ true, '' ]
       }
 
-      console.debug('Codex validation failed, unexpected response', { response })
+      console.warn('Codex validation failed, unexpected response', { response })
+      return [ false, 'Codex did not return a valid response' ]
     }
     catch (error) {
       console.error('Error during Codex validation', error)
