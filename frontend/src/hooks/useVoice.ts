@@ -10,15 +10,7 @@ import { FrontendVoiceSession } from './lib/voiceSession'
 import { getVoiceSocketUrl } from '@frontend/routes/voiceRoutes'
 import { doToast } from '@frontend/framework/toast'
 
-type UseVoiceResult = {
-  isDisabled: boolean
-  isActive: boolean
-  words: string
-  start: () => Promise<void>
-  stop: () => void
-}
-
-export function useVoice(): UseVoiceResult {
+export function useVoice() {
   const settings = useSelector((state) => state.settings.current)
 
   const [ isActive, setIsActive ] = useState(false)
@@ -57,15 +49,7 @@ export function useVoice(): UseVoiceResult {
     const voiceSession = new FrontendVoiceSession({
       websocketUrl: getVoiceSocketUrl(),
       onActiveChange: setIsActive,
-      onWords: (nextWords) => {
-        setWords((previousWords) => {
-          if (!previousWords.trim().length) {
-            return nextWords
-          }
-
-          return `${previousWords} ${nextWords}`.trim()
-        })
-      },
+      onWords: setWords,
       onError: (errorMessage) => {
         doToast({
           title: 'Voice transcription error',
@@ -78,6 +62,10 @@ export function useVoice(): UseVoiceResult {
     sessionRef.current = voiceSession
 
     try {
+      console.log('Starting voice session with settings', {
+        voiceProvider: settings.voiceProvider,
+        voiceLlmId: settings.voiceLlmId,
+      })
       await voiceSession.start()
     }
     catch (error) {
@@ -106,6 +94,7 @@ export function useVoice(): UseVoiceResult {
   }, [ stop ])
 
   return {
+    isTurnedOff: settings?.voiceProvider === VoiceProvider.NONE,
     isDisabled,
     isActive,
     words,

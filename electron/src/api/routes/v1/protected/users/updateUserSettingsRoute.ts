@@ -176,11 +176,63 @@ export async function handleUpdateUserSettingsRequest(
         doneSoundAudioFileId = newAudioFile.id
       }
 
-      const settingsUpdateData: Record<string, unknown> = {
-        ...normalizedSettingsUpdates,
+      const {
+        voiceLlmId: nextVoiceLlmId,
+        doneSoundAudioFileId: nextDoneSoundAudioFileId,
+        ...baseSettingsUpdateData
+      } = normalizedSettingsUpdates as Record<string, unknown> & {
+        voiceLlmId?: string | null
+        doneSoundAudioFileId?: string | null
       }
-      if (doneSoundAudioFileId !== undefined) {
-        settingsUpdateData.doneSoundAudioFileId = doneSoundAudioFileId
+
+      const settingsUpdateData: Record<string, unknown> = {
+        ...baseSettingsUpdateData,
+      }
+      const settingsCreateData: Record<string, unknown> = {
+        ...baseSettingsUpdateData,
+      }
+
+      if (nextVoiceLlmId === null) {
+        settingsUpdateData.voiceLlm = {
+          disconnect: true,
+        }
+      }
+      else if (typeof nextVoiceLlmId === 'string' && nextVoiceLlmId.trim().length) {
+        settingsUpdateData.voiceLlm = {
+          connect: {
+            id: nextVoiceLlmId,
+          },
+        }
+        settingsCreateData.voiceLlm = {
+          connect: {
+            id: nextVoiceLlmId,
+          },
+        }
+      }
+
+      const resolvedDoneSoundAudioFileId = doneSoundAudioFileId !== undefined
+        ? doneSoundAudioFileId
+        : nextDoneSoundAudioFileId
+
+      if (resolvedDoneSoundAudioFileId === null) {
+        settingsUpdateData.doneSoundAudioFile = {
+          disconnect: true,
+        }
+      }
+      else if (
+        typeof resolvedDoneSoundAudioFileId === 'string'
+        && resolvedDoneSoundAudioFileId.trim().length
+      ) {
+        settingsUpdateData.doneSoundAudioFile = {
+          connect: {
+            id: resolvedDoneSoundAudioFileId,
+          },
+        }
+        settingsCreateData.doneSoundAudioFile = {
+          connect: {
+            id: resolvedDoneSoundAudioFileId,
+          },
+        }
       }
 
       return transactionClient.userSettings.upsert({
@@ -192,7 +244,7 @@ export async function handleUpdateUserSettingsRequest(
               id: user.id,
             },
           },
-          ...settingsUpdateData,
+          ...settingsCreateData,
         },
       })
     }) as UserSettings

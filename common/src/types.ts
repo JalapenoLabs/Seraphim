@@ -29,7 +29,7 @@ export type ThemePreference = Theme | 'system'
 export type UserLanguage = 'auto' | 'en-US'
 export type LogLevel = 'info' | 'log' | 'warn' | 'error' | 'debug' | 'verbose' | 'silly'
 export type SystemStatus = 'operational' | 'degraded' | 'failure' | 'offline'
-export type Color = 'default' | 'primary' | 'secondary' | 'success' | 'danger' | 'warning' | 'info'
+export type Color = 'default' | 'primary' | 'secondary' | 'success' | 'danger' | 'warning'
 export type UnsubscribeFunction = () => any
 export type StandardFilePointer = string | string[]
 

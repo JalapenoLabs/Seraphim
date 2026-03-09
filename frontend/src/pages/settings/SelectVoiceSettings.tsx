@@ -25,7 +25,7 @@ export function SelectVoiceSettings(props: Props) {
     ? 'Create an OpenAI API Key LLM account to enable OpenAI voice transcription.'
     : props.llmIdError
 
-  return <div className='compact flex flex-col gap-3'>
+  return <div className='compact flex gap-3'>
     <VoiceProviderInput
       className='w-full'
       value={props.selectedVoiceType}

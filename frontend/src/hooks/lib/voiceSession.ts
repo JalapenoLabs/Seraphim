@@ -110,7 +110,7 @@ export class FrontendVoiceSession {
 
   public stop(): void {
     if (this.mediaRecorder?.state !== 'inactive') {
-      this.mediaRecorder.stop()
+      this.mediaRecorder?.stop()
     }
 
     if (this.mediaStream) {

@@ -22,17 +22,10 @@ type Props = {
 
 const voiceProviderLabels = {
   NONE: 'None (disabled)',
-  NATIVE_CHROMIUM: 'Chrome voice to text',
-  LOCAL_VOSK: 'Local Vosk server',
-  OPENAI_API_KEY: 'OpenAI voice to text',
+  NATIVE_CHROMIUM: 'Chrome voice to text (Basic accuracy, no setup required)',
+  LOCAL_VOSK: 'Local Vosk server (Low accuracy)',
+  OPENAI_API_KEY: 'OpenAI voice to text (Best accuracy, requires OpenAI API key)',
 } as const satisfies Record<VoiceProvider, string>
-
-const voiceProviderTooltips = {
-  NONE: 'None (disabled)',
-  NATIVE_CHROMIUM: 'Basic accuracy, no setup required',
-  LOCAL_VOSK: 'Low accuracy',
-  OPENAI_API_KEY: 'Best accuracy, requires OpenAI API key',
-}
 
 const VoiceProviderSet = new Set(USER_VOICE_PROVIDER_OPTIONS)
 
@@ -76,9 +69,9 @@ export function VoiceProviderInput(voiceProviderInputProps: Props) {
   }}
   >{
       USER_VOICE_PROVIDER_OPTIONS.map((voiceProvider) => (
-        <SelectItem key={voiceProvider} title={voiceProviderTooltips[voiceProvider]}>
-          {voiceProviderLabels[voiceProvider]}
-        </SelectItem>
+        <SelectItem key={voiceProvider}>{
+          voiceProviderLabels[voiceProvider]
+        }</SelectItem>
       ))
     }</Select>
 }

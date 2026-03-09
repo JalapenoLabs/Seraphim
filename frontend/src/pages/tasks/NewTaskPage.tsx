@@ -1,11 +1,13 @@
 // Copyright © 2026 Jalapeno Labs
 
 import type { TaskCreateRequest } from '@common/schema/task'
+import type { MonacoContext } from '@frontend/framework/monaco'
 
 // Core
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useForm } from 'react-hook-form'
 import { useNavigate } from 'react-router'
+import { useVoice } from '@frontend/hooks/useVoice'
 import { getViewTaskUrl } from '@common/urls'
 
 // Api
@@ -25,6 +27,7 @@ import { SearchIssueLinks } from '@frontend/elements/SearchIssueLinks'
 // Utility
 import { zodResolver } from '@hookform/resolvers/zod'
 import { taskCreateSchema } from '@common/schema/task'
+import { VoiceButton } from '@frontend/elements/VoiceButton'
 
 const resolvedForm = zodResolver(taskCreateSchema)
 const formMode = {
@@ -37,6 +40,9 @@ const localStorageKey = 'new-task-default-prompt'
 
 export function NewTaskPage() {
   const navigate = useNavigate()
+
+  const voice = useVoice()
+  const monaco = useRef<MonacoContext | null>(null)
 
   const form = useForm<TaskCreateRequest>({
     resolver: resolvedForm,
@@ -52,6 +58,53 @@ export function NewTaskPage() {
     },
     mode: 'all',
   })
+
+  useEffect(() => {
+    if (!voice.isActive || !voice.words) {
+      return
+    }
+
+    if (!monaco.current) {
+      console.warn('Monaco editor is not ready yet, cannot set voice transcription words')
+      return
+    }
+
+    const editor = monaco.current.editor
+    const model = editor.getModel()
+    if (!model) {
+      console.warn('Monaco editor model is not ready yet, cannot set voice transcription words')
+      return
+    }
+
+    const selection = editor.getSelection()
+    if (!selection) {
+      console.warn('Monaco editor selection is not ready yet, cannot set voice transcription words')
+      return
+    }
+
+    const isCursorOnly = selection.isEmpty()
+
+    let prefix = ''
+    if (isCursorOnly) {
+      const pos = selection.getStartPosition()
+      const line = model.getLineContent(pos.lineNumber)
+      const charBefore = pos.column > 1 ? line[pos.column - 2] : ''
+
+      if (charBefore && !/\s/.test(charBefore)) {
+        prefix = ' '
+      }
+    }
+
+    editor.executeEdits('voice-transcription', [
+      {
+        range: selection,
+        text: `${prefix}${voice.words}`,
+        forceMoveMarkers: true,
+      },
+    ])
+
+    editor.focus()
+  }, [ voice.words, voice.isActive ])
 
   useEffect(() => {
     form.trigger()
@@ -107,6 +160,7 @@ export function NewTaskPage() {
         fileLanguage='markdown'
         value={form.watch('message')}
         onChange={(value) => form.setValue('message', value, formMode)}
+        getMonaco={(context) => monaco.current = context}
       />
     </article>
     <article className='flex flex-col items-stretch min-w-lg max-w-lg w-full h-full'>
@@ -159,6 +213,15 @@ export function NewTaskPage() {
       <div className='flex-1' />
 
       <div>
+        <VoiceButton
+          size='lg'
+          voice={voice}
+          className='compact w-full'
+        >
+          <span>
+            <strong>Voice to text</strong>
+          </span>
+        </VoiceButton>
         <Tooltip
           content={
             // @ts-ignore

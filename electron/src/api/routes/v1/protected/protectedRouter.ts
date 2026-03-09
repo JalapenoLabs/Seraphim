@@ -15,8 +15,11 @@ import { createUsersRouter } from './usersRouter'
 import { createWorkspacesRouter } from './workspacesRouter'
 import { createVoiceRouter } from './voiceRouter'
 
-export function createProtectedRouter(): Router {
+type ApplyWebSocketToRouter = (router: Router) => void
+
+export function createProtectedRouter(applyWebSocketToRouter: ApplyWebSocketToRouter): Router {
   const protectedRouter = createRouter()
+  applyWebSocketToRouter(protectedRouter)
 
   protectedRouter.use('/git-accounts', createGitAccountsRouter())
   protectedRouter.use('/issue-tracking', createIssueTrackingRouter())
@@ -25,8 +28,7 @@ export function createProtectedRouter(): Router {
   protectedRouter.use('/workspaces', createWorkspacesRouter())
   protectedRouter.use('/tasks', createTasksRouter())
   protectedRouter.use('/users', createUsersRouter())
-  protectedRouter.use('/voice', createVoiceRouter())
+  protectedRouter.use('/voice', createVoiceRouter(applyWebSocketToRouter))
 
   return protectedRouter
 }
-

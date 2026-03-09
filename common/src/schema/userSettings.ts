@@ -31,7 +31,6 @@ const userSettingsBaseSchema = z
     customAgentInstructions: z.string().optional().default(''),
     customAgentsFile: z.string().nullable().optional(),
   })
-  .strict()
 
 function validateOpenAiVoiceSelection(
   settings: { voiceProvider?: VoiceProvider, voiceLlmId?: string | null },
@@ -76,4 +75,3 @@ export const userSettingsUpdateSchema = userSettingsUpdateFieldsSchema
   )
 
 export type UserSettingsUpdateRequest = z.infer<typeof userSettingsUpdateSchema>
-
