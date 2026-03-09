@@ -1,6 +1,6 @@
 // Copyright © 2026 Jalapeno Labs
 
-import type { WebsocketRequestHandler } from 'express-ws'
+import type { WebSocket } from 'ws'
 
 // Utility
 import { requireDatabaseClient } from '@electron/database'
@@ -8,7 +8,9 @@ import { getVoiceProvider } from '@common/voice/call'
 import { voiceClientMessageSchema } from '@common/voice/protocol'
 import { LlmType, VoiceProvider } from '@prisma/client'
 
-export const handleVoiceStreamRequest: WebsocketRequestHandler = async (websocket) => {
+export const VoiceStreamWebSocketPath = '/api/v1/protected/voice/stream' as const
+
+export async function handleVoiceStreamSocket(websocket: WebSocket): Promise<void> {
   const databaseClient = requireDatabaseClient('Voice stream route')
 
   const user = await databaseClient.user.findFirst({
@@ -72,16 +74,20 @@ export const handleVoiceStreamRequest: WebsocketRequestHandler = async (websocke
   let queue = Promise.resolve()
 
   websocket.on('message', (payload) => {
-    const payloadAsString
-      = typeof payload === 'string'
-        ? payload
-        : Buffer.isBuffer(payload)
-          ? payload.toString('utf8')
-          : Array.isArray(payload)
-            ? Buffer.concat(payload).toString('utf8')
-            : payload instanceof ArrayBuffer
-              ? Buffer.from(payload).toString('utf8')
-              : null
+    let payloadAsString: string | null = null
+
+    if (typeof payload === 'string') {
+      payloadAsString = payload
+    }
+    else if (Buffer.isBuffer(payload)) {
+      payloadAsString = payload.toString('utf8')
+    }
+    else if (Array.isArray(payload)) {
+      payloadAsString = Buffer.concat(payload).toString('utf8')
+    }
+    else if (payload instanceof ArrayBuffer) {
+      payloadAsString = Buffer.from(payload).toString('utf8')
+    }
 
     if (!payloadAsString) {
       websocket.send(JSON.stringify({

@@ -43,6 +43,11 @@ export function NewTaskPage() {
 
   const voice = useVoice()
   const monaco = useRef<MonacoContext | null>(null)
+  const lockedVoiceRangeRef = useRef<{
+    startOffset: number,
+    currentLength: number,
+    prefix: string,
+  } | null>(null)
 
   const form = useForm<TaskCreateRequest>({
     resolver: resolvedForm,
@@ -76,35 +81,76 @@ export function NewTaskPage() {
       return
     }
 
-    const selection = editor.getSelection()
-    if (!selection) {
-      console.warn('Monaco editor selection is not ready yet, cannot set voice transcription words')
-      return
-    }
+    if (!lockedVoiceRangeRef.current) {
+      const selection = editor.getSelection()
+      if (!selection) {
+        console.warn('Monaco editor selection is not ready yet, cannot set voice transcription words')
+        return
+      }
 
-    const isCursorOnly = selection.isEmpty()
+      const isCursorOnly = selection.isEmpty()
+      let prefix = ''
+      if (isCursorOnly) {
+        const position = selection.getStartPosition()
+        const line = model.getLineContent(position.lineNumber)
+        const charBefore = position.column > 1 ? line[position.column - 2] : ''
+        if (charBefore && !/\s/.test(charBefore)) {
+          prefix = ' '
+        }
+      }
 
-    let prefix = ''
-    if (isCursorOnly) {
-      const pos = selection.getStartPosition()
-      const line = model.getLineContent(pos.lineNumber)
-      const charBefore = pos.column > 1 ? line[pos.column - 2] : ''
-
-      if (charBefore && !/\s/.test(charBefore)) {
-        prefix = ' '
+      lockedVoiceRangeRef.current = {
+        startOffset: model.getOffsetAt(selection.getStartPosition()),
+        currentLength: model.getOffsetAt(selection.getEndPosition()) - model.getOffsetAt(selection.getStartPosition()),
+        prefix,
       }
     }
 
+    const lockedVoiceRange = lockedVoiceRangeRef.current
+    if (!lockedVoiceRange) {
+      console.warn('Voice range is not available while voice transcription is active')
+      return
+    }
+
+    const textToApply = lockedVoiceRange.prefix + voice.words
+    const startPosition = model.getPositionAt(lockedVoiceRange.startOffset)
+    const endPosition = model.getPositionAt(lockedVoiceRange.startOffset + lockedVoiceRange.currentLength)
+
     editor.executeEdits('voice-transcription', [
       {
-        range: selection,
-        text: `${prefix}${voice.words}`,
+        range: new monaco.current.monaco.Range(
+          startPosition.lineNumber,
+          startPosition.column,
+          endPosition.lineNumber,
+          endPosition.column,
+        ),
+        text: textToApply,
         forceMoveMarkers: true,
       },
     ])
 
+    lockedVoiceRange.currentLength = textToApply.length
+
+    const nextPosition = model.getPositionAt(lockedVoiceRange.startOffset + lockedVoiceRange.currentLength)
+    editor.setSelection(
+      new monaco.current.monaco.Selection(
+        nextPosition.lineNumber,
+        nextPosition.column,
+        nextPosition.lineNumber,
+        nextPosition.column,
+      ),
+    )
+
     editor.focus()
   }, [ voice.words, voice.isActive ])
+
+  useEffect(() => {
+    if (voice.isActive) {
+      return
+    }
+
+    lockedVoiceRangeRef.current = null
+  }, [ voice.isActive ])
 
   useEffect(() => {
     form.trigger()

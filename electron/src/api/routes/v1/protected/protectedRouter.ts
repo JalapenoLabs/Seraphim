@@ -13,13 +13,9 @@ import { createDockerRouter } from './docker/dockerRouter'
 import { createTasksRouter } from './tasksRouter'
 import { createUsersRouter } from './usersRouter'
 import { createWorkspacesRouter } from './workspacesRouter'
-import { createVoiceRouter } from './voiceRouter'
 
-type ApplyWebSocketToRouter = (router: Router) => void
-
-export function createProtectedRouter(applyWebSocketToRouter: ApplyWebSocketToRouter): Router {
+export function createProtectedRouter(): Router {
   const protectedRouter = createRouter()
-  applyWebSocketToRouter(protectedRouter)
 
   protectedRouter.use('/git-accounts', createGitAccountsRouter())
   protectedRouter.use('/issue-tracking', createIssueTrackingRouter())
@@ -28,7 +24,6 @@ export function createProtectedRouter(applyWebSocketToRouter: ApplyWebSocketToRo
   protectedRouter.use('/workspaces', createWorkspacesRouter())
   protectedRouter.use('/tasks', createTasksRouter())
   protectedRouter.use('/users', createUsersRouter())
-  protectedRouter.use('/voice', createVoiceRouter(applyWebSocketToRouter))
 
   return protectedRouter
 }

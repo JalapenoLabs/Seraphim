@@ -1,6 +1,6 @@
 // Copyright © 2026 Jalapeno Labs
 
-import type { Application, Router } from 'express'
+import type { Application } from 'express'
 
 // Core
 import express from 'express'
@@ -10,7 +10,6 @@ import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import hpp from 'hpp'
-import expressWs from 'express-ws'
 
 // Utility
 import { createCorsOptions } from './cors'
@@ -25,14 +24,6 @@ import { API_BASE_PATH } from '../constants'
 
 export function createApiApp(): Application {
   const apiApplication = express()
-
-  const expressWebSocket = expressWs(apiApplication, undefined, {
-    leaveRouterUntouched: true,
-  })
-
-  function applyWebSocketToRouter(router: Router) {
-    expressWebSocket.applyTo(router)
-  }
 
   apiApplication.disable('x-powered-by')
   apiApplication.set('trust proxy', 1)
@@ -51,7 +42,7 @@ export function createApiApp(): Application {
   apiApplication.use(express.urlencoded({ extended: true, limit: '10mb' }))
 
   const publicRouter = createPublicRouter()
-  const protectedRouter = createProtectedRouter(applyWebSocketToRouter)
+  const protectedRouter = createProtectedRouter()
   apiApplication.use(publicRouter)
   apiApplication.use(
     `${API_BASE_PATH}/protected`,

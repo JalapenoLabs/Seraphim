@@ -5,12 +5,19 @@ import type { Server } from 'node:http'
 // Core
 import { createServer } from 'node:http'
 
+// Lib
+import { WebSocketServer } from 'ws'
+
+// Utility
+import { handleVoiceStreamSocket, VoiceStreamWebSocketPath } from './routes/v1/protected/voice/stream'
+
 // Misc
 import { API_PORT } from '@common/constants'
 import { logFailed, logSuccess, logWarning } from '../lib/logging'
 import { createApiApp } from './express'
 
 let apiServer: Server | null = null
+let voiceWebSocketServer: WebSocketServer | null = null
 
 export async function startApi(): Promise<Server | null> {
   if (apiServer) {
@@ -20,7 +27,33 @@ export async function startApi(): Promise<Server | null> {
 
   const apiApplication = createApiApp()
   const apiServerInstance = createServer(apiApplication)
+
+  const websocketServer = new WebSocketServer({
+    noServer: true,
+    maxPayload: 10 * 1024 * 1024,
+  })
+
+  websocketServer.on('connection', (websocket) => {
+    void handleVoiceStreamSocket(websocket)
+  })
+
+  apiServerInstance.on('upgrade', (request, socket, head) => {
+    const requestHost = request.headers.host || 'localhost'
+    const requestUrl = request.url || '/'
+    const parsedUrl = new URL(requestUrl, `http://${requestHost}`)
+
+    if (parsedUrl.pathname !== VoiceStreamWebSocketPath) {
+      socket.destroy()
+      return
+    }
+
+    websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+      websocketServer.emit('connection', websocket, request)
+    })
+  })
+
   apiServer = apiServerInstance
+  voiceWebSocketServer = websocketServer
 
   await new Promise<void>(function waitForListen(resolve, reject) {
     function handleListening() {
@@ -50,6 +83,9 @@ export async function stopApi(): Promise<void> {
 
   const serverToClose = apiServer
   apiServer = null
+
+  voiceWebSocketServer?.close()
+  voiceWebSocketServer = null
 
   await new Promise<void>(function waitForClose(resolve, reject) {
     function handleClose(error?: Error) {

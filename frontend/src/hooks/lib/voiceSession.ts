@@ -20,6 +20,7 @@ export class FrontendVoiceSession {
   private websocket: WebSocket | null = null
   private mediaRecorder: MediaRecorder | null = null
   private mediaStream: MediaStream | null = null
+  private recordedChunks: Blob[] = []
 
   constructor(options: Options) {
     this.websocketUrl = options.websocketUrl
@@ -33,6 +34,7 @@ export class FrontendVoiceSession {
       return
     }
 
+    this.recordedChunks = []
     this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
     this.websocket = await this.openSocket()
 
@@ -130,6 +132,7 @@ export class FrontendVoiceSession {
     this.websocket = null
     this.mediaRecorder = null
     this.mediaStream = null
+    this.recordedChunks = []
     this.onActiveChange(false)
   }
 
@@ -166,7 +169,13 @@ export class FrontendVoiceSession {
       return
     }
 
-    const bytes = new Uint8Array(await audioChunk.arrayBuffer())
+    this.recordedChunks.push(audioChunk)
+
+    const cumulativeAudioBlob = new Blob(this.recordedChunks, {
+      type: audioChunk.type || 'audio/webm',
+    })
+    const bytes = new Uint8Array(await cumulativeAudioBlob.arrayBuffer())
+
     let binaryString = ''
     for (const byte of bytes) {
       binaryString += String.fromCharCode(byte)
@@ -174,7 +183,7 @@ export class FrontendVoiceSession {
 
     this.websocket.send(JSON.stringify({
       type: 'audio-chunk',
-      mimeType: audioChunk.type || 'audio/webm',
+      mimeType: cumulativeAudioBlob.type || 'audio/webm',
       dataBase64: btoa(binaryString),
     }))
   }
