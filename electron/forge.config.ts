@@ -26,6 +26,7 @@ const redhatMaker = new MakerRpm({
     name: 'Seraphim',
     description: 'By Jalapeno Labs',
     compressionLevel: 0,
+    requires: [ 'ffmpeg' ],
   },
 })
 const debMaker = new MakerDeb({
@@ -36,6 +37,7 @@ const debMaker = new MakerDeb({
     productName: 'seraphim',
     maintainer: 'Jalapeno Labs',
     description: 'By Jalapeno Labs',
+    depends: [ 'ffmpeg' ],
   },
 })
 

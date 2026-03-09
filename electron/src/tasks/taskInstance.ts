@@ -28,11 +28,16 @@ import { getCloner } from '@common/cloning/getCloner'
 import { EventEmitter } from 'node:events'
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
+import { resolve } from 'node:path'
 
 // Utility
 import { convertEnvironmentToStringArray } from '@common/envKit'
 import { broadcastSseChange } from '@electron/api/sse/sseEvents'
+import { playAudioFor } from '@common/node/playAudioFor'
 import { safeParseJson } from '@common/json'
+
+// Misc
+import { resourcesDir } from '@electron/lib/internalFiles'
 import { CODEX_WORKDIR, SETUP_FAILURE_LINE, SETUP_SUCCESS_LINE } from '@common/constants'
 
 type TaskInstanceOptions = {
@@ -532,6 +537,11 @@ export class TaskInstance extends EventEmitter<EventMap> {
           state: 'AwaitingReview',
         })
       }
+
+      await playAudioFor('DONE_SOUND', {
+        fallbackMediaUrl: resolve(resourcesDir, '/default-done-sound.wav'),
+        prismaClient: prisma,
+      })
       return
     }
 
@@ -1181,6 +1191,10 @@ export class TaskInstance extends EventEmitter<EventMap> {
         })
       }
     }
+
+    await this.updateTask({
+      state: 'AwaitingReview',
+    })
 
     await this.doNextQueue()
   }
