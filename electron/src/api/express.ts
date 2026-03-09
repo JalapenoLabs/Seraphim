@@ -43,7 +43,6 @@ export function createApiApp(): Application {
 
   const publicRouter = createPublicRouter()
   const protectedRouter = createProtectedRouter()
-
   apiApplication.use(publicRouter)
   apiApplication.use(
     `${API_BASE_PATH}/protected`,

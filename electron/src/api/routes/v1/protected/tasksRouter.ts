@@ -15,6 +15,7 @@ import { handleRefreshTaskGitRequest } from './tasks/postRefreshTaskGitRoute'
 import { handleTaskPullRequestRequest } from './tasks/postTaskPullRequestRoute'
 import { handleViewTaskRepositoryRequest } from './tasks/postViewTaskRepositoryRoute'
 import { handleStreamTaskLogsRequest } from './tasks/streamTaskLogsRoute'
+import { handleStreamTaskMessagesRequest } from './tasks/streamTaskMessagesRoute'
 import { handleUpdateTaskRequest } from './tasks/updateTaskRoute'
 
 export function createTasksRouter(): Router {
@@ -24,6 +25,8 @@ export function createTasksRouter(): Router {
   tasksRouter.get('/', handleListTasksRequest)
   // /api/v1/protected/tasks/:taskId/logs/stream
   tasksRouter.get('/:taskId/logs/stream', handleStreamTaskLogsRequest)
+  // /api/v1/protected/tasks/:taskId/messages/stream
+  tasksRouter.get('/:taskId/messages/stream', handleStreamTaskMessagesRequest)
   // /api/v1/protected/tasks/:taskId
   tasksRouter.get('/:taskId', handleGetTaskRequest)
   // /api/v1/protected/tasks

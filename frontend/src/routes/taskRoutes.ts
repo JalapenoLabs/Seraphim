@@ -4,7 +4,7 @@ import type { Message, Task } from '@common/types'
 import type { TaskCreateRequest, TaskUpdateRequest } from '@common/schema/task'
 
 // Core
-import { parseRequestBeforeSend } from '@common/api'
+import { ApiRoot, parseRequestBeforeSend } from '@common/api'
 import { frontendClient } from '@frontend/framework/api'
 
 // Redux
@@ -46,6 +46,10 @@ export function getTask(taskId: string) {
   return frontendClient
     .get(`v1/protected/tasks/${taskId}`)
     .json<GetTaskResponse>()
+}
+
+export function getTaskMessagesSseUrl(taskId: string) {
+  return `${ApiRoot}/api/v1/protected/tasks/${taskId}/messages/stream`
 }
 
 // /////////////////////////////// //
