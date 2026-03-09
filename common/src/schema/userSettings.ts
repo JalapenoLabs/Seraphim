@@ -8,7 +8,6 @@ import { VoiceProvider } from '@prisma/client'
 
 // Misc
 import {
-  DONE_SOUND_MIME_TYPES,
   USER_LANGUAGE_OPTIONS,
   USER_THEME_OPTIONS,
   USER_VOICE_PROVIDER_OPTIONS,
@@ -24,10 +23,10 @@ const userSettingsBaseSchema = z
     theme: userThemeSchema,
     codeEditor: z.string().trim().optional(),
     voiceEnabled: z.boolean(),
+    playDoneSound: z.boolean(),
     voiceHotkey: z.string().trim().min(1),
     voiceProvider: userVoiceProviderSchema,
     voiceLlmId: z.string().uuid().nullable().optional(),
-    doneSoundAudioFileId: z.string().uuid().nullable().optional(),
     customAgentInstructions: z.string().optional().default(''),
     customAgentsFile: z.string().nullable().optional(),
   })
@@ -52,21 +51,9 @@ export const userSettingsSchema = userSettingsBaseSchema
   .superRefine(validateOpenAiVoiceSelection)
 export type UserSettingsRequest = z.infer<typeof userSettingsSchema>
 
-const doneSoundFileSchema = z
-  .object({
-    name: z.string().trim().min(1),
-    mimeType: z.enum(DONE_SOUND_MIME_TYPES),
-    sizeBytes: z.number().int().positive(),
-    dataBase64: z.string().trim().min(1),
-  })
-  .strict()
-
 export const userSettingsUpdateFieldsSchema = userSettingsBaseSchema.partial()
 
 export const userSettingsUpdateSchema = userSettingsUpdateFieldsSchema
-  .extend({
-    doneSoundFile: doneSoundFileSchema.nullable().optional(),
-  })
   .strict()
   .superRefine(validateOpenAiVoiceSelection)
   .refine(

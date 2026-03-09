@@ -3,6 +3,7 @@
 import type { UserSettings } from '@common/types'
 
 // Core
+import { AudioFor } from '@prisma/client'
 import { useEffect } from 'react'
 import { useSelector } from '@frontend/framework/store'
 import { useWatchUnsavedWork } from '@frontend/hooks/useWatchUnsavedWork'
@@ -20,6 +21,7 @@ import { LanguageInput } from '@frontend/elements/LanguageInput'
 import { DisplayErrors } from '@frontend/elements/buttons/DisplayErrors'
 import { SaveButton } from '@frontend/elements/buttons/SaveButton'
 import { ResetButton } from '@frontend/elements/buttons/ResetButton'
+import { AudioFileUploadButton } from '@frontend/elements/buttons/AudioFileUploadButton'
 import { SelectVoiceSettings } from './SelectVoiceSettings'
 
 const resolvedForm = zodResolver(userSettingsUpdateFieldsSchema)
@@ -111,6 +113,12 @@ export function GeneralSettingsPage() {
             shouldValidate: true,
           })
         }}
+      />
+    </Card>
+    <Card className='relaxed'>
+      <AudioFileUploadButton
+        audioFor={AudioFor.DONE_SOUND}
+        label='Done Sound'
       />
     </Card>
   </article>

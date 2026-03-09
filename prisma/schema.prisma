@@ -296,8 +296,7 @@ model UserSettings {
   userId String @unique @map("user_id")
   user   User   @relation(fields: [userId], references: [id])
 
-  doneSoundAudioFileId String?    @unique @map("done_sound_audio_file_id")
-  doneSoundAudioFile   AudioFile? @relation("DoneSoundAudioFile", fields: [doneSoundAudioFileId], references: [id])
+  playDoneSound Boolean @default(true) @map("play_done_sound")
 
   voiceEnabled Boolean @default(true)
   voiceHotkey  String  @default("Control+Num0")
@@ -334,9 +333,6 @@ model AudioFile {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  doneSoundSetting UserSettings? @relation("DoneSoundAudioFile")
-
   @@unique([userId, audioFor])
   @@map("audio_files")
 }
-

@@ -17,6 +17,7 @@ export const USER_THEME_OPTIONS = [ 'system', 'dark', 'light' ] as const
 export const DEFAULT_USER_LANGUAGE = 'auto' as const
 export const DEFAULT_USER_THEME = 'system' as const
 export const DEFAULT_VOICE_ENABLED = true as const
+export const DEFAULT_PLAY_DONE_SOUND = true as const
 export const DEFAULT_VOICE_HOTKEY = 'Control+Num0' as const
 export const USER_VOICE_PROVIDER_OPTIONS = [ 'NONE', 'NATIVE_CHROMIUM', 'LOCAL_VOSK', 'OPENAI_API_KEY' ] as const
 export const DEFAULT_VOICE_PROVIDER = 'NONE' as const
@@ -150,4 +151,3 @@ export const CODEX_WORKDIR = '/opt/.codex' as const
 
 export const SETUP_SUCCESS_LINE = '======== SETUP SUCCESS ========' as const
 export const SETUP_FAILURE_LINE = '======== SETUP FAILED  ========' as const
-
