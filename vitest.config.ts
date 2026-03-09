@@ -35,6 +35,7 @@ export default defineConfig({
       'junit': `.test/${TEST_RUNNING_DIR}-results.xml`,
     },
     passWithNoTests: true,
+    silent: false,
     // Coverage (V8)
     coverage: {
       reporter: [

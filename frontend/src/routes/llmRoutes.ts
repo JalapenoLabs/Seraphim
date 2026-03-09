@@ -35,6 +35,27 @@ export async function listLlms() {
   return response
 }
 
+
+// /////////////////////////////// //
+//            Get LLM             //
+// /////////////////////////////// //
+
+type GetLlmResponse = {
+  llm: LlmWithRateLimits
+}
+
+export async function getLlm(llmId: string) {
+  const response = await frontendClient
+    .get(`v1/protected/llms/${llmId}`)
+    .json<GetLlmResponse>()
+
+  dispatch(
+    llmActions.upsertLlm(response.llm),
+  )
+
+  return response
+}
+
 // /////////////////////////////// //
 //           Upsert LLM            //
 // /////////////////////////////// //

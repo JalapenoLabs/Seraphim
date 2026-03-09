@@ -42,6 +42,27 @@ export async function listAccounts(): Promise<ListAccountsResponse> {
   return response
 }
 
+
+// /////////////////////////////// //
+//           Get Account          //
+// /////////////////////////////// //
+
+type GetAccountResponse = {
+  account: GitAccount
+}
+
+export async function getAccount(accountId: string): Promise<GetAccountResponse> {
+  const response = await frontendClient
+    .get(`v1/protected/git-accounts/${accountId}`)
+    .json<GetAccountResponse>()
+
+  dispatch(
+    accountActions.upsertAccount(response.account),
+  )
+
+  return response
+}
+
 // /////////////////////////////// //
 //        List Account Repos       //
 // /////////////////////////////// //
