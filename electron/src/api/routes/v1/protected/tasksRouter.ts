@@ -16,7 +16,6 @@ import { handleInterruptTaskRequest } from './tasks/interruptTaskRoute'
 import { handleTaskNewMessageRequest } from './tasks/taskNewMessageRoute'
 import { handleTaskPullRequestRequest } from './tasks/taskPullRequestRoute'
 import { handleViewTaskRepositoryRequest } from './tasks/viewTaskRepositoryRoute'
-import { handleStreamTaskLogsRequest } from './tasks/streamTaskLogsRoute'
 import { handleStreamTaskMessagesRequest } from './tasks/streamTaskMessagesRoute'
 import { handleUpdateTaskRequest } from './tasks/updateTaskRoute'
 
@@ -25,8 +24,6 @@ export function createTasksRouter(): Router {
 
   // /api/v1/protected/tasks
   tasksRouter.get('/', handleListTasksRequest)
-  // /api/v1/protected/tasks/:taskId/logs/stream
-  tasksRouter.get('/:taskId/logs/stream', handleStreamTaskLogsRequest)
   // /api/v1/protected/tasks/:taskId/messages
   tasksRouter.get('/:taskId/messages', handleStreamTaskMessagesRequest)
   // /api/v1/protected/tasks/:taskId
