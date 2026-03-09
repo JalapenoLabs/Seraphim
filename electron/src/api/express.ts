@@ -10,6 +10,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import hpp from 'hpp'
+import expressWs from 'express-ws'
 
 // Utility
 import { createCorsOptions } from './cors'
@@ -24,6 +25,8 @@ import { API_BASE_PATH } from '../constants'
 
 export function createApiApp(): Application {
   const apiApplication = express()
+
+  expressWs(apiApplication)
 
   apiApplication.disable('x-powered-by')
   apiApplication.set('trust proxy', 1)

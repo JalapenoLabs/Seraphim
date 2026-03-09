@@ -1,4 +1,4 @@
-﻿// Copyright © 2026 Jalapeno Labs
+// Copyright © 2026 Jalapeno Labs
 
 import type { LlmType } from '@prisma/client'
 
@@ -18,6 +18,8 @@ export const DEFAULT_USER_LANGUAGE = 'auto' as const
 export const DEFAULT_USER_THEME = 'system' as const
 export const DEFAULT_VOICE_ENABLED = true as const
 export const DEFAULT_VOICE_HOTKEY = 'Control+Num0' as const
+export const USER_VOICE_PROVIDER_OPTIONS = [ 'NONE', 'NATIVE_CHROMIUM', 'LOCAL_VOSK', 'OPENAI_API_KEY' ] as const
+export const DEFAULT_VOICE_PROVIDER = 'NONE' as const
 export const DEFAULT_CUSTOM_AGENT_INSTRUCTIONS = '' as const
 export const DEFAULT_CUSTOM_AGENTS_FILE = '' as const
 export const DONE_SOUND_MIME_TYPES = [
@@ -148,3 +150,4 @@ export const CODEX_WORKDIR = '/opt/.codex' as const
 
 export const SETUP_SUCCESS_LINE = '======== SETUP SUCCESS ========' as const
 export const SETUP_FAILURE_LINE = '======== SETUP FAILED  ========' as const
+

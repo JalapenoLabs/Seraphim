@@ -20,6 +20,7 @@ import { LanguageInput } from '@frontend/elements/LanguageInput'
 import { DisplayErrors } from '@frontend/elements/buttons/DisplayErrors'
 import { SaveButton } from '@frontend/elements/buttons/SaveButton'
 import { ResetButton } from '@frontend/elements/buttons/ResetButton'
+import { SelectVoiceSettings } from './SelectVoiceSettings'
 
 const resolvedForm = zodResolver(userSettingsUpdateFieldsSchema)
 
@@ -87,6 +88,30 @@ export function GeneralSettingsPage() {
           errorMessage={form.formState.errors.language?.message}
         />
       </div>
+    </Card>
+    <Card className='relaxed'>
+      <SelectVoiceSettings
+        selectedVoiceType={form.watch('voiceProvider')}
+        voiceTypeError={form.formState.errors.voiceProvider?.message}
+        onVoiceTypeChange={(voiceProvider) => {
+          form.setValue('voiceProvider', voiceProvider, {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
+
+          if (voiceProvider !== 'OPENAI_API_KEY') {
+            form.setValue('voiceLlmId', null, { shouldDirty: true, shouldValidate: true })
+          }
+        }}
+        selectedLlmId={form.watch('voiceLlmId') || ''}
+        llmIdError={form.formState.errors.voiceLlmId?.message}
+        onLlmIdChange={(llmId) => {
+          form.setValue('voiceLlmId', llmId, {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
+        }}
+      />
     </Card>
   </article>
 }

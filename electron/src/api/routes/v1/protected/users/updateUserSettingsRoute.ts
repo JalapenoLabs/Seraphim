@@ -1,10 +1,10 @@
-﻿// Copyright © 2026 Jalapeno Labs
+// Copyright © 2026 Jalapeno Labs
 
 import type { Request, Response } from 'express'
 import type { UserSettingsUpdateRequest } from '@common/schema/userSettings'
 
 // Lib
-import { AudioFor } from '@prisma/client'
+import { AudioFor, LlmType, VoiceProvider } from '@prisma/client'
 
 // Utility
 import { parseRequestBody } from '../../validation'
@@ -67,6 +67,65 @@ export async function handleUpdateUserSettingsRequest(
       return
     }
 
+    const normalizedSettingsUpdates: Record<string, unknown> = {
+      ...settingsUpdates,
+    }
+
+    const shouldValidateVoiceSettings = (
+      settingsUpdates.voiceProvider !== undefined
+      || settingsUpdates.voiceLlmId !== undefined
+    )
+
+    if (shouldValidateVoiceSettings) {
+      const existingSettings = await databaseClient.userSettings.findUnique({
+        where: { userId: user.id },
+      })
+
+      const nextVoiceProvider = settingsUpdates.voiceProvider
+        ?? existingSettings?.voiceProvider
+        ?? VoiceProvider.NONE
+      let nextVoiceLlmId = settingsUpdates.voiceLlmId !== undefined
+        ? settingsUpdates.voiceLlmId
+        : existingSettings?.voiceLlmId ?? null
+
+      if (nextVoiceProvider !== VoiceProvider.OPENAI_API_KEY) {
+        nextVoiceLlmId = null
+      }
+
+      if (nextVoiceProvider === VoiceProvider.OPENAI_API_KEY) {
+        if (!nextVoiceLlmId) {
+          console.debug('OpenAI voice provider requested without selecting an OpenAI API key LLM account', {
+            settingsUpdates,
+          })
+          response.status(400).json({
+            error: 'An OpenAI API Key LLM account is required for OpenAI voice provider',
+          })
+          return
+        }
+
+        const voiceLlm = await databaseClient.llm.findFirst({
+          where: {
+            id: nextVoiceLlmId,
+            userId: user.id,
+            type: LlmType.OPENAI_API_KEY,
+          },
+        })
+
+        if (!voiceLlm || !voiceLlm.apiKey?.trim()) {
+          console.debug('OpenAI voice provider requested with invalid LLM account', {
+            voiceLlmId: nextVoiceLlmId,
+          })
+          response.status(400).json({
+            error: 'OpenAI voice provider requires an OpenAI API Key LLM account with a valid API key',
+          })
+          return
+        }
+      }
+
+      normalizedSettingsUpdates.voiceProvider = nextVoiceProvider
+      normalizedSettingsUpdates.voiceLlmId = nextVoiceLlmId
+    }
+
     const settings = await databaseClient.$transaction(async (transactionClient) => {
       const existingDoneSound = await transactionClient.audioFile.findFirst({
         where: {
@@ -117,7 +176,9 @@ export async function handleUpdateUserSettingsRequest(
         doneSoundAudioFileId = newAudioFile.id
       }
 
-      const settingsUpdateData: Record<string, unknown> = { ...settingsUpdates }
+      const settingsUpdateData: Record<string, unknown> = {
+        ...normalizedSettingsUpdates,
+      }
       if (doneSoundAudioFileId !== undefined) {
         settingsUpdateData.doneSoundAudioFileId = doneSoundAudioFileId
       }

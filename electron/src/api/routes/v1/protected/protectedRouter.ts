@@ -13,6 +13,7 @@ import { createDockerRouter } from './docker/dockerRouter'
 import { createTasksRouter } from './tasksRouter'
 import { createUsersRouter } from './usersRouter'
 import { createWorkspacesRouter } from './workspacesRouter'
+import { createVoiceRouter } from './voiceRouter'
 
 export function createProtectedRouter(): Router {
   const protectedRouter = createRouter()
@@ -24,6 +25,8 @@ export function createProtectedRouter(): Router {
   protectedRouter.use('/workspaces', createWorkspacesRouter())
   protectedRouter.use('/tasks', createTasksRouter())
   protectedRouter.use('/users', createUsersRouter())
+  protectedRouter.use('/voice', createVoiceRouter())
 
   return protectedRouter
 }
+

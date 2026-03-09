@@ -14,6 +14,13 @@ enum AudioFor {
   DONE_SOUND
 }
 
+enum VoiceProvider {
+  NONE
+  NATIVE_CHROMIUM
+  LOCAL_VOSK
+  OPENAI_API_KEY
+}
+
 enum LlmType {
   OPENAI_API_KEY
   OPENAI_LOGIN_TOKEN
@@ -205,6 +212,7 @@ model Llm {
   updatedAt  DateTime  @updatedAt @map("updated_at")
 
   tasks Task[]
+  voiceSettings UserSettings[]
 
   @@map("llms")
 }
@@ -294,6 +302,10 @@ model UserSettings {
   voiceEnabled Boolean @default(true)
   voiceHotkey  String  @default("Control+Num0")
 
+  voiceProvider VoiceProvider @default(NONE) @map("voice_provider")
+  voiceLlmId    String?       @map("voice_llm_id")
+  voiceLlm      Llm?          @relation(fields: [voiceLlmId], references: [id])
+
   language   String? @default("auto")
   theme      String? @default("system")
   codeEditor String? @default("code") @map("preferred_code_editor")
@@ -327,3 +339,4 @@ model AudioFile {
   @@unique([userId, audioFor])
   @@map("audio_files")
 }
+

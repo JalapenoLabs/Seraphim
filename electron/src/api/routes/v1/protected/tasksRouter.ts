@@ -27,8 +27,8 @@ export function createTasksRouter(): Router {
   tasksRouter.get('/', handleListTasksRequest)
   // /api/v1/protected/tasks/:taskId/logs/stream
   tasksRouter.get('/:taskId/logs/stream', handleStreamTaskLogsRequest)
-  // /api/v1/protected/tasks/:taskId/messages/stream
-  tasksRouter.get('/:taskId/messages/stream', handleStreamTaskMessagesRequest)
+  // /api/v1/protected/tasks/:taskId/messages
+  tasksRouter.get('/:taskId/messages', handleStreamTaskMessagesRequest)
   // /api/v1/protected/tasks/:taskId
   tasksRouter.get('/:taskId', handleGetTaskRequest)
   // /api/v1/protected/tasks
