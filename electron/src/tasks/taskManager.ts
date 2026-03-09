@@ -11,6 +11,12 @@ import { toContainerName } from '@electron/jobs/taskNaming'
 import { teardownTask } from '@electron/jobs/teardownTask'
 import { updateTaskState } from '@electron/jobs/updateTaskState'
 import { getCallableLLM } from '@common/llms/call'
+import {
+  defaultTaskIconName,
+  getValidTaskIconName,
+  taskIconLabelByName,
+  taskIconNames,
+} from '@common/taskIcons'
 
 // Misc
 import { selectTaskWithFullContext } from './select'
@@ -131,7 +137,7 @@ class TaskManager {
       }
     }
 
-    const { taskName, gitWorkBranchName } = await this.requestTaskName(llm, workspace, request.message)
+    const { taskName, gitWorkBranchName, taskIconName } = await this.requestTaskName(llm, workspace, request.message)
 
     if (!taskName || !gitWorkBranchName) {
       return {
@@ -151,6 +157,7 @@ class TaskManager {
         gitAccountId: request.gitAccountId,
         issueTrackingId: request.issueTrackingId,
         name: taskName,
+        icon: taskIconName,
         sourceGitBranch: request.branch,
         workGitBranch: gitWorkBranchName,
         issueLink: request.issueLink?.trim() || null,
@@ -338,10 +345,14 @@ class TaskManager {
       const callableLlm = getCallableLLM(llm)
 
       const shortHash1 = `${Math.floor(Date.now() / 1000).toString(36)}`
+      const iconCatalogPrompt = taskIconNames
+        .map((iconName) => `- ${iconName}: ${taskIconLabelByName[iconName]}`)
+        .join('\n')
 
       const [
         taskName = 'Unnamed task',
         gitWorkBranchName = shortHash1,
+        taskIconNameRaw = defaultTaskIconName,
       ] = await Promise.all([
         callableLlm.query(
           userMessage,
@@ -361,20 +372,30 @@ class TaskManager {
           + ` Never start a git branch name with a dash.`
           + ` Return the formed git branch name only, no punctuation or quotes.`),
         ),
+        callableLlm.query(
+          userMessage,
+          (`Below the user will provide an initial task request.`
+            + ` Your job is to choose the best matching icon name from the allowed react-icons list.`
+            + ` Pick exactly one icon and return only the icon name.`
+            + `\n\nAllowed icons:\n${iconCatalogPrompt}`),
+        ),
       ])
 
-    const shortHash2 = `${Math.floor(Date.now() / 1000).toString(36)}`
+      const shortHash2 = `${Math.floor(Date.now() / 1000).toString(36)}`
+      const taskIconName = getValidTaskIconName(taskIconNameRaw?.trim())
 
       return {
         taskName,
         gitWorkBranchName: `${gitWorkBranchName}--${shortHash2}`,
+        taskIconName,
       } as const
     }
     catch (error) {
-      console.error('Failed to generate task name or git branch name from LLM', error)
+      console.error('Failed to generate task name, git branch name, or icon from LLM', error)
       return {
         taskName: null,
         gitWorkBranchName: null,
+        taskIconName: defaultTaskIconName,
       }
     }
   }

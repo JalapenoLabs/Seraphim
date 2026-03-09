@@ -10,6 +10,7 @@ import { useSelector } from '@frontend/framework/store'
 // UI
 import { Tooltip, Button } from '@heroui/react'
 import { SettingsIcon } from '@frontend/elements/graphics/IconNexus'
+import { TaskIcon } from '@frontend/elements/TaskIcon'
 import { GoPlus } from 'react-icons/go'
 
 const colorByStatus = {
@@ -91,7 +92,6 @@ function TaskList() {
 
   return <>{
     recentTasks.map((task) => {
-      const initial = task.name?.charAt(0)?.toUpperCase() || 'T'
       const color = colorByStatus[task.state]
       const name = task.name || 'Untitled Task'
 
@@ -108,7 +108,10 @@ function TaskList() {
             to={getViewTaskUrl(task.id)}
             color={color}
           >{
-            initial
+            <TaskIcon
+              task={task}
+              size={19}
+            />
           }</Button>
         </Tooltip>
       )

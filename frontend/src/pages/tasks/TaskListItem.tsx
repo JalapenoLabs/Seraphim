@@ -4,6 +4,7 @@ import type { Task } from '@common/types'
 
 // User Interface
 import { ListItem } from '../data/ListItem'
+import { TaskIcon } from '@frontend/elements/TaskIcon'
 
 type Props = {
   task: Task
@@ -24,6 +25,14 @@ export function TaskListItem(props: Props) {
     id={props.task.id}
     title={title}
     description={getTaskDescription(props.task)}
+    startContent={(
+      <span className='icon opacity-80'>
+        <TaskIcon
+          task={props.task}
+          size={20}
+        />
+      </span>
+    )}
     onSelect={() => props.onSelect(props.task)}
   />
 }

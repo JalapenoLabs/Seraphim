@@ -130,6 +130,7 @@ model Task {
   messages Message[]
 
   name      String?
+  icon      String? @default("HiOutlineCommandLine")
   issueLink String? @map("issue_link")
 
   // Git source
