@@ -49,7 +49,7 @@ export function getTask(taskId: string) {
 }
 
 export function getTaskMessagesSseUrl(taskId: string) {
-  return `${ApiRoot}/api/v1/tasks/${taskId}/messages`
+  return `${ApiRoot}/api/v1/protected/tasks/${taskId}/messages/stream`
 }
 
 // /////////////////////////////// //
