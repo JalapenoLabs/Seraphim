@@ -52,8 +52,16 @@ printf "%b\n" "$\{BOLD}$\{GREEN}======== FINISHED CUSTOM SETUP SCRIPT ========$\
 
   let authCommand = ''
   if (cloner.token) {
+    const encodedToken = encodeURIComponent(cloner.token)
+    const githubTokenBaseUrl = `https://x-access-token:${encodedToken}@github.com/`
+
     authCommand = `
-printf "https://x-access-token:%s@github.com\n" "${cloner.token}" > /root/.git-credentials
+printf "https://x-access-token:%s@github.com\n" "${encodedToken}" > /root/.git-credentials
+
+git config --global --unset-all url."${githubTokenBaseUrl}".insteadOf || true
+git config --global --add url."${githubTokenBaseUrl}".insteadOf "https://github.com/"
+git config --global --add url."${githubTokenBaseUrl}".insteadOf "git@github.com:"
+git config --global --add url."${githubTokenBaseUrl}".insteadOf "ssh://git@github.com/"
 
 printf "Setting up Github CLI authentication...\\n"
 echo '${cloner.token}' | gh auth login --with-token

@@ -1,10 +1,10 @@
-﻿// Copyright © 2026 Jalapeno Labs
+// Copyright © 2026 Jalapeno Labs
 
 import type { Request, Response } from 'express'
 import type { UserSettingsUpdateRequest } from '@common/schema/userSettings'
 
 // Lib
-import { AudioFor } from '@prisma/client'
+import { LlmType, VoiceProvider } from '@prisma/client'
 
 // Utility
 import { parseRequestBody } from '../../validation'
@@ -23,7 +23,7 @@ export async function handleUpdateUserSettingsRequest(
 ): Promise<void> {
   const databaseClient = requireDatabaseClient('Update user settings API')
 
-  const updateData = parseRequestBody(
+  const settingsUpdates = parseRequestBody(
     userSettingsUpdateSchema,
     request,
     response,
@@ -32,28 +32,8 @@ export async function handleUpdateUserSettingsRequest(
       errorMessage: 'Invalid request body',
     },
   )
-  if (!updateData) {
+  if (!settingsUpdates) {
     return
-  }
-
-  const { doneSoundFile, ...settingsUpdates } = updateData
-  let doneSoundAudioBytes: Uint8Array<ArrayBuffer> | null = null
-  if (doneSoundFile) {
-    const decodedDoneSoundAudioBuffer = Buffer.from(doneSoundFile.dataBase64, 'base64')
-    const decodedDoneSoundAudioBytes = new Uint8Array(
-      new ArrayBuffer(decodedDoneSoundAudioBuffer.length),
-    )
-    decodedDoneSoundAudioBytes.set(decodedDoneSoundAudioBuffer)
-    doneSoundAudioBytes = decodedDoneSoundAudioBytes
-    if (doneSoundAudioBytes.length === 0) {
-      console.debug('Done sound file was empty after decoding', {
-        fileName: doneSoundFile.name,
-        fileType: doneSoundFile.mimeType,
-        fileSize: doneSoundFile.sizeBytes,
-      })
-      response.status(400).json({ error: 'Invalid done sound file provided' })
-      return
-    }
   }
 
   try {
@@ -67,73 +47,108 @@ export async function handleUpdateUserSettingsRequest(
       return
     }
 
-    const settings = await databaseClient.$transaction(async (transactionClient) => {
-      const existingDoneSound = await transactionClient.audioFile.findFirst({
-        where: {
-          userId: user.id,
-          audioFor: AudioFor.DONE_SOUND,
-        },
+    const normalizedSettingsUpdates: Record<string, unknown> = {
+      ...settingsUpdates,
+    }
+
+    const shouldValidateVoiceSettings = (
+      settingsUpdates.voiceProvider !== undefined
+      || settingsUpdates.voiceLlmId !== undefined
+    )
+
+    if (shouldValidateVoiceSettings) {
+      const existingSettings = await databaseClient.userSettings.findUnique({
+        where: { userId: user.id },
       })
 
-      let doneSoundAudioFileId: string | null | undefined = undefined
+      const nextVoiceProvider = settingsUpdates.voiceProvider
+        ?? existingSettings?.voiceProvider
+        ?? VoiceProvider.NONE
+      let nextVoiceLlmId = settingsUpdates.voiceLlmId !== undefined
+        ? settingsUpdates.voiceLlmId
+        : existingSettings?.voiceLlmId ?? null
 
-      if (doneSoundFile === null) {
-        doneSoundAudioFileId = null
-        if (existingDoneSound) {
-          await transactionClient.audioFile.delete({
-            where: {
-              id: existingDoneSound.id,
-            },
-          })
-        }
+      if (nextVoiceProvider !== VoiceProvider.OPENAI_API_KEY) {
+        nextVoiceLlmId = null
       }
-      else if (doneSoundFile) {
-        if (existingDoneSound) {
-          await transactionClient.audioFile.delete({
-            where: {
-              id: existingDoneSound.id,
-            },
+
+      if (nextVoiceProvider === VoiceProvider.OPENAI_API_KEY) {
+        if (!nextVoiceLlmId) {
+          console.debug('OpenAI voice provider requested without selecting an OpenAI API key LLM account', {
+            settingsUpdates,
           })
+          response.status(400).json({
+            error: 'An OpenAI API Key LLM account is required for OpenAI voice provider',
+          })
+          return
         }
 
-        if (!doneSoundAudioBytes) {
-          console.debug('Done sound buffer missing during settings update', {
-            fileName: doneSoundFile.name,
-            fileType: doneSoundFile.mimeType,
-          })
-          throw new Error('Done sound buffer was missing')
-        }
-
-        const newAudioFile = await transactionClient.audioFile.create({
-          data: {
+        const voiceLlm = await databaseClient.llm.findFirst({
+          where: {
+            id: nextVoiceLlmId,
             userId: user.id,
-            audioFor: AudioFor.DONE_SOUND,
-            fileName: doneSoundFile.name,
-            mimeType: doneSoundFile.mimeType,
-            sizeBytes: doneSoundFile.sizeBytes,
-            data: doneSoundAudioBytes,
+            type: LlmType.OPENAI_API_KEY,
           },
         })
-        doneSoundAudioFileId = newAudioFile.id
+
+        if (!voiceLlm || !voiceLlm.apiKey?.trim()) {
+          console.debug('OpenAI voice provider requested with invalid LLM account', {
+            voiceLlmId: nextVoiceLlmId,
+          })
+          response.status(400).json({
+            error: 'OpenAI voice provider requires an OpenAI API Key LLM account with a valid API key',
+          })
+          return
+        }
       }
 
-      const settingsUpdateData: Record<string, unknown> = { ...settingsUpdates }
-      if (doneSoundAudioFileId !== undefined) {
-        settingsUpdateData.doneSoundAudioFileId = doneSoundAudioFileId
-      }
+      normalizedSettingsUpdates.voiceProvider = nextVoiceProvider
+      normalizedSettingsUpdates.voiceLlmId = nextVoiceLlmId
+    }
 
-      return transactionClient.userSettings.upsert({
-        where: { userId: user.id },
-        update: settingsUpdateData,
-        create: {
-          user: {
-            connect: {
-              id: user.id,
-            },
-          },
-          ...settingsUpdateData,
+    const {
+      voiceLlmId: nextVoiceLlmId,
+      ...baseSettingsUpdateData
+    } = normalizedSettingsUpdates as Record<string, unknown> & {
+      voiceLlmId?: string | null
+    }
+
+    const settingsUpdateData: Record<string, unknown> = {
+      ...baseSettingsUpdateData,
+    }
+    const settingsCreateData: Record<string, unknown> = {
+      ...baseSettingsUpdateData,
+    }
+
+    if (nextVoiceLlmId === null) {
+      settingsUpdateData.voiceLlm = {
+        disconnect: true,
+      }
+    }
+    else if (typeof nextVoiceLlmId === 'string' && nextVoiceLlmId.trim().length) {
+      settingsUpdateData.voiceLlm = {
+        connect: {
+          id: nextVoiceLlmId,
         },
-      })
+      }
+      settingsCreateData.voiceLlm = {
+        connect: {
+          id: nextVoiceLlmId,
+        },
+      }
+    }
+
+    const settings = await databaseClient.userSettings.upsert({
+      where: { userId: user.id },
+      update: settingsUpdateData,
+      create: {
+        user: {
+          connect: {
+            id: user.id,
+          },
+        },
+        ...settingsCreateData,
+      },
     }) as UserSettings
 
     broadcastSseChange({

@@ -121,6 +121,21 @@ export function newWindow() {
     window.webContents.setZoomFactor(1)
   })
 
+  // Allow renderer microphone requests for voice transcription
+  const allowedMediaPermissions = new Set([ 'media', 'audioCapture' ])
+
+  window.webContents.session.setPermissionCheckHandler((_, permission) => {
+    if (allowedMediaPermissions.has(permission)) {
+      return true
+    }
+
+    return false
+  })
+
+  window.webContents.session.setPermissionRequestHandler((_, permission, callback) => {
+    callback(allowedMediaPermissions.has(permission))
+  })
+
   // Content Security Policy (CSP)
   // https://www.electronjs.org/docs/latest/tutorial/security#7-define-a-content-security-policy
   const csp: string[] = isProduction

@@ -20,6 +20,9 @@ export default defineConfig({
       external: [
         'cpu-features',
         'dockerode',
+        'ws',
+        'bufferutil',
+        'utf-8-validate',
       ],
     },
     // (In KB) We don't need to worry about large assets, as this is a desktop app deployed via GUI.
@@ -35,3 +38,4 @@ export default defineConfig({
     },
   },
 })
+

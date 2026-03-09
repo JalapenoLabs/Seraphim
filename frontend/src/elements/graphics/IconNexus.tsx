@@ -5,7 +5,7 @@ import { MdArchive, MdEditDocument, MdOutlineSettings, MdLogout } from 'react-ic
 import { FaRegTrashAlt, FaRegUserCircle, FaExclamationCircle } from 'react-icons/fa'
 import { IoWarningOutline, IoEllipsisVerticalOutline } from 'react-icons/io5'
 import { RxReset } from 'react-icons/rx'
-import { FiEye, FiExternalLink } from 'react-icons/fi'
+import { FiEye, FiExternalLink, FiUpload } from 'react-icons/fi'
 import { IoIosCheckmarkCircleOutline } from 'react-icons/io'
 import { AiTwotoneCloseCircle } from 'react-icons/ai'
 
@@ -32,3 +32,4 @@ export const ViewIcon = FiEye
 export const ResetIcon = RxReset
 export const CloseIcon = AiTwotoneCloseCircle
 export const OpenIcon = FiExternalLink
+export const UploadIcon = FiUpload

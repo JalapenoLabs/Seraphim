@@ -3,6 +3,7 @@
 import type { UserSettings } from '@common/types'
 
 // Core
+import { AudioFor } from '@prisma/client'
 import { useEffect } from 'react'
 import { useSelector } from '@frontend/framework/store'
 import { useWatchUnsavedWork } from '@frontend/hooks/useWatchUnsavedWork'
@@ -20,6 +21,8 @@ import { LanguageInput } from '@frontend/elements/LanguageInput'
 import { DisplayErrors } from '@frontend/elements/buttons/DisplayErrors'
 import { SaveButton } from '@frontend/elements/buttons/SaveButton'
 import { ResetButton } from '@frontend/elements/buttons/ResetButton'
+import { AudioFileUploadButton } from '@frontend/elements/buttons/AudioFileUploadButton'
+import { SelectVoiceSettings } from './SelectVoiceSettings'
 
 const resolvedForm = zodResolver(userSettingsUpdateFieldsSchema)
 
@@ -87,6 +90,36 @@ export function GeneralSettingsPage() {
           errorMessage={form.formState.errors.language?.message}
         />
       </div>
+    </Card>
+    <Card className='relaxed'>
+      <SelectVoiceSettings
+        selectedVoiceType={form.watch('voiceProvider')}
+        voiceTypeError={form.formState.errors.voiceProvider?.message}
+        onVoiceTypeChange={(voiceProvider) => {
+          form.setValue('voiceProvider', voiceProvider, {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
+
+          if (voiceProvider !== 'OPENAI_API_KEY') {
+            form.setValue('voiceLlmId', null, { shouldDirty: true, shouldValidate: true })
+          }
+        }}
+        selectedLlmId={form.watch('voiceLlmId') || ''}
+        llmIdError={form.formState.errors.voiceLlmId?.message}
+        onLlmIdChange={(llmId) => {
+          form.setValue('voiceLlmId', llmId, {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
+        }}
+      />
+    </Card>
+    <Card className='relaxed'>
+      <AudioFileUploadButton
+        audioFor={AudioFor.DONE_SOUND}
+        label='Done Sound'
+      />
     </Card>
   </article>
 }

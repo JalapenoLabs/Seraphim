@@ -14,6 +14,13 @@ enum AudioFor {
   DONE_SOUND
 }
 
+enum VoiceProvider {
+  NONE
+  NATIVE_CHROMIUM
+  LOCAL_VOSK
+  OPENAI_API_KEY
+}
+
 enum LlmType {
   OPENAI_API_KEY
   OPENAI_LOGIN_TOKEN
@@ -205,6 +212,7 @@ model Llm {
   updatedAt  DateTime  @updatedAt @map("updated_at")
 
   tasks Task[]
+  voiceSettings UserSettings[]
 
   @@map("llms")
 }
@@ -288,11 +296,14 @@ model UserSettings {
   userId String @unique @map("user_id")
   user   User   @relation(fields: [userId], references: [id])
 
-  doneSoundAudioFileId String?    @unique @map("done_sound_audio_file_id")
-  doneSoundAudioFile   AudioFile? @relation("DoneSoundAudioFile", fields: [doneSoundAudioFileId], references: [id])
+  playDoneSound Boolean @default(true) @map("play_done_sound")
 
   voiceEnabled Boolean @default(true)
   voiceHotkey  String  @default("Control+Num0")
+
+  voiceProvider VoiceProvider @default(NONE) @map("voice_provider")
+  voiceLlmId    String?       @map("voice_llm_id")
+  voiceLlm      Llm?          @relation(fields: [voiceLlmId], references: [id])
 
   language   String? @default("auto")
   theme      String? @default("system")
@@ -321,8 +332,6 @@ model AudioFile {
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
-
-  doneSoundSetting UserSettings? @relation("DoneSoundAudioFile")
 
   @@unique([userId, audioFor])
   @@map("audio_files")

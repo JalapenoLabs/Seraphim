@@ -5,7 +5,11 @@ import type { LlmUsage, TaskWithFullContext } from '@common/types'
 import type { Container } from 'dockerode'
 import type { SetOptional } from 'type-fest'
 import type { ClientRequest, ClientNotification, ServerNotification } from '@common/vendor/codex-protocol'
-import type { RateLimitSnapshot, ThreadTokenUsage, ThreadStartResponse } from '@common/vendor/codex-protocol/v2'
+import type {
+  RateLimitSnapshot,
+  ThreadTokenUsage,
+  ThreadStartResponse,
+} from '@common/vendor/codex-protocol/v2'
 
 // Core
 import { requireDatabaseClient } from '@electron/database'
@@ -24,11 +28,16 @@ import { getCloner } from '@common/cloning/getCloner'
 import { EventEmitter } from 'node:events'
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
+import { resolve } from 'node:path'
 
 // Utility
 import { convertEnvironmentToStringArray } from '@common/envKit'
 import { broadcastSseChange } from '@electron/api/sse/sseEvents'
+import { playAudioFor } from '@common/node/playAudioFor'
 import { safeParseJson } from '@common/json'
+
+// Misc
+import { resourcesDir } from '@electron/lib/internalFiles'
 import { CODEX_WORKDIR, SETUP_FAILURE_LINE, SETUP_SUCCESS_LINE } from '@common/constants'
 
 type TaskInstanceOptions = {
@@ -68,6 +77,7 @@ export class TaskInstance extends EventEmitter<EventMap> {
   private rateLimits: RateLimitSnapshot | null = null
   private usage: ThreadTokenUsage | null = null
   private userMessageQueue: CreateMessage[] = []
+  private codexTurnId: string | null = null
 
   constructor(options: TaskInstanceOptions) {
     super()
@@ -469,6 +479,46 @@ export class TaskInstance extends EventEmitter<EventMap> {
     }
   }
 
+  public async interruptAndStop(): Promise<boolean> {
+    this.userMessageQueue = []
+
+    const codexThreadId = this.codexThreadId?.trim()
+    if (!codexThreadId) {
+      console.debug('TaskInstance interrupt requested without thread id', {
+        taskId: this.task.id,
+      })
+      return false
+    }
+
+    const codexTurnId = this.codexTurnId?.trim()
+    if (!codexTurnId) {
+      console.debug('TaskInstance interrupt requested without active turn id', {
+        taskId: this.task.id,
+        codexThreadId,
+      })
+      return false
+    }
+
+    const interruptId = this.getRequestId()
+    this.sendRequest({
+      method: 'turn/interrupt',
+      id: interruptId,
+      params: {
+        threadId: codexThreadId,
+        turnId: codexTurnId,
+      },
+    })
+
+    await this.waitForResponse(interruptId)
+
+    this.codexTurnId = null
+    await this.updateTask({
+      state: 'AwaitingReview',
+    })
+
+    return true
+  }
+
   // //////////////////////// //
   //       Internal API       //
   // //////////////////////// //
@@ -487,6 +537,11 @@ export class TaskInstance extends EventEmitter<EventMap> {
           state: 'AwaitingReview',
         })
       }
+
+      await playAudioFor('DONE_SOUND', {
+        fallbackMediaUrl: resolve(resourcesDir, '/default-done-sound.wav'),
+        prismaClient: prisma,
+      })
       return
     }
 
@@ -665,11 +720,13 @@ export class TaskInstance extends EventEmitter<EventMap> {
       // "turn" = the whole “job” kicked off by one user input
       switch (method) {
         case 'turn/started':
+          this.codexTurnId = params.turn.id
           await this.updateTask({
             state: 'Working',
           })
           break
         case 'turn/completed':
+          this.codexTurnId = null
           console.log(
             chalk.green('Task completed!!'),
           )
@@ -1134,6 +1191,10 @@ export class TaskInstance extends EventEmitter<EventMap> {
         })
       }
     }
+
+    await this.updateTask({
+      state: 'AwaitingReview',
+    })
 
     await this.doNextQueue()
   }

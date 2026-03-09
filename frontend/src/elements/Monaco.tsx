@@ -24,6 +24,7 @@ export type MonacoOptionalProps = {
   readOnly?: boolean
   getMonaco?: (context: MonacoContext) => void
   fontSize?: number
+  options?: Parameters<Monaco['editor']['create']>[2]
 }
 
 export type MonacoProps = MonacoRequiredProps & MonacoOptionalProps
@@ -66,6 +67,7 @@ export function Monaco(props: MonacoProps) {
       scrollBeyondLastLine: true,
       readOnly: props.readOnly ?? false,
       fontSize: props.fontSize,
+      ...props.options,
     }}
   />
 }

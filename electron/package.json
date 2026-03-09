@@ -44,6 +44,7 @@
     "helmet": "^8.1.0",
     "hpp": "^0.2.3",
     "ky": "^1.14.3",
+    "ws": "^8.19.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -64,6 +65,7 @@
     "@types/hpp": "^0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.1.0",
+    "@types/ws": "^8",
     "cross-env": "^10.1.0",
     "electron": "^38.2.0",
     "playwright": "^1.53.1",

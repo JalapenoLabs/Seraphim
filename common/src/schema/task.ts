@@ -53,5 +53,15 @@ export const taskUpdateSchema = z
     { message: 'No valid fields provided for update' },
   )
 
+export const taskNewMessageSchema = z
+  .object({
+    message: z
+      .string()
+      .trim()
+      .min(1, 'Message is required'),
+  })
+  .strict()
+
 export type TaskCreateRequest = z.infer<typeof taskCreateSchema>
 export type TaskUpdateRequest = z.infer<typeof taskUpdateSchema>
+export type TaskNewMessageRequest = z.infer<typeof taskNewMessageSchema>

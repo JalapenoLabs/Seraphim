@@ -7022,6 +7022,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/ws@npm:^8":
+  version: 8.18.1
+  resolution: "@types/ws@npm:8.18.1"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/61aff1129143fcc4312f083bc9e9e168aa3026b7dd6e70796276dcfb2c8211c4292603f9c4864fae702f2ed86e4abd4d38aa421831c2fd7f856c931a481afbab
+  languageName: node
+  linkType: hard
+
 "@types/yauzl@npm:^2.9.1":
   version: 2.10.3
   resolution: "@types/yauzl@npm:2.10.3"
@@ -15599,6 +15608,7 @@ __metadata:
     "@types/hpp": "npm:^0"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/node": "npm:^25.1.0"
+    "@types/ws": "npm:^8"
     chalk: "npm:^5.4.1"
     cors: "npm:^2.8.6"
     cross-env: "npm:^10.1.0"
@@ -15617,6 +15627,7 @@ __metadata:
     playwright: "npm:^1.53.1"
     ts-node: "npm:^10.9.2"
     typescript: "npm:^5.8.3"
+    ws: "npm:^8.19.0"
     zod: "npm:^3.25.76"
   languageName: unknown
   linkType: soft
@@ -17844,7 +17855,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ws@npm:^8.2.3":
+"ws@npm:^8.19.0, ws@npm:^8.2.3":
   version: 8.19.0
   resolution: "ws@npm:8.19.0"
   peerDependencies:

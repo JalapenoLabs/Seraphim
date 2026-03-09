@@ -32,7 +32,7 @@ export const devCsp: string[] = [
   // images from localhost:5173 and data URIs
   `img-src 'self' http://localhost:5173 http://localhost:${API_PORT} https://avatars.githubusercontent.com data:`,
   // HMR websocket & XHR
-  `connect-src 'self' http://localhost:5173 http://localhost:${API_PORT} ws://localhost:5173`,
+  `connect-src 'self' http://localhost:5173 http://localhost:${API_PORT} ws://localhost:5173 ws://localhost:${API_PORT}`,
 ]
 
 export const prodCsp: string[] = [
