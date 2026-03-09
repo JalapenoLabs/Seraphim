@@ -38,6 +38,25 @@ export async function listIssueTracking(): Promise<ListIssueTrackingResponse> {
   return response
 }
 
+// /////////////////////////////// //
+//       Get Issue Tracking       //
+// /////////////////////////////// //
+
+type GetIssueTrackingResponse = {
+  issueTracking: IssueTracking
+}
+
+export async function getIssueTracking(issueTrackingId: string): Promise<GetIssueTrackingResponse> {
+  const response = await frontendClient
+    .get(`v1/protected/issue-tracking/${issueTrackingId}`)
+    .json<GetIssueTrackingResponse>()
+
+  dispatch(
+    issueTrackingActions.upsertIssueTracking(response.issueTracking),
+  )
+
+  return response
+}
 
 // /////////////////////////////// //
 //        List Jira Issues         //
