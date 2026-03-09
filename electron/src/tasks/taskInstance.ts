@@ -49,6 +49,7 @@ type ExecuteCommandResult = {
   command: string
   stdout: string
   stderr: string
+  stdall: string
   exitCode: number
 }
 
@@ -112,6 +113,10 @@ export class TaskInstance extends EventEmitter<EventMap> {
   private getRequestId(): number {
     return this.nextRequestId++
   }
+
+  // //////////////////////// //
+  //        Public API        //
+  // //////////////////////// //
 
   public async refreshContainerStatus(): Promise<boolean> {
     const containerId = this.containerId
@@ -464,15 +469,24 @@ export class TaskInstance extends EventEmitter<EventMap> {
     }
   }
 
-  private async doNextQueue() {
-    if (this.task.state !== 'AwaitingReview') {
-      return
-    }
+  // //////////////////////// //
+  //       Internal API       //
+  // //////////////////////// //
 
+  private hasNextQueue() {
+    return this.userMessageQueue.length > 0
+  }
+
+  private async doNextQueue() {
     const prisma = requireDatabaseClient('TaskInstance queueUserMessage')
 
     const nextQueueItem = this.userMessageQueue.shift()
     if (!nextQueueItem) {
+      if (this.task.state !== 'AwaitingReview') {
+        await this.updateTask({
+          state: 'AwaitingReview',
+        })
+      }
       return
     }
 
@@ -502,7 +516,6 @@ export class TaskInstance extends EventEmitter<EventMap> {
     await this.updateTask({
       state: 'Working',
     })
-
 
     const turnStartId = this.getRequestId()
     this.sendRequest({
@@ -570,13 +583,16 @@ export class TaskInstance extends EventEmitter<EventMap> {
     const stderrStream = new PassThrough()
     const stdoutChunks: Buffer[] = []
     const stderrChunks: Buffer[] = []
+    const stdallChunks: Buffer[] = []
 
     function handleStdoutData(chunk: Buffer) {
       stdoutChunks.push(chunk)
+      stdallChunks.push(chunk)
     }
 
     function handleStderrData(chunk: Buffer) {
       stderrChunks.push(chunk)
+      stdallChunks.push(chunk)
     }
 
     function handleStreamError(this: TaskInstance, error: Error) {
@@ -610,139 +626,18 @@ export class TaskInstance extends EventEmitter<EventMap> {
     const exitCode = inspectionResult.ExitCode ?? -1
     const stdout = Buffer.concat(stdoutChunks).toString('utf8')
     const stderr = Buffer.concat(stderrChunks).toString('utf8')
+    const stdall = Buffer.concat(stdallChunks).toString('utf8')
 
     return {
       command,
       stdout,
       stderr,
+      stdall,
       exitCode,
     }
   }
 
   private subscription: ((message: InboundCodexEvent) => void) | null = null
-
-  private getPostRunCommands(postScript: string): string[] {
-    if (!postScript?.trim()) {
-      console.debug('TaskInstance onTurnComplete has no post script commands to run', {
-        taskId: this.task.id,
-      })
-      return []
-    }
-
-    const postRunCommands = postScript
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => Boolean(line))
-
-    return postRunCommands
-  }
-
-  private async queuePostRunFailureTurn(
-    commandResult: ExecuteCommandResult,
-  ): Promise<void> {
-    const commandFailureMessage = [
-      'A post-run validation command failed. Please fix the workspace so this validation command passes.',
-      `Failed command: ${commandResult.command}`,
-      `Exit code: ${String(commandResult.exitCode)}`,
-      '',
-      'STDOUT:',
-      commandResult.stdout || '(empty)',
-      '',
-      'STDERR:',
-      commandResult.stderr || '(empty)',
-    ].join('\n')
-
-    await this.updateTask({
-      state: 'AwaitingReview',
-    })
-
-    await this.queueUserMessage({
-      role: 'System',
-      type: 'text',
-      content: commandFailureMessage,
-    })
-  }
-
-  private async executePostRunCommand(
-    command: string,
-  ): Promise<ExecuteCommandResult> {
-    try {
-      return await this.executeCmd(command)
-    }
-    catch (error) {
-      console.debug('TaskInstance failed to execute post-run validation command', {
-        taskId: this.task.id,
-        command,
-        error,
-      })
-
-      return {
-        command,
-        stdout: '',
-        stderr: String(error),
-        exitCode: -1,
-      }
-    }
-  }
-
-  private async onTurnComplete(): Promise<void> {
-    const previousTurn = this.task.turns[this.task.turns.length - 1]
-    if (!previousTurn) {
-      console.debug('TaskInstance onTurnComplete called without an active turn', {
-        taskId: this.task.id,
-      })
-      await this.updateTask({
-        state: 'AwaitingReview',
-      })
-      await this.doNextQueue()
-      return
-    }
-
-    const now = Date.now()
-
-    await this.updateTurn(
-      previousTurn.id,
-      {
-        timeTaken: now - previousTurn.createdAt.getTime(),
-        finishedAt: new Date(now),
-      },
-    )
-
-    const postRunCommands = this.getPostRunCommands(this.task.workspace.postScript)
-    if (!postRunCommands.length) {
-      await this.updateTask({
-        state: 'AwaitingReview',
-      })
-      await this.doNextQueue()
-      return
-    }
-
-    await this.updateTask({
-      state: 'Validating',
-    })
-
-    for (const command of postRunCommands) {
-      const commandResult = await this.executePostRunCommand(command)
-
-      if (commandResult.exitCode !== 0) {
-        console.debug('TaskInstance post-run validation command failed', {
-          taskId: this.task.id,
-          command: commandResult.command,
-          exitCode: commandResult.exitCode,
-        })
-
-        await this.queuePostRunFailureTurn(commandResult)
-        return
-      }
-    }
-
-    await this.updateTask({
-      state: 'AwaitingReview',
-    })
-
-    await this.doNextQueue()
-  }
-
   protected attachCodexSubscriptions() {
     if (this.subscription) {
       this.removeListener('message', this.subscription)
@@ -1135,5 +1030,111 @@ export class TaskInstance extends EventEmitter<EventMap> {
     this.task = hydratedTask
 
     return hydratedTask
+  }
+
+  // //////////////////////// //
+  //     On task completed    //
+  // //////////////////////// //
+
+  private async onTurnComplete(): Promise<void> {
+    // Queued user messages always come before automated validation
+    if (this.hasNextQueue()) {
+      await this.doNextQueue()
+      return
+    }
+
+    const previousTurn = this.task.turns[this.task.turns.length - 1]
+    if (!previousTurn) {
+      console.warn('[WEIRD?] TaskInstance onTurnComplete called without an active turn', {
+        taskId: this.task.id,
+      })
+      await this.doNextQueue()
+      return
+    }
+
+    const now = Date.now()
+    await this.updateTurn(
+      previousTurn.id,
+      {
+        timeTaken: now - previousTurn.createdAt.getTime(),
+        finishedAt: new Date(now),
+      },
+    )
+
+    const postRunCommands = this.task.workspace.postScript
+      ?.split(/\r?\n/)
+      ?.map((line) => line.trim())
+      ?.filter((line) => Boolean(line))
+      || []
+
+    if (postRunCommands.length) {
+      await this.updateTask({
+        state: 'Validating',
+      })
+
+      const failedCommands: ExecuteCommandResult[] = []
+
+      // Test each command...
+      for (const command of postRunCommands) {
+        let commandResult: ExecuteCommandResult = {
+          command,
+          stdout: '',
+          stderr: '',
+          stdall: '',
+          exitCode: -1,
+        }
+
+        try {
+          commandResult = await this.executeCmd(command)
+        }
+        catch (error) {
+          console.debug('TaskInstance failed to execute post-run validation command', {
+            taskId: this.task.id,
+            command,
+            error,
+          })
+
+          commandResult.stderr = String(error)
+        }
+
+        if (commandResult.exitCode !== 0) {
+          console.debug('TaskInstance post-run validation command failed', {
+            taskId: this.task.id,
+            command: commandResult.command,
+            exitCode: commandResult.exitCode,
+          })
+
+          failedCommands.push(commandResult)
+        }
+      }
+
+      // If any of the commands failed...
+      if (failedCommands.length) {
+        const commandFailureMessage: string[] = [
+          failedCommands.length === 1
+            ? 'A post-run validation command failed.'
+            : 'Some post-run validation commands failed.',
+          'Please fix the workspace so this validation command passes.',
+        ]
+
+        for (const result of failedCommands) {
+          commandFailureMessage.push(`Command: ${result.command}`)
+          commandFailureMessage.push(`Exit code: ${result.exitCode}`)
+          if (result.stdall?.length) {
+            commandFailureMessage.push(`Stdout:\n\`\`\`\n${result.stdout}\n\`\`\``)
+          }
+        }
+
+        this.userMessageQueue.push({
+          role: 'System',
+          type: 'text',
+          content: commandFailureMessage
+            .filter(Boolean)
+            .join('\n'),
+        })
+      }
+    }
+
+    await this.doNextQueue()
   }
 }
