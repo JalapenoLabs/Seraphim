@@ -32,6 +32,10 @@ import { resolve } from 'node:path'
 
 // Utility
 import { convertEnvironmentToStringArray } from '@common/envKit'
+import {
+  broadcastMessageUpsert,
+  broadcastTurnUpsert,
+} from '@electron/api/routes/v1/protected/tasks/streamTaskMessagesRoute'
 import { broadcastSseChange } from '@electron/api/sse/sseEvents'
 import { playAudioFor } from '@common/node/playAudioFor'
 import { safeParseJson } from '@common/json'
@@ -221,6 +225,7 @@ export class TaskInstance extends EventEmitter<EventMap> {
       ])
 
       this.task.turns.push(initialTurn)
+      await broadcastTurnUpsert(this.task.id, initialTurn)
 
       const cloner = getCloner(
         gitAccount.provider,
@@ -312,41 +317,58 @@ export class TaskInstance extends EventEmitter<EventMap> {
 
       this.on('line', onStdout)
 
-      await this.container.start()
-      await this.attachToContainer()
+      let setupCompletionType: 'success' | 'success-error' | 'failure' | 'failure-error' | null = null
+      try {
+        await this.container.start()
+        await this.attachToContainer()
 
-      // This only guarantees that the setup script has completed
-      // This does *NOT* guarantee that the `codex app-server` process has fully started.
-      // Typically it's started immediately AFTER this gets logged
-      const completed = await Promise.race([
-        buildCompleteScriptPromise
-          .then(() => ({ type: 'success' as const }))
-          .catch((error) => ({ type: 'success-error' as const, error })),
-        buildFailureScriptPromise
-          .then(() => ({ type: 'failure' as const }))
-          .catch((error) => ({ type: 'failure-error' as const, error })),
-      ])
+        // This only guarantees that the setup script has completed
+        // This does *NOT* guarantee that the `codex app-server` process has fully started.
+        // Typically it's started immediately AFTER this gets logged
+        const completed = await Promise.race([
+          buildCompleteScriptPromise
+            .then(() => ({ type: 'success' as const }))
+            .catch((error) => ({ type: 'success-error' as const, error })),
+          buildFailureScriptPromise
+            .then(() => ({ type: 'failure' as const }))
+            .catch((error) => ({ type: 'failure-error' as const, error })),
+        ])
 
-      const now = Date.now()
-      await Promise.all([
-        this.saveCodexMessage({
-          role: 'Docker',
-          type: 'text',
-          content: setupScriptOutput,
-        }),
-        this.updateTurn(initialTurn.id, {
-          timeTaken: now - initialTurn.createdAt.getTime(),
-          finishedAt: new Date(now),
-        }),
-      ])
+        setupCompletionType = completed.type
+        if (completed.type !== 'success') {
+          throw new Error(`Setup script did not complete successfully: ${completed.type}`)
+        }
 
-      this.off('line', onStdout)
-
-      if (completed.type !== 'success') {
-        throw new Error(`Setup script did not complete successfully: ${completed.type}`)
+        await this.startCodexAppServer()
       }
+      finally {
+        this.off('line', onStdout)
 
-      await this.startCodexAppServer()
+        const setupScriptMessage = setupScriptOutput.trim().length
+          ? setupScriptOutput
+          : `Setup script output was empty (${setupCompletionType ?? 'unknown'}).`
+
+        const now = Date.now()
+        try {
+          await Promise.all([
+            this.saveCodexMessage({
+              role: 'Docker',
+              type: 'text',
+              content: setupScriptMessage,
+            }),
+            this.updateTurn(initialTurn.id, {
+              timeTaken: now - initialTurn.createdAt.getTime(),
+              finishedAt: new Date(now),
+            }),
+          ])
+        }
+        catch (error) {
+          console.debug('TaskInstance failed to persist setup script output', {
+            taskId: this.task.id,
+            error,
+          })
+        }
+      }
     }
     catch (error) {
       console.log('TaskInstance createContainer failed', {
@@ -593,6 +615,11 @@ export class TaskInstance extends EventEmitter<EventMap> {
     newTurn.messages = [ newMessage ]
     this.task.turns.push(newTurn)
 
+    await Promise.all([
+      broadcastTurnUpsert(this.task.id, newTurn),
+      broadcastMessageUpsert(this.task.id, newMessage),
+    ])
+
     await this.updateTask({
       state: 'Working',
     })
@@ -628,6 +655,7 @@ export class TaskInstance extends EventEmitter<EventMap> {
     })
 
     this.task.turns[this.task.turns.length - 1].messages.push(newMessage)
+    await broadcastMessageUpsert(this.task.id, newMessage)
 
     return newMessage
   }
@@ -1087,10 +1115,13 @@ export class TaskInstance extends EventEmitter<EventMap> {
 
   private async updateTurn(id: string, data: Prisma.TurnUpdateArgs['data']): Promise<Turn> {
     const prisma = requireDatabaseClient('TaskInstance updateTurn')
-    return await prisma.turn.update({
+    const updatedTurn = await prisma.turn.update({
       where: { id: id },
       data,
     })
+
+    await broadcastTurnUpsert(this.task.id, updatedTurn)
+    return updatedTurn
   }
 
   public async updateTask(data: Prisma.TaskUpdateArgs['data']): Promise<TaskWithFullContext> {

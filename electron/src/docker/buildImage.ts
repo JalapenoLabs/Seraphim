@@ -281,9 +281,19 @@ export async function buildImage(
       error,
     })
 
+    const dockerBuildOutput = typeof error === 'object' && error !== null
+      ? Reflect.get(error, 'output')
+      : null
+
+    if (typeof dockerBuildOutput === 'string' && dockerBuildOutput.trim().length > 0 && toStdout) {
+      toStdout(dockerBuildOutput)
+    }
+
     const message = (error as Error).message || 'Unknown error during image build'
 
-    toStdout(message)
+    if (toStdout) {
+      toStdout(message)
+    }
 
     return {
       success: false,

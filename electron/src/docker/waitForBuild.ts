@@ -5,6 +5,31 @@ import type { getDockerClient } from './docker'
 // Core
 import { StatusResponse } from '@common/vendor/buildkit/gen/github.com/moby/buildkit/api/services/control/control'
 
+type BuildFailureError = Error & {
+  output?: string
+}
+
+function buildFailureError(
+  outputParts: string[],
+  fallbackMessage: string,
+  originalError?: unknown,
+): BuildFailureError {
+  const resolvedError = originalError instanceof Error
+    ? originalError
+    : new Error(fallbackMessage)
+
+  if (!resolvedError.message?.trim()) {
+    resolvedError.message = fallbackMessage
+  }
+
+  const output = outputParts.join('')
+  if (output.trim().length > 0) {
+    Reflect.set(resolvedError, 'output', output)
+  }
+
+  return resolvedError as BuildFailureError
+}
+
 export function waitForBuildVersion2(
   buildStream: NodeJS.ReadableStream,
   dockerClient: ReturnType<typeof getDockerClient>,
@@ -138,12 +163,12 @@ export function waitForBuildVersion2(
       function handleBuildFinished(error: unknown) {
         if (error) {
           console.debug('Error during Docker build', { error })
-          reject(error)
+          reject(buildFailureError(outputParts, 'Docker build failed', error))
           return
         }
 
         if (hasError) {
-          reject(new Error('Docker build failed'))
+          reject(buildFailureError(outputParts, 'Docker build failed'))
           return
         }
 
@@ -229,12 +254,12 @@ export function waitForBuildVersion1(
         console.debug('Error during Docker build', {
           error,
         })
-        reject(error)
+        reject(buildFailureError(outputParts, 'Docker build failed', error))
         return
       }
 
       if (hasError) {
-        reject(new Error('Docker build failed'))
+        reject(buildFailureError(outputParts, 'Docker build failed'))
         return
       }
 
