@@ -94,7 +94,7 @@ jobs:
       - name: Upload unit test results
         if: ${{ steps.unit-test.outcome == 'success' }}
         continue-on-error: true
-        uses: dorny/test-reporter@v2
+        uses: dorny/test-reporter@v3
         with:
           name: unit-test-results
           path: ./.test/all-results.xml
