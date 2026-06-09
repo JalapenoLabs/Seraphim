@@ -1,0 +1,67 @@
+[package]
+name = "seraphim-api"
+version = "3.0.0"
+edition = "2021"
+description = "Seraphim orchestrator API: issue sync, the autonomous agent loop, and the Docker-driven Claude Code runner."
+license = "MIT"
+
+[[bin]]
+name = "seraphim-api"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime + web framework
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+futures = "0.3"
+async-stream = "0.3"
+
+# Database
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "postgres",
+    "chrono",
+    "uuid",
+    "json",
+    "migrate",
+] }
+
+# Docker control + GitHub
+bollard = "0.17"
+octocrab = "0.41"
+
+# Serialization + domain helpers
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Errors, logging, config
+eyre = "0.6"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Performance: mimalloc global allocator (M-MIMALLOC-APPS).
+mimalloc = "0.1"
+
+[lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+# A few specific opt-outs that are noisy for an application binary.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

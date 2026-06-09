@@ -1,0 +1,445 @@
+//! Typed queries over the Seraphim schema.
+//!
+//! Functions take a `&PgPool` and return [`sqlx::Result`]; callers lift errors
+//! into the application's `eyre` result with `?`.
+
+use serde_json::Value;
+use sqlx::types::Json;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use super::models::{
+    IssueSource, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
+};
+
+// --- Settings ----------------------------------------------------------------
+
+pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
+    sqlx::query_as::<_, Settings>(
+        "SELECT org_name, global_instructions, default_review_policy, agent_paused, \
+         claude_model, workspace_image_tag, base_setup_script, current_session_id, updated_at \
+         FROM settings WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// Patches the settings row; `NULL` arguments leave the existing value intact.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_settings(
+    pool: &PgPool,
+    org_name: Option<String>,
+    global_instructions: Option<String>,
+    default_review_policy: Option<ReviewPolicy>,
+    claude_model: Option<String>,
+    base_setup_script: Option<String>,
+) -> sqlx::Result<Settings> {
+    sqlx::query_as::<_, Settings>(
+        "UPDATE settings SET \
+         org_name = COALESCE($1, org_name), \
+         global_instructions = COALESCE($2, global_instructions), \
+         default_review_policy = COALESCE($3, default_review_policy), \
+         claude_model = COALESCE($4, claude_model), \
+         base_setup_script = COALESCE($5, base_setup_script), \
+         updated_at = now() \
+         WHERE id = 1 \
+         RETURNING org_name, global_instructions, default_review_policy, agent_paused, \
+         claude_model, workspace_image_tag, base_setup_script, current_session_id, updated_at",
+    )
+    .bind(org_name)
+    .bind(global_instructions)
+    .bind(default_review_policy)
+    .bind(claude_model)
+    .bind(base_setup_script)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn set_paused(pool: &PgPool, paused: bool) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET agent_paused = $1, updated_at = now() WHERE id = 1")
+        .bind(paused)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_current_session_id(pool: &PgPool, session_id: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET current_session_id = $1, updated_at = now() WHERE id = 1")
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// --- Repositories ------------------------------------------------------------
+
+pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
+    sqlx::query_as::<_, Repository>("SELECT * FROM repositories ORDER BY full_name")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn get_repository(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Repository>> {
+    sqlx::query_as::<_, Repository>("SELECT * FROM repositories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Inserts a repository or updates it in place, keyed by `full_name`.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_repository(
+    pool: &PgPool,
+    full_name: &str,
+    clone_url: &str,
+    default_branch: &str,
+    branch_template: &str,
+    setup_script: &str,
+    instructions: &str,
+    review_policy: Option<ReviewPolicy>,
+    enabled: bool,
+) -> sqlx::Result<Repository> {
+    sqlx::query_as::<_, Repository>(
+        "INSERT INTO repositories \
+         (full_name, clone_url, default_branch, branch_template, setup_script, instructions, review_policy, enabled) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         ON CONFLICT (full_name) DO UPDATE SET \
+         clone_url = EXCLUDED.clone_url, \
+         default_branch = EXCLUDED.default_branch, \
+         branch_template = EXCLUDED.branch_template, \
+         setup_script = EXCLUDED.setup_script, \
+         instructions = EXCLUDED.instructions, \
+         review_policy = EXCLUDED.review_policy, \
+         enabled = EXCLUDED.enabled, \
+         updated_at = now() \
+         RETURNING *",
+    )
+    .bind(full_name)
+    .bind(clone_url)
+    .bind(default_branch)
+    .bind(branch_template)
+    .bind(setup_script)
+    .bind(instructions)
+    .bind(review_policy)
+    .bind(enabled)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn delete_repository(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM repositories WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// --- Issue sources -----------------------------------------------------------
+
+pub async fn list_issue_sources(pool: &PgPool) -> sqlx::Result<Vec<IssueSource>> {
+    sqlx::query_as::<_, IssueSource>("SELECT * FROM issue_sources ORDER BY created_at")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn list_enabled_issue_sources(pool: &PgPool) -> sqlx::Result<Vec<IssueSource>> {
+    sqlx::query_as::<_, IssueSource>("SELECT * FROM issue_sources WHERE enabled = TRUE")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn create_issue_source(
+    pool: &PgPool,
+    kind: SourceKind,
+    config: Value,
+    poll_interval_secs: i32,
+) -> sqlx::Result<IssueSource> {
+    sqlx::query_as::<_, IssueSource>(
+        "INSERT INTO issue_sources (kind, config, poll_interval_secs) \
+         VALUES ($1, $2, $3) RETURNING *",
+    )
+    .bind(kind)
+    .bind(Json(config))
+    .bind(poll_interval_secs)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn delete_issue_source(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM issue_sources WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// --- Tasks -------------------------------------------------------------------
+
+pub async fn list_tasks(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
+    sqlx::query_as::<_, Task>("SELECT * FROM tasks ORDER BY board_column, position")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn get_task(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Inserts a freshly-synced issue into `Available`, or refreshes the cached
+/// title/body/url of one we already track. Never touches the human-curated
+/// `board_column`, `position`, or `status`.
+pub async fn upsert_issue_task(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    external_id: &str,
+    repo_id: Option<Uuid>,
+    title: &str,
+    body: &str,
+    url: &str,
+    initial_position: f64,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, board_column, position) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'available', $7) \
+         ON CONFLICT (source_kind, external_id) DO UPDATE SET \
+         title = EXCLUDED.title, \
+         body_snapshot = EXCLUDED.body_snapshot, \
+         url = EXCLUDED.url, \
+         repo_id = COALESCE(tasks.repo_id, EXCLUDED.repo_id), \
+         updated_at = now() \
+         RETURNING *",
+    )
+    .bind(source_kind)
+    .bind(external_id)
+    .bind(repo_id)
+    .bind(title)
+    .bind(body)
+    .bind(url)
+    .bind(initial_position)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn max_position_in_column(
+    pool: &PgPool,
+    column: TaskColumn,
+) -> sqlx::Result<Option<f64>> {
+    sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(position) FROM tasks WHERE board_column = $1")
+        .bind(column)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn move_task(
+    pool: &PgPool,
+    id: Uuid,
+    column: TaskColumn,
+    position: f64,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET board_column = $2, position = $3, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(column)
+    .bind(position)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn set_task_hold(pool: &PgPool, id: Uuid, hold: bool) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET hold = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(hold)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn set_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET status = $2, last_activity_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(status)
+    .fetch_one(pool)
+    .await
+}
+
+/// The next card the agent should work: top of `To Do`, not on hold.
+pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'todo' AND hold = FALSE \
+         ORDER BY position ASC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Tasks sitting in review awaiting an automated merge decision.
+pub async fn list_review_candidates(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'awaiting_review' \
+         ORDER BY position",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Sets a task's `repo_id` when sync first learns which repo an issue belongs to.
+pub async fn set_task_repo(pool: &PgPool, id: Uuid, repo_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE tasks SET repo_id = $2, updated_at = now() WHERE id = $1 AND repo_id IS NULL",
+    )
+    .bind(id)
+    .bind(repo_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Records the branch and session a task is being worked under, and stamps it
+/// as started.
+pub async fn mark_task_started(
+    pool: &PgPool,
+    id: Uuid,
+    branch: &str,
+    session_id: Option<&str>,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET branch = $2, session_id = $3, started_at = now(), \
+         last_activity_at = now(), updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(branch)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn set_task_pr(pool: &PgPool, id: Uuid, pr_url: &str) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET pr_url = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(pr_url)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn set_task_error(pool: &PgPool, id: Uuid, error: &str) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET status = 'failed', error = $2, finished_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(error)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn finish_task(
+    pool: &PgPool,
+    id: Uuid,
+    column: TaskColumn,
+    status: TaskStatus,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET board_column = $2, status = $3, finished_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(column)
+    .bind(status)
+    .fetch_one(pool)
+    .await
+}
+
+// --- Turns -------------------------------------------------------------------
+
+pub async fn next_turn_idx(pool: &PgPool, task_id: Uuid) -> sqlx::Result<i32> {
+    let max: Option<i32> = sqlx::query_scalar("SELECT MAX(idx) FROM turns WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(max.map_or(0, |value| value + 1))
+}
+
+pub async fn create_turn(
+    pool: &PgPool,
+    task_id: Uuid,
+    idx: i32,
+    prompt: &str,
+    session_id: Option<&str>,
+) -> sqlx::Result<Turn> {
+    sqlx::query_as::<_, Turn>(
+        "INSERT INTO turns (task_id, idx, prompt, session_id) VALUES ($1, $2, $3, $4) RETURNING *",
+    )
+    .bind(task_id)
+    .bind(idx)
+    .bind(prompt)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn finish_turn(
+    pool: &PgPool,
+    id: Uuid,
+    status: &str,
+    result_text: Option<&str>,
+    total_cost_usd: Option<f64>,
+    session_id: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE turns SET status = $2, result_text = $3, total_cost_usd = $4, \
+         session_id = COALESCE($5, session_id), finished_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(result_text)
+    .bind(total_cost_usd)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// --- Events ------------------------------------------------------------------
+
+pub async fn append_event(
+    pool: &PgPool,
+    turn_id: Uuid,
+    seq: i32,
+    event_type: &str,
+    payload: Value,
+) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO events (turn_id, seq, type, payload) VALUES ($1, $2, $3, $4)")
+        .bind(turn_id)
+        .bind(seq)
+        .bind(event_type)
+        .bind(Json(payload))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// All events for a task in order, joined across its turns. Powers the task
+/// detail view's chat history.
+pub async fn list_events_for_task(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Vec<super::models::Event>> {
+    sqlx::query_as::<_, super::models::Event>(
+        "SELECT e.* FROM events e JOIN turns t ON e.turn_id = t.id \
+         WHERE t.task_id = $1 ORDER BY t.idx, e.seq",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}

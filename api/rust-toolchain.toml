@@ -1,0 +1,5 @@
+# Some transitive dependencies (e.g. getrandom) now ship edition2024 crates,
+# which require a recent toolchain to build. Pin to 1.88 for reproducibility.
+[toolchain]
+channel = "1.88"
+components = ["rustfmt", "clippy"]
