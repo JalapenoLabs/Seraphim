@@ -2,7 +2,12 @@
 
 import type { Llm, Workspace } from '@prisma/client'
 import type { TaskCreateRequest } from '@common/schema/task'
-import type { ArchiveTaskResult, CreateTaskResult, DeleteTaskResult } from './types'
+import type {
+  ArchiveTaskResult,
+  CreateTaskResult,
+  DeleteTaskResult,
+  EvaluateTaskFileDiffResult,
+} from './types'
 
 // Utility
 import { broadcastSseChange } from '@electron/api/sse/sseEvents'
@@ -19,6 +24,7 @@ import {
 } from '@common/taskIcons'
 
 // Misc
+import { collectTaskFileChanges } from './fileDiff'
 import { selectTaskWithFullContext } from './select'
 import { TaskInstance } from './taskInstance'
 
@@ -205,6 +211,107 @@ class TaskManager {
     }
     catch (error) {
       console.error('Failed to provision task container', error)
+    }
+  }
+
+  public async evaluateFileDiff(taskId: string): Promise<EvaluateTaskFileDiffResult> {
+    const trimmedTaskId = taskId?.trim()
+    if (!trimmedTaskId) {
+      console.debug('Task evaluateFileDiff requested without taskId', { taskId })
+      return {
+        status: 'error',
+        error: 'Task ID is required',
+        httpStatus: 400,
+      }
+    }
+
+    const databaseClient = requireDatabaseClient('TaskManager evaluateFileDiff')
+
+    let taskInstance = this.taskInstances.get(trimmedTaskId) ?? null
+    let didHydrateTaskInstance = false
+    if (!taskInstance) {
+      const existingTask = await databaseClient.task.findUnique({
+        where: { id: trimmedTaskId },
+        include: selectTaskWithFullContext,
+      })
+
+      if (!existingTask) {
+        console.debug('Task evaluateFileDiff failed, task not found', {
+          taskId: trimmedTaskId,
+        })
+        return {
+          status: 'error',
+          error: 'Task not found',
+          httpStatus: 404,
+        }
+      }
+
+      taskInstance = new TaskInstance({
+        task: existingTask,
+        containerExists: false,
+      })
+      this.taskInstances.set(trimmedTaskId, taskInstance)
+      didHydrateTaskInstance = true
+    }
+
+    const containerExists = await taskInstance.refreshContainerStatus()
+    if (!containerExists) {
+      if (didHydrateTaskInstance) {
+        this.taskInstances.delete(trimmedTaskId)
+      }
+
+      console.debug('Task evaluateFileDiff failed, container not available', {
+        taskId: trimmedTaskId,
+        containerId: taskInstance.data.container,
+      })
+      return {
+        status: 'error',
+        error: 'Task container is not available',
+        httpStatus: 409,
+      }
+    }
+
+    try {
+      const fileChanges = await collectTaskFileChanges(taskInstance)
+
+      await databaseClient.$transaction(async (transaction) => {
+        await transaction.fileChange.deleteMany({
+          where: { taskId: trimmedTaskId },
+        })
+
+        if (!fileChanges.length) {
+          return
+        }
+
+        await transaction.fileChange.createMany({
+          data: fileChanges.map((fileChange) => ({
+            ...fileChange,
+            taskId: trimmedTaskId,
+          })),
+        })
+      })
+
+      return {
+        status: 'evaluated',
+        taskId: trimmedTaskId,
+        fileChangeCount: fileChanges.length,
+      }
+    }
+    catch (error) {
+      if (didHydrateTaskInstance) {
+        this.taskInstances.delete(trimmedTaskId)
+      }
+
+      console.error('Task evaluateFileDiff failed', {
+        taskId: trimmedTaskId,
+        error,
+      })
+
+      return {
+        status: 'error',
+        error: 'Failed to evaluate task file diff',
+        httpStatus: 500,
+      }
     }
   }
 
@@ -398,4 +505,3 @@ const taskManager: TaskManager = new TaskManager()
 export function getTaskManager(): TaskManager {
   return taskManager
 }
-

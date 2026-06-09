@@ -34,3 +34,15 @@ export type ArchiveTaskResult =
     status: 'archived'
     taskId: string
   }
+
+export type EvaluateTaskFileDiffResult =
+  | {
+    status: 'error'
+    error: string
+    httpStatus: number
+  }
+  | {
+    status: 'evaluated'
+    taskId: string
+    fileChangeCount: number
+  }

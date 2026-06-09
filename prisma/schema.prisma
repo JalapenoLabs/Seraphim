@@ -75,6 +75,22 @@ enum TaskState {
   Failed
 }
 
+enum FileChangeType {
+  Added
+  Modified
+  Deleted
+  TypeChanged
+  Untracked
+}
+
+enum FileContentType {
+  Utf8
+  Utf16Le
+  Utf16Be
+  Binary
+  Unknown
+}
+
 // ///////////////////////////// //
 //              Core             //
 // ///////////////////////////// //
@@ -128,6 +144,7 @@ model Task {
 
   turns    Turn[]
   messages Message[]
+  fileChanges FileChange[]
 
   name      String?
   icon      String? @default("HiOutlineCommandLine")
@@ -151,6 +168,32 @@ model Task {
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+}
+
+model FileChange {
+  id String @id @default(uuid())
+
+  taskId String @map("task_id")
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Details
+  path       String         @db.Text
+  changeType FileChangeType @map("change_type")
+  additions  Int            @default(0)
+  removals   Int            @default(0)
+
+  // Content
+  originalContent     String?         @db.Text @map("original_content")
+  originalContentType FileContentType? @map("original_content_type")
+  newContent          String?         @db.Text @map("new_content")
+  newContentType      FileContentType? @map("new_content_type")
+
+  // Metadata
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([taskId, path])
+  @@map("file_changes")
 }
 
 model Turn {
