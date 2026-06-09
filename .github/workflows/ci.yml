@@ -1,0 +1,93 @@
+name: CI
+
+# Test every pull request and every push to the long-lived branches.
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+# Don't pile up redundant runs for the same ref; a newer push supersedes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The three jobs are independent, so a failure in one never short-circuits the
+  # others ("no fail fast"). Within a job, checks use `if: ${{ !cancelled() }}`
+  # so a formatting failure still lets the tests run and report.
+
+  api:
+    name: API (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel (1.88) and components; rustup
+      # installs it automatically on the first cargo invocation.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            api/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('api/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        if: ${{ !cancelled() }}
+        run: cargo fmt --check
+
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: cargo test --all-features
+
+  frontend:
+    name: Frontend (SvelteKit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        if: ${{ !cancelled() }}
+        run: npm run check
+
+      - name: Build
+        if: ${{ !cancelled() }}
+        run: npm run build
+
+  images:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `docker compose build` reads the file's variable interpolation; provide
+      # placeholders so it parses cleanly. (Build needs no real secrets.)
+      - name: Provide placeholder env
+        run: cp .env.example .env
+
+      - name: Build images
+        run: docker compose build api frontend workspace
