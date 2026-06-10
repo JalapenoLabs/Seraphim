@@ -206,7 +206,7 @@
           <div
             bind:this={logEl}
             onscroll={onLogScroll}
-            class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 font-mono text-sm leading-relaxed"
+            class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 pb-[25vh] font-mono text-sm leading-relaxed"
           >
             {#if events.length === 0}
               <p class="text-muted-foreground">No activity yet.</p>

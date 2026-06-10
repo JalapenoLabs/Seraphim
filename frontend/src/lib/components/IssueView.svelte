@@ -2,14 +2,29 @@
   import type { IssueThread, IssueUser, Task } from '../types'
 
   import { onMount } from 'svelte'
-  import { CircleDot, CircleCheck, GitPullRequest, GitBranch } from '@lucide/svelte'
+  import { CircleDot, CircleCheck, GitPullRequest, GitBranch, ExternalLink, Plus, Link } from '@lucide/svelte'
 
   import { addIssueComment, getIssueThread } from '../api'
   import Markdown from './Markdown.svelte'
-  import { Button } from './ui/button'
+  import { Button, buttonVariants } from './ui/button'
   import { Textarea } from './ui/textarea'
 
   let { task }: { task: Task } = $props()
+
+  // GitHub URLs derived from the issue link: the repo root and its "new issue"
+  // chooser, so the header can link out without the repo full name on hand.
+  const repoUrl = $derived(task.url ? task.url.replace(/\/issues\/\d+.*$/, '') : '')
+  const newIssueUrl = $derived(repoUrl ? `${repoUrl}/issues/new/choose` : '')
+
+  let copied = $state(false)
+  async function copyLink() {
+    if (!task.url) {
+      return
+    }
+    await navigator.clipboard.writeText(task.url)
+    copied = true
+    setTimeout(() => (copied = false), 1500)
+  }
 
   let thread = $state<IssueThread | null>(null)
   let loadError = $state<string | null>(null)
@@ -101,10 +116,29 @@
 <div class="flex h-full flex-col">
   <!-- Issue header -->
   <header class="flex-none border-b border-border pb-4">
-    <h1 class="text-2xl font-semibold leading-tight">
-      {(thread?.issue.title ?? task.title)}
-      <span class="font-normal text-muted-foreground">#{task.external_id}</span>
-    </h1>
+    <div class="flex items-start justify-between gap-4">
+      <h1 class="min-w-0 text-2xl font-semibold leading-tight">
+        {(thread?.issue.title ?? task.title)}
+        <span class="font-normal text-muted-foreground">#{task.external_id}</span>
+      </h1>
+      <div class="flex flex-none items-center gap-2">
+        {#if task.url}
+          <a href={task.url} target="_blank" rel="noreferrer" class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            <ExternalLink class="size-4" /> Open
+          </a>
+        {/if}
+        {#if isGithub && newIssueUrl}
+          <a href={newIssueUrl} target="_blank" rel="noreferrer" class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            <Plus class="size-4" /> New issue
+          </a>
+        {/if}
+        {#if task.url}
+          <Button variant="outline" size="sm" onclick={copyLink}>
+            <Link class="size-4" /> {copied ? 'Copied' : 'Copy link'}
+          </Button>
+        {/if}
+      </div>
+    </div>
     {#if thread}
       <div class="mt-3 flex flex-wrap items-center gap-3">
         {#if thread.issue.state === 'open'}
