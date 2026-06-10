@@ -4,10 +4,12 @@
 
 use axum::extract::State;
 use axum::Json;
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json as SqlxJson;
 
 use super::ApiResult;
-use crate::db::models::ReviewPolicy;
+use crate::db::models::{AvailabilityWindow, ReviewPolicy};
 use crate::db::queries;
 use crate::state::AppState;
 
@@ -20,6 +22,20 @@ pub struct SettingsExport {
     pub base_setup_script: String,
     pub config_repo_url: String,
     pub default_branch_template: String,
+    // Default so bundles exported before the schedule feature still import.
+    #[serde(default)]
+    pub availability_enabled: bool,
+    #[serde(default = "default_timezone")]
+    pub availability_timezone: String,
+    #[serde(default)]
+    pub availability_windows: Vec<AvailabilityWindow>,
+    #[serde(default)]
+    pub availability_skip_dates: Vec<NaiveDate>,
+}
+
+/// Matches the database default so an older bundle imports as plain UTC.
+fn default_timezone() -> String {
+    "UTC".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +72,10 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             base_setup_script: settings.base_setup_script,
             config_repo_url: settings.config_repo_url,
             default_branch_template: settings.default_branch_template,
+            availability_enabled: settings.availability_enabled,
+            availability_timezone: settings.availability_timezone,
+            availability_windows: settings.availability_windows.0,
+            availability_skip_dates: settings.availability_skip_dates.0,
         },
         repositories: repositories
             .into_iter()
@@ -93,6 +113,10 @@ pub async fn import(
         Some(settings.base_setup_script),
         Some(settings.config_repo_url),
         Some(settings.default_branch_template),
+        Some(settings.availability_enabled),
+        Some(settings.availability_timezone),
+        Some(SqlxJson(settings.availability_windows)),
+        Some(SqlxJson(settings.availability_skip_dates)),
     )
     .await?;
 

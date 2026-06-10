@@ -39,6 +39,15 @@ export type Task = {
   updated_at: string
 }
 
+// A recurring weekly window the agent is allowed to work in. Minutes are counted
+// from local midnight in the operator's configured time zone; weekday is 0 =
+// Monday through 6 = Sunday (matching the Rust side).
+export type AvailabilityWindow = {
+  weekday: number
+  start_minute: number
+  end_minute: number
+}
+
 export type Settings = {
   org_name: string
   global_instructions: string
@@ -53,6 +62,11 @@ export type Settings = {
   updated_at: string
   claude_token_set: boolean
   github_token_set: boolean
+  availability_enabled: boolean
+  availability_timezone: string
+  availability_windows: AvailabilityWindow[]
+  // ISO calendar dates ("YYYY-MM-DD") to skip entirely.
+  availability_skip_dates: string[]
 }
 
 export type Repository = {

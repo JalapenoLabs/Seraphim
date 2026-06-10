@@ -4,6 +4,7 @@
 import ky from 'ky'
 
 import type {
+  AvailabilityWindow,
   BoardResponse,
   ConfigBundle,
   Repository,
@@ -86,6 +87,10 @@ export type UpdateSettingsRequest = {
   base_setup_script?: string
   config_repo_url?: string
   default_branch_template?: string
+  availability_enabled?: boolean
+  availability_timezone?: string
+  availability_windows?: AvailabilityWindow[]
+  availability_skip_dates?: string[]
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {
