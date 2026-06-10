@@ -8,7 +8,6 @@ mod board;
 mod data;
 mod repos;
 mod settings;
-mod sources;
 mod sse;
 mod tasks;
 mod workspace;
@@ -61,9 +60,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/hold", post(board::set_hold))
         .route("/repos", get(repos::list).post(repos::upsert))
         .route("/repos/:id", axum::routing::delete(repos::delete))
-        .route("/sources", get(sources::list).post(sources::create))
-        .route("/sources/:id", axum::routing::delete(sources::delete))
-        .route("/sources/sync", post(sources::sync))
+        .route("/repos/import-org", post(repos::import_org))
+        .route("/sync", post(repos::sync))
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
         .route("/workspace/restart", post(workspace::restart))

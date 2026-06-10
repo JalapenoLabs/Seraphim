@@ -3,7 +3,11 @@
 
   import { onMount } from 'svelte'
 
-  import { deleteRepo, listRepos, upsertRepo } from '$lib/api'
+  import { deleteRepo, importOrg, listRepos, upsertRepo } from '$lib/api'
+
+  // Form preferences (the defaults you tend to reuse) are remembered locally so a
+  // new repo form pre-fills with your last choices.
+  const PREFS_KEY = 'seraphim.repoFormPrefs'
 
   type FormState = {
     full_name: string
@@ -14,23 +18,58 @@
     instructions: string
     setup_script: string
     enabled: boolean
+    sync_issues: boolean
+    issue_labels: string
   }
 
-  function emptyForm(): FormState {
-    return {
-      full_name: '',
-      clone_url: '',
+  type FormPrefs = Pick<
+    FormState,
+    'default_branch' | 'branch_template' | 'review_policy' | 'enabled' | 'sync_issues' | 'issue_labels'
+  >
+
+  function loadPrefs(): FormPrefs {
+    const fallback: FormPrefs = {
       default_branch: 'main',
       branch_template: 'seraphim/issue-{number}-{slug}',
       review_policy: '',
-      instructions: '',
-      setup_script: '',
-      enabled: true
+      enabled: true,
+      sync_issues: true,
+      issue_labels: ''
     }
+    if (typeof localStorage === 'undefined') {
+      return fallback
+    }
+    try {
+      const stored = localStorage.getItem(PREFS_KEY)
+      return stored ? { ...fallback, ...JSON.parse(stored) } : fallback
+    } catch {
+      return fallback
+    }
+  }
+
+  function savePrefs(form: FormState) {
+    if (typeof localStorage === 'undefined') {
+      return
+    }
+    const prefs: FormPrefs = {
+      default_branch: form.default_branch,
+      branch_template: form.branch_template,
+      review_policy: form.review_policy,
+      enabled: form.enabled,
+      sync_issues: form.sync_issues,
+      issue_labels: form.issue_labels
+    }
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
+  }
+
+  function emptyForm(): FormState {
+    return { full_name: '', clone_url: '', instructions: '', setup_script: '', ...loadPrefs() }
   }
 
   let repos = $state<Repository[]>([])
   let form = $state<FormState>(emptyForm())
+  let importOwner = $state('')
+  let importMessage = $state<string | null>(null)
 
   async function load() {
     repos = await listRepos()
@@ -45,7 +84,9 @@
       review_policy: repo.review_policy ?? '',
       instructions: repo.instructions,
       setup_script: repo.setup_script,
-      enabled: repo.enabled
+      enabled: repo.enabled,
+      sync_issues: repo.sync_issues,
+      issue_labels: repo.issue_labels.join(', ')
     }
   }
 
@@ -53,8 +94,11 @@
     if (!form.full_name.trim()) {
       return
     }
-    // Default the clone URL from the full name for GitHub repos.
     const cloneUrl = form.clone_url.trim() || `https://github.com/${form.full_name.trim()}.git`
+    const labels = form.issue_labels
+      .split(',')
+      .map((label) => label.trim())
+      .filter(Boolean)
     await upsertRepo({
       full_name: form.full_name.trim(),
       clone_url: cloneUrl,
@@ -63,8 +107,11 @@
       review_policy: form.review_policy === '' ? null : form.review_policy,
       instructions: form.instructions,
       setup_script: form.setup_script,
-      enabled: form.enabled
+      enabled: form.enabled,
+      sync_issues: form.sync_issues,
+      issue_labels: labels
     })
+    savePrefs(form)
     form = emptyForm()
     await load()
   }
@@ -74,11 +121,35 @@
     await load()
   }
 
+  async function runImportOrg() {
+    if (!importOwner.trim()) {
+      return
+    }
+    importMessage = 'Importing…'
+    const result = await importOrg(importOwner.trim())
+    importMessage = `Discovered ${result.discovered}, imported ${result.imported} new.`
+    importOwner = ''
+    await load()
+  }
+
   onMount(load)
 </script>
 
 <div class="page">
   <h1>Repositories</h1>
+
+  <section class="panel">
+    <h2>Import from org</h2>
+    <p class="muted">
+      Pull in every repository under a GitHub org/user at once. New repos are added with issue-sync
+      on and your default branch template + review policy; existing repos are left untouched.
+    </p>
+    <div class="import-row">
+      <input placeholder="org or user (e.g. MooreslabAI)" bind:value={importOwner} />
+      <button onclick={runImportOrg}>Import</button>
+      {#if importMessage}<span class="muted">{importMessage}</span>{/if}
+    </div>
+  </section>
 
   <section class="panel">
     <h2>{form.full_name ? `Edit ${form.full_name}` : 'Add a repository'}</h2>
@@ -112,10 +183,19 @@
         <label for="enabled">Enabled</label>
         <input id="enabled" type="checkbox" bind:checked={form.enabled} />
       </div>
+      <div class="field checkbox">
+        <label for="sync">Sync issues from this repo</label>
+        <input id="sync" type="checkbox" bind:checked={form.sync_issues} />
+      </div>
+      <div class="field">
+        <label for="labels">Issue label filter (optional)</label>
+        <input id="labels" placeholder="comma-separated; blank = all" bind:value={form.issue_labels} />
+      </div>
     </div>
     <p class="hint">
-      Clone URL accepts SSH (<code>git@github.com:owner/repo.git</code>) or HTTPS. SSH uses your
-      mounted <code>~/.ssh</code> key; HTTPS uses <code>GH_TOKEN</code>.
+      <strong>Sync issues</strong> polls this repo's open issues into the Available column. Clone URL
+      accepts SSH (<code>git@github.com:owner/repo.git</code>, uses your mounted <code>~/.ssh</code>
+      key) or HTTPS (uses <code>GH_TOKEN</code>).
     </p>
     <div class="field">
       <label for="instr">Repo-specific instructions</label>
@@ -129,8 +209,9 @@
       <label for="rsetup">Setup script (run after clone/checkout)</label>
       <textarea id="rsetup" rows="3" bind:value={form.setup_script}></textarea>
       <p class="hint">
-        Runs in this repo after it's cloned/updated (e.g. <code>yarn install</code>,
-        <code>corepack enable</code>). Tools shared across all repos belong in the environment setup
+        Runs in this repo after it's cloned/updated. Newlines execute sequentially (no
+        <code>&amp;&amp;</code> needed), e.g. <code>corepack enable</code> then
+        <code>yarn install</code>. Tools shared across all repos belong in the environment setup
         script under Settings.
       </p>
     </div>
@@ -150,6 +231,7 @@
         <div class="info">
           <strong>{repo.full_name}</strong>
           <span class="badge">{repo.review_policy ?? 'inherit'}</span>
+          {#if repo.sync_issues}<span class="badge">syncing</span>{/if}
           {#if !repo.enabled}<span class="muted">disabled</span>{/if}
         </div>
         <div class="row-actions">
@@ -200,6 +282,16 @@
   .actions {
     display: flex;
     gap: 0.7rem;
+  }
+
+  .import-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .import-row input {
+    max-width: 320px;
   }
 
   .row {

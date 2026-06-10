@@ -5,10 +5,9 @@
 use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::ApiResult;
-use crate::db::models::{ReviewPolicy, SourceKind};
+use crate::db::models::ReviewPolicy;
 use crate::db::queries;
 use crate::state::AppState;
 
@@ -33,27 +32,20 @@ pub struct RepoExport {
     pub instructions: String,
     pub review_policy: Option<ReviewPolicy>,
     pub enabled: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SourceExport {
-    pub kind: SourceKind,
-    pub config: Value,
-    pub poll_interval_secs: i32,
+    pub sync_issues: bool,
+    pub issue_labels: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
     pub settings: SettingsExport,
     pub repositories: Vec<RepoExport>,
-    pub sources: Vec<SourceExport>,
 }
 
 /// `GET /api/v1/export` - the portable config bundle.
 pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundle>> {
     let settings = queries::get_settings(&state.db).await?;
     let repositories = queries::list_repositories(&state.db).await?;
-    let sources = queries::list_issue_sources(&state.db).await?;
 
     let bundle = ConfigBundle {
         settings: SettingsExport {
@@ -76,14 +68,8 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
                 instructions: repo.instructions,
                 review_policy: repo.review_policy,
                 enabled: repo.enabled,
-            })
-            .collect(),
-        sources: sources
-            .into_iter()
-            .map(|source| SourceExport {
-                kind: source.kind,
-                config: source.config.0,
-                poll_interval_secs: source.poll_interval_secs,
+                sync_issues: repo.sync_issues,
+                issue_labels: repo.issue_labels,
             })
             .collect(),
     };
@@ -121,29 +107,14 @@ pub async fn import(
             &repo.instructions,
             repo.review_policy,
             repo.enabled,
+            repo.sync_issues,
+            &repo.issue_labels,
         )
         .await?;
-    }
-
-    let existing = queries::list_issue_sources(&state.db).await?;
-    for source in &bundle.sources {
-        let already_present = existing
-            .iter()
-            .any(|current| current.kind == source.kind && current.config.0 == source.config);
-        if !already_present {
-            queries::create_issue_source(
-                &state.db,
-                source.kind,
-                source.config.clone(),
-                source.poll_interval_secs,
-            )
-            .await?;
-        }
     }
 
     state.notify_board();
     Ok(Json(serde_json::json!({
         "imported_repositories": bundle.repositories.len(),
-        "imported_sources": bundle.sources.len(),
     })))
 }

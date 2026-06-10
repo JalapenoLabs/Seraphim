@@ -63,16 +63,8 @@ export type Repository = {
   instructions: string
   review_policy: ReviewPolicy | null
   enabled: boolean
-  created_at: string
-  updated_at: string
-}
-
-export type IssueSource = {
-  id: string
-  kind: SourceKind
-  config: Record<string, unknown>
-  poll_interval_secs: number
-  enabled: boolean
+  sync_issues: boolean
+  issue_labels: string[]
   created_at: string
   updated_at: string
 }
@@ -119,5 +111,4 @@ export const KNOWN_MODELS: string[] = [
 export type ConfigBundle = {
   settings: Record<string, unknown>
   repositories: unknown[]
-  sources: unknown[]
 }

@@ -22,10 +22,9 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::claude::{run_turn, AgentEventKind, TurnArgs};
-use crate::db::models::{Repository, ReviewPolicy, Task, TaskColumn, TaskStatus};
+use crate::db::models::{Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
 use crate::db::queries;
 use crate::git;
-use crate::sources::Source;
 use crate::state::AppState;
 
 /// How often the agent loop checks for work when idle.
@@ -64,66 +63,46 @@ async fn sync_loop(state: AppState) {
     }
 }
 
-/// Runs one full issue-sync pass across all enabled sources. Also callable from
-/// the HTTP layer to power the "Check issues" button.
+/// Runs one full issue-sync pass across every repo flagged to sync. Also
+/// callable from the HTTP layer to power the "Check issues" button.
 pub async fn sync_once(state: &AppState) -> Result<()> {
-    let settings = queries::get_settings(&state.db).await?;
-    let sources = queries::list_enabled_issue_sources(&state.db).await?;
+    let repos = queries::list_repositories_to_sync(&state.db).await?;
     let mut changed = false;
 
-    for model in &sources {
-        let source = match Source::from_model(model, &state.github) {
-            Ok(source) => source,
-            Err(error) => {
-                warn!(error = %error, "skipping misconfigured issue source");
-                continue;
-            }
+    for repo in &repos {
+        let Some((owner, name)) = repo.full_name.split_once('/') else {
+            warn!(repo = %repo.full_name, "repo full name is not owner/repo");
+            continue;
         };
 
-        let targets = match source.targets().await {
-            Ok(targets) => targets,
-            Err(error) => {
-                warn!(error = %error, "failed to resolve source repos");
-                continue;
-            }
-        };
-
-        for target in &targets {
-            // Make sure a repository row exists so synced issues are workable.
-            let repo = ensure_repository(state, &settings, target).await?;
-
-            let issues = match source.list_issues_for(target).await {
+        let issues =
+            match git::list_open_issues(&state.github, owner, name, &repo.issue_labels).await {
                 Ok(issues) => issues,
                 Err(error) => {
-                    warn!(error = %error, repo = %target.full_name, "failed to list issues");
+                    warn!(error = %error, repo = %repo.full_name, "failed to list issues");
                     continue;
                 }
             };
 
-            for issue in issues {
-                // New issues land at the end of Available; existing ones refresh.
-                let next_position =
-                    queries::max_position_in_column(&state.db, TaskColumn::Available)
-                        .await?
-                        .unwrap_or(0.0)
-                        + 1.0;
+        for issue in issues {
+            // New issues land at the end of Available; existing ones refresh.
+            let next_position = queries::max_position_in_column(&state.db, TaskColumn::Available)
+                .await?
+                .unwrap_or(0.0)
+                + 1.0;
 
-                let task = queries::upsert_issue_task(
-                    &state.db,
-                    source.kind(),
-                    &issue.external_id,
-                    Some(repo.id),
-                    &issue.title,
-                    &issue.body,
-                    &issue.url,
-                    next_position,
-                )
-                .await?;
-                queries::set_task_repo(&state.db, task.id, repo.id)
-                    .await
-                    .ok();
-                changed = true;
-            }
+            queries::upsert_issue_task(
+                &state.db,
+                SourceKind::Github,
+                &issue.number.to_string(),
+                Some(repo.id),
+                &issue.title,
+                &issue.body,
+                &issue.url,
+                next_position,
+            )
+            .await?;
+            changed = true;
         }
     }
 
@@ -131,33 +110,6 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
         state.notify_board();
     }
     Ok(())
-}
-
-/// Returns the repository row for a target, auto-creating it (with org-level
-/// defaults) the first time we discover it. Existing rows are left untouched so
-/// the agent never clobbers your manual edits.
-async fn ensure_repository(
-    state: &AppState,
-    settings: &crate::db::models::Settings,
-    target: &crate::sources::types::RepoTarget,
-) -> Result<Repository> {
-    if let Some(repo) = queries::get_repository_by_full_name(&state.db, &target.full_name).await? {
-        return Ok(repo);
-    }
-
-    let repo = queries::upsert_repository(
-        &state.db,
-        &target.full_name,
-        &target.clone_url,
-        &target.default_branch,
-        &settings.default_branch_template,
-        "",
-        "",
-        None, // inherit the default review policy
-        true,
-    )
-    .await?;
-    Ok(repo)
 }
 
 // --- Agent loop --------------------------------------------------------------

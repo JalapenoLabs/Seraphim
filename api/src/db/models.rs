@@ -88,18 +88,10 @@ pub struct Repository {
     pub instructions: String,
     pub review_policy: Option<ReviewPolicy>,
     pub enabled: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// A configured place to pull issues from.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
-pub struct IssueSource {
-    pub id: Uuid,
-    pub kind: SourceKind,
-    pub config: Json<serde_json::Value>,
-    pub poll_interval_secs: i32,
-    pub enabled: bool,
+    /// Poll this repo for issues during sync.
+    pub sync_issues: bool,
+    /// Only sync issues carrying all of these labels (empty = no filter).
+    pub issue_labels: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

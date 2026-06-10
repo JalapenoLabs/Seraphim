@@ -1,4 +1,5 @@
-//! GitHub pull-request operations: detection, CI status, and squash-merge.
+//! GitHub operations via octocrab: issue listing, org repo discovery, and
+//! pull-request detection / CI status / squash-merge.
 //!
 //! The agent itself opens PRs with `gh` inside the workspace. Seraphim then
 //! detects and acts on them deterministically here, rather than parsing the
@@ -9,6 +10,91 @@ use octocrab::params::pulls::MergeMethod;
 use octocrab::params::State;
 use octocrab::Octocrab;
 use serde::Deserialize;
+
+/// How many issues we pull per repo per sync, and repos per org per discovery.
+const PER_PAGE: u8 = 100;
+
+/// An open issue synced into the board.
+#[derive(Debug, Clone)]
+pub struct OpenIssue {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub url: String,
+}
+
+/// Lists open issues for a repo (excluding PRs), optionally label-filtered.
+pub async fn list_open_issues(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    labels: &[String],
+) -> Result<Vec<OpenIssue>> {
+    let handler = octo.issues(owner, repo);
+    let mut request = handler.list().state(State::Open).per_page(PER_PAGE);
+    if !labels.is_empty() {
+        request = request.labels(labels);
+    }
+
+    let page = request
+        .send()
+        .await
+        .wrap_err_with(|| format!("failed to list issues for {owner}/{repo}"))?;
+
+    Ok(page
+        .items
+        .into_iter()
+        .filter(|issue| issue.pull_request.is_none())
+        .map(|issue| OpenIssue {
+            number: issue.number,
+            title: issue.title,
+            body: issue.body.unwrap_or_default(),
+            url: issue.html_url.to_string(),
+        })
+        .collect())
+}
+
+/// A repo discovered when importing an org.
+#[derive(Debug, Clone)]
+pub struct DiscoveredRepo {
+    pub full_name: String,
+    pub clone_url: String,
+    pub default_branch: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoLite {
+    full_name: String,
+    ssh_url: Option<String>,
+    clone_url: Option<String>,
+    default_branch: Option<String>,
+    #[serde(default)]
+    archived: bool,
+}
+
+/// Enumerates every non-archived repo under an org/user (SSH clone URLs).
+pub async fn list_org_repos(octo: &Octocrab, owner: &str) -> Result<Vec<DiscoveredRepo>> {
+    let repos: Vec<RepoLite> = octo
+        .get(
+            format!("/orgs/{owner}/repos?per_page={PER_PAGE}&type=all"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err_with(|| format!("failed to list repos for org {owner}"))?;
+
+    Ok(repos
+        .into_iter()
+        .filter(|repo| !repo.archived)
+        .filter_map(|repo| {
+            let clone_url = repo.ssh_url.or(repo.clone_url)?;
+            Some(DiscoveredRepo {
+                full_name: repo.full_name,
+                clone_url,
+                default_branch: repo.default_branch.unwrap_or_else(|| "main".to_string()),
+            })
+        })
+        .collect())
+}
 
 /// An open pull request the agent opened for a work branch.
 #[derive(Debug, Clone)]

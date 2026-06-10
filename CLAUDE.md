@@ -104,9 +104,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `current_session_id` (the one shared Claude session).
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
-  `review_policy` (NULL = inherit default), `enabled`.
-- **`issue_sources`** — `kind`, `config` jsonb (`{owner, repo?, labels?}`; blank
-  `repo` = whole-org auto-discovery), `poll_interval_secs`, `enabled`.
+  `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this
+  repo for issues), `issue_labels` (label filter). There is **no** separate
+  issue-source entity; a repo with `sync_issues` is its own source. Bulk
+  onboarding is the one-shot **Import from org** action (`POST /repos/import-org`).
 - **`tasks`** — the cards: `source_kind`, `external_id`, `repo_id`, `title`,
   `board_column`, `position` (fractional rank), `status`, `branch`, `pr_url`,
   `error`, `hold`, `session_id`.
@@ -134,9 +135,9 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `~/.ssh` for `git@` clones; `GH_TOKEN` for HTTPS + octocrab.
 
 ### The three orchestrator loops (`api/src/orchestrator/mod.rs`)
-1. **sync** — polls enabled sources, resolves repo targets (auto-creates repo
-   rows in org mode), upserts issues into **Available** (never clobbers
-   human-set column/position). Also callable via `POST /sources/sync`.
+1. **sync** — polls every repo with `sync_issues` for open issues and upserts
+   them into **Available** (never clobbers human-set column/position). Tasks are
+   unique per `(repo_id, source_kind, external_id)`. Callable via `POST /sync`.
 2. **agent** — single-threaded: when not paused and idle, pulls top of **To Do**,
    prepares the branch, drives one Claude turn, detects the PR, moves to
    **In Review**. One task awaited to completion before the next (no overlap).
@@ -208,7 +209,9 @@ fail-fast) on every PR and on `main`/`develop`.
 - **Real end-to-end run is unproven** — a full Claude turn → PR → auto-merge needs
   `CLAUDE_CODE_OAUTH_TOKEN` + `GH_TOKEN` set. SSH cloning of a real private repo
   (`yearloom`) is already verified.
-- **Jira source** — `Source::Jira` currently errors; needs implementation.
+- **Jira source** — not implemented. The GitHub path is folded into repos
+  (`sync_issues`); Jira (issues not bound to a GitHub repo) will need its own
+  modeling when added. `SourceKind` enum and `tasks.source_kind` already exist.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
 - **Multi-repo PRs** — one primary repo per task for PR detection; cross-repo

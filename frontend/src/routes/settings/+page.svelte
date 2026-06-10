@@ -1,16 +1,13 @@
 <script lang="ts">
-  import type { IssueSource, ReviewPolicy, Settings } from '$lib/types'
+  import type { ReviewPolicy, Settings } from '$lib/types'
 
   import { onMount } from 'svelte'
 
   import { KNOWN_MODELS } from '$lib/types'
   import {
-    createSource,
-    deleteSource,
     exportConfig,
     getSettings,
     importConfig,
-    listSources,
     recreateWorkspace,
     restartWorkspace,
     updateSettings
@@ -19,7 +16,6 @@
   const CUSTOM_MODEL = '__custom__'
 
   let settings = $state<Settings | null>(null)
-  let sources = $state<IssueSource[]>([])
   let savedAt = $state<string | null>(null)
   let workspaceMessage = $state<string | null>(null)
   let importMessage = $state<string | null>(null)
@@ -27,16 +23,10 @@
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
   let modelChoice = $state<string>(KNOWN_MODELS[0])
 
-  // New source form (repo blank = whole-org auto-discovery).
-  let newOwner = $state('')
-  let newRepo = $state('')
-  let newLabels = $state('')
-
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
 
   async function load() {
     settings = await getSettings()
-    sources = await listSources()
     modelChoice = KNOWN_MODELS.includes(settings.claude_model)
       ? settings.claude_model
       : CUSTOM_MODEL
@@ -62,30 +52,6 @@
       default_branch_template: settings.default_branch_template
     })
     savedAt = new Date().toLocaleTimeString()
-  }
-
-  async function addSource() {
-    if (!newOwner.trim()) {
-      return
-    }
-    const labels = newLabels
-      .split(',')
-      .map((label) => label.trim())
-      .filter(Boolean)
-    const config: Record<string, unknown> = { owner: newOwner.trim(), labels }
-    if (newRepo.trim()) {
-      config.repo = newRepo.trim()
-    }
-    await createSource('github', config)
-    newOwner = ''
-    newRepo = ''
-    newLabels = ''
-    sources = await listSources()
-  }
-
-  async function removeSource(sourceId: string) {
-    await deleteSource(sourceId)
-    sources = await listSources()
   }
 
   async function runRestart() {
@@ -218,32 +184,6 @@
     </section>
 
     <section class="panel">
-      <h2>Issue sources</h2>
-      {#if sources.length === 0}
-        <p class="muted">No sources configured.</p>
-      {/if}
-      {#each sources as source}
-        <div class="row">
-          <span class="badge">{source.kind}</span>
-          <span class="mono">{JSON.stringify(source.config)}</span>
-          <button onclick={() => removeSource(source.id)}>Remove</button>
-        </div>
-      {/each}
-
-      <div class="add-source">
-        <input placeholder="owner / org" bind:value={newOwner} />
-        <input placeholder="repo (blank = whole org)" bind:value={newRepo} />
-        <input placeholder="labels (comma-separated, optional)" bind:value={newLabels} />
-        <button onclick={addSource}>Add source</button>
-      </div>
-      <p class="hint">
-        Leave <strong>repo</strong> blank to auto-discover every repository under the org and pull
-        their issues. Each discovered repo is added with your default branch template and review
-        policy, editable on the Repositories page.
-      </p>
-    </section>
-
-    <section class="panel">
       <h2>Backup & transfer</h2>
       <p class="muted">
         Export your settings, repositories, and sources as JSON to move a setup to another machine.
@@ -324,31 +264,6 @@
 
   .custom-model {
     margin-top: 0.4rem;
-  }
-
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.4rem 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .mono {
-    font-family: ui-monospace, monospace;
-    font-size: 0.8rem;
-    color: var(--muted);
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .add-source {
-    display: grid;
-    grid-template-columns: 1fr 1fr 2fr auto;
-    gap: 0.5rem;
-    margin-top: 0.8rem;
   }
 
   .import-button {

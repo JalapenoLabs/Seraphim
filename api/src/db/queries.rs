@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    IssueSource, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
+    Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -88,6 +88,15 @@ pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
         .await
 }
 
+/// Repos the sync loop should poll for issues.
+pub async fn list_repositories_to_sync(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
+    sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE sync_issues = TRUE AND enabled = TRUE ORDER BY full_name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn get_repository(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Repository>> {
     sqlx::query_as::<_, Repository>("SELECT * FROM repositories WHERE id = $1")
         .bind(id)
@@ -117,11 +126,14 @@ pub async fn upsert_repository(
     instructions: &str,
     review_policy: Option<ReviewPolicy>,
     enabled: bool,
+    sync_issues: bool,
+    issue_labels: &[String],
 ) -> sqlx::Result<Repository> {
     sqlx::query_as::<_, Repository>(
         "INSERT INTO repositories \
-         (full_name, clone_url, default_branch, branch_template, setup_script, instructions, review_policy, enabled) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         (full_name, clone_url, default_branch, branch_template, setup_script, instructions, \
+          review_policy, enabled, sync_issues, issue_labels) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (full_name) DO UPDATE SET \
          clone_url = EXCLUDED.clone_url, \
          default_branch = EXCLUDED.default_branch, \
@@ -130,6 +142,8 @@ pub async fn upsert_repository(
          instructions = EXCLUDED.instructions, \
          review_policy = EXCLUDED.review_policy, \
          enabled = EXCLUDED.enabled, \
+         sync_issues = EXCLUDED.sync_issues, \
+         issue_labels = EXCLUDED.issue_labels, \
          updated_at = now() \
          RETURNING *",
     )
@@ -141,51 +155,46 @@ pub async fn upsert_repository(
     .bind(instructions)
     .bind(review_policy)
     .bind(enabled)
+    .bind(sync_issues)
+    .bind(issue_labels)
     .fetch_one(pool)
+    .await
+}
+
+/// Like [`upsert_repository`] but only creates a row when one doesn't already
+/// exist (used by org import so it never clobbers your manual edits). Returns the
+/// existing or newly-created repo.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_repository_if_absent(
+    pool: &PgPool,
+    full_name: &str,
+    clone_url: &str,
+    default_branch: &str,
+    branch_template: &str,
+    sync_issues: bool,
+    issue_labels: &[String],
+) -> sqlx::Result<Repository> {
+    if let Some(existing) = get_repository_by_full_name(pool, full_name).await? {
+        return Ok(existing);
+    }
+    upsert_repository(
+        pool,
+        full_name,
+        clone_url,
+        default_branch,
+        branch_template,
+        "",
+        "",
+        None,
+        true,
+        sync_issues,
+        issue_labels,
+    )
     .await
 }
 
 pub async fn delete_repository(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM repositories WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-// --- Issue sources -----------------------------------------------------------
-
-pub async fn list_issue_sources(pool: &PgPool) -> sqlx::Result<Vec<IssueSource>> {
-    sqlx::query_as::<_, IssueSource>("SELECT * FROM issue_sources ORDER BY created_at")
-        .fetch_all(pool)
-        .await
-}
-
-pub async fn list_enabled_issue_sources(pool: &PgPool) -> sqlx::Result<Vec<IssueSource>> {
-    sqlx::query_as::<_, IssueSource>("SELECT * FROM issue_sources WHERE enabled = TRUE")
-        .fetch_all(pool)
-        .await
-}
-
-pub async fn create_issue_source(
-    pool: &PgPool,
-    kind: SourceKind,
-    config: Value,
-    poll_interval_secs: i32,
-) -> sqlx::Result<IssueSource> {
-    sqlx::query_as::<_, IssueSource>(
-        "INSERT INTO issue_sources (kind, config, poll_interval_secs) \
-         VALUES ($1, $2, $3) RETURNING *",
-    )
-    .bind(kind)
-    .bind(Json(config))
-    .bind(poll_interval_secs)
-    .fetch_one(pool)
-    .await
-}
-
-pub async fn delete_issue_source(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM issue_sources WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await?;
@@ -223,11 +232,10 @@ pub async fn upsert_issue_task(
     sqlx::query_as::<_, Task>(
         "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, board_column, position) \
          VALUES ($1, $2, $3, $4, $5, $6, 'available', $7) \
-         ON CONFLICT (source_kind, external_id) DO UPDATE SET \
+         ON CONFLICT (repo_id, source_kind, external_id) DO UPDATE SET \
          title = EXCLUDED.title, \
          body_snapshot = EXCLUDED.body_snapshot, \
          url = EXCLUDED.url, \
-         repo_id = COALESCE(tasks.repo_id, EXCLUDED.repo_id), \
          updated_at = now() \
          RETURNING *",
     )
@@ -308,18 +316,6 @@ pub async fn list_review_candidates(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
     )
     .fetch_all(pool)
     .await
-}
-
-/// Sets a task's `repo_id` when sync first learns which repo an issue belongs to.
-pub async fn set_task_repo(pool: &PgPool, id: Uuid, repo_id: Uuid) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE tasks SET repo_id = $2, updated_at = now() WHERE id = $1 AND repo_id IS NULL",
-    )
-    .bind(id)
-    .bind(repo_id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 /// Records the branch and session a task is being worked under, and stamps it

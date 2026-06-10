@@ -1,13 +1,15 @@
-//! Repository configuration endpoints.
+//! Repository configuration, issue sync, and org import.
 
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
 use crate::db::models::{Repository, ReviewPolicy};
 use crate::db::queries;
+use crate::git;
 use crate::state::AppState;
 
 /// `GET /api/v1/repos`
@@ -30,6 +32,10 @@ pub struct UpsertRepoRequest {
     pub review_policy: Option<ReviewPolicy>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub sync_issues: bool,
+    #[serde(default)]
+    pub issue_labels: Vec<String>,
 }
 
 fn default_branch() -> String {
@@ -59,8 +65,11 @@ pub async fn upsert(
         &body.instructions,
         body.review_policy,
         body.enabled,
+        body.sync_issues,
+        &body.issue_labels,
     )
     .await?;
+    state.notify_board();
     Ok(Json(repo))
 }
 
@@ -70,5 +79,55 @@ pub async fn delete(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     queries::delete_repository(&state.db, id).await?;
-    Ok(Json(serde_json::json!({ "deleted": true })))
+    Ok(Json(json!({ "deleted": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportOrgRequest {
+    pub owner: String,
+    /// Optional label filter applied to every imported repo's issue sync.
+    #[serde(default)]
+    pub issue_labels: Vec<String>,
+}
+
+/// `POST /api/v1/repos/import-org` - discover every repo under an org/user and
+/// add the ones we don't already track (issue-syncing on, your org defaults).
+pub async fn import_org(
+    State(state): State<AppState>,
+    Json(body): Json<ImportOrgRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let settings = queries::get_settings(&state.db).await?;
+    let discovered = git::list_org_repos(&state.github, &body.owner).await?;
+
+    let mut imported = 0_usize;
+    for repo in &discovered {
+        let existed = queries::get_repository_by_full_name(&state.db, &repo.full_name)
+            .await?
+            .is_some();
+        queries::create_repository_if_absent(
+            &state.db,
+            &repo.full_name,
+            &repo.clone_url,
+            &repo.default_branch,
+            &settings.default_branch_template,
+            true,
+            &body.issue_labels,
+        )
+        .await?;
+        if !existed {
+            imported += 1;
+        }
+    }
+
+    state.notify_board();
+    Ok(Json(json!({
+        "discovered": discovered.len(),
+        "imported": imported,
+    })))
+}
+
+/// `POST /api/v1/sync` - run an immediate issue sync ("Check issues").
+pub async fn sync(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    crate::orchestrator::sync_once(&state).await?;
+    Ok(Json(json!({ "status": "synced" })))
 }

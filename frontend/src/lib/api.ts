@@ -6,11 +6,9 @@ import ky from 'ky'
 import type {
   BoardResponse,
   ConfigBundle,
-  IssueSource,
   Repository,
   ReviewPolicy,
   Settings,
-  SourceKind,
   Task,
   TaskColumn,
   TaskDetail
@@ -51,6 +49,8 @@ export type UpsertRepoRequest = {
   instructions?: string
   review_policy?: ReviewPolicy | null
   enabled?: boolean
+  sync_issues?: boolean
+  issue_labels?: string[]
 }
 
 export function upsertRepo(body: UpsertRepoRequest) {
@@ -61,22 +61,15 @@ export function deleteRepo(repoId: string) {
   return apiClient.delete(`repos/${repoId}`).json()
 }
 
-// --- Issue sources -----------------------------------------------------------
-
-export function listSources() {
-  return apiClient.get('sources').json<IssueSource[]>()
-}
-
-export function createSource(kind: SourceKind, config: Record<string, unknown>) {
-  return apiClient.post('sources', { json: { kind, config } }).json<IssueSource>()
-}
-
-export function deleteSource(sourceId: string) {
-  return apiClient.delete(`sources/${sourceId}`).json()
+export function importOrg(owner: string, issueLabels: string[] = []) {
+  return apiClient.post('repos/import-org', { json: { owner, issue_labels: issueLabels } }).json<{
+    discovered: number
+    imported: number
+  }>()
 }
 
 export function syncNow() {
-  return apiClient.post('sources/sync').json()
+  return apiClient.post('sync').json()
 }
 
 // --- Settings + workspace ----------------------------------------------------
