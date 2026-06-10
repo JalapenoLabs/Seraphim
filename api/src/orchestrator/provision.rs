@@ -12,6 +12,7 @@
 use base64::Engine;
 use eyre::{eyre, Result};
 
+use super::network;
 use crate::db::models::{Repository, Settings};
 use crate::db::queries;
 use crate::state::AppState;
@@ -44,6 +45,7 @@ fn config_repo_snippet(config_repo_url: &str) -> String {
     }
     format!(
         "if [ -d \"$CLAUDE_CONFIG_DIR/.git\" ]; then\n\
+           git -C \"$CLAUDE_CONFIG_DIR\" checkout -- . 2>/dev/null || true\n\
            git -C \"$CLAUDE_CONFIG_DIR\" pull --ff-only\n\
          else\n\
            mkdir -p \"$CLAUDE_CONFIG_DIR\"\n\
@@ -105,12 +107,80 @@ pub async fn provision_config_repo(state: &AppState) -> Result<()> {
     }
 }
 
-/// Full provision: config repo (hard fail) + env setup + every enabled repo
-/// (clone/update, per-repo CLAUDE.md, per-repo setup).
+/// A small Python program that merges the managed network `permissions` block
+/// into the agent's `settings.json` without clobbering anything else. It reads
+/// the target path and the managed `{allow, deny}` object from the environment,
+/// drops any previously-managed network rules, keeps the operator's own rules,
+/// and appends the current policy. Python (not jq) because it ships in the
+/// workspace image and handles "file missing / not yet valid JSON" cleanly.
+const NETWORK_MERGE_PY: &str = r#"
+import json, os
+
+path = os.environ["SERAPHIM_SETTINGS_PATH"]
+managed = json.loads(os.environ["SERAPHIM_MANAGED_PERMS"])
+
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        data = {}
+except (FileNotFoundError, json.JSONDecodeError):
+    data = {}
+
+perms = data.get("permissions")
+if not isinstance(perms, dict):
+    perms = {}
+data["permissions"] = perms
+
+def is_network_rule(rule):
+    return (
+        rule == "WebFetch"
+        or rule.startswith("WebFetch(")
+        or rule == "WebSearch"
+        or rule in ("Bash(curl:*)", "Bash(wget:*)")
+    )
+
+for key in ("allow", "deny"):
+    current = perms.get(key)
+    current = [r for r in current if isinstance(r, str)] if isinstance(current, list) else []
+    kept = [r for r in current if not is_network_rule(r)]
+    added = [r for r in managed.get(key, []) if r not in kept]
+    perms[key] = kept + added
+
+with open(path, "w") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+"#;
+
+/// Translates the operator's network access policy into the agent's
+/// `~/.claude/settings.json` permissions and merges it in. Runs after the config
+/// repo is (re)cloned so it patches whatever `settings.json` the operator ships,
+/// rather than being overwritten by it.
+pub async fn apply_network_policy(state: &AppState) -> Result<()> {
+    let settings = queries::get_settings(&state.db).await?;
+    let managed = encode(&serde_json::to_string(&network::managed_permissions(
+        &settings,
+    ))?);
+    let script = encode(NETWORK_MERGE_PY);
+
+    let bash = format!(
+        ": \"${{CLAUDE_CONFIG_DIR:=/workspace/.claude}}\"\n\
+         mkdir -p \"$CLAUDE_CONFIG_DIR\"\n\
+         SERAPHIM_SETTINGS_PATH=\"$CLAUDE_CONFIG_DIR/settings.json\" \\\n\
+         SERAPHIM_MANAGED_PERMS=\"$(echo {managed} | base64 -d)\" \\\n\
+         python3 -c \"$(echo {script} | base64 -d)\"\n",
+    );
+    run(state, &bash).await
+}
+
+/// Full provision: config repo (hard fail) + network policy + env setup + every
+/// enabled repo (clone/update, per-repo CLAUDE.md, per-repo setup).
 pub async fn provision_workspace(state: &AppState) -> Result<()> {
     // The config repo is the agent's brain (AGENTS.md, skills, docs); set it up
     // first and stop if it fails.
     provision_config_repo(state).await?;
+    // Then stamp the network policy onto its settings.json (or a fresh one).
+    apply_network_policy(state).await?;
 
     let settings = queries::get_settings(&state.db).await?;
     let repos = queries::list_repositories(&state.db).await?;

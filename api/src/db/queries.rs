@@ -12,9 +12,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, PendingQuestion, Question,
-    QuestionOption, QuestionStatus, Repository, ReviewPolicy, Settings, SourceKind, Task,
-    TaskColumn, TaskStatus, Turn,
+    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, NetworkAccessLevel,
+    PendingQuestion, Question, QuestionOption, QuestionStatus, Repository, ReviewPolicy, Settings,
+    SourceKind, Task, TaskColumn, TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -29,7 +29,8 @@ const SETTINGS_COLUMNS: &str =
      (claude_oauth_token <> '') AS claude_token_set, \
      (github_token <> '') AS github_token_set, \
      availability_enabled, availability_timezone, availability_windows, \
-     availability_skip_dates";
+     availability_skip_dates, network_access_level, network_access_domains, \
+     network_access_include_defaults";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -58,6 +59,9 @@ pub async fn update_settings(
     availability_timezone: Option<String>,
     availability_windows: Option<Json<Vec<AvailabilityWindow>>>,
     availability_skip_dates: Option<Json<Vec<NaiveDate>>>,
+    network_access_level: Option<NetworkAccessLevel>,
+    network_access_domains: Option<Json<Vec<String>>>,
+    network_access_include_defaults: Option<bool>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -72,6 +76,10 @@ pub async fn update_settings(
          availability_timezone = COALESCE($9, availability_timezone), \
          availability_windows = COALESCE($10, availability_windows), \
          availability_skip_dates = COALESCE($11, availability_skip_dates), \
+         network_access_level = COALESCE($12, network_access_level), \
+         network_access_domains = COALESCE($13, network_access_domains), \
+         network_access_include_defaults = \
+             COALESCE($14, network_access_include_defaults), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -87,6 +95,9 @@ pub async fn update_settings(
     .bind(availability_timezone)
     .bind(availability_windows)
     .bind(availability_skip_dates)
+    .bind(network_access_level)
+    .bind(network_access_domains)
+    .bind(network_access_include_defaults)
     .fetch_one(pool)
     .await
 }

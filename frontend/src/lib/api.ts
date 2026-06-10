@@ -13,6 +13,7 @@ import type {
   IssueComment,
   IssueDetail,
   IssueThread,
+  NetworkAccessLevel,
   PendingQuestion,
   Question,
   Repository,
@@ -144,6 +145,9 @@ export type UpdateSettingsRequest = {
   availability_timezone?: string
   availability_windows?: AvailabilityWindow[]
   availability_skip_dates?: string[]
+  network_access_level?: NetworkAccessLevel
+  network_access_domains?: string[]
+  network_access_include_defaults?: boolean
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {

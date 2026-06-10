@@ -1,5 +1,11 @@
 <script lang="ts">
-  import type { AvailabilityWindow, EnvVar, ReviewPolicy, Settings } from '$lib/types'
+  import type {
+    AvailabilityWindow,
+    EnvVar,
+    NetworkAccessLevel,
+    ReviewPolicy,
+    Settings
+  } from '$lib/types'
   import type { EnvVarWrite } from '$lib/api'
 
   import { onMount } from 'svelte'
@@ -73,6 +79,33 @@
 
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
 
+  // Network access policy. Domains are edited as free text (one per line or
+  // whitespace-separated) and split on save, per the issue's spec.
+  let networkLevel = $state<NetworkAccessLevel>('full')
+  let networkDomains = $state('')
+  let networkIncludeDefaults = $state(true)
+  let networkSavedAt = $state<string | null>(null)
+
+  // Order and copy mirror the claude.ai network-access selector.
+  const NETWORK_LEVELS: { value: NetworkAccessLevel; title: string; description: string }[] = [
+    { value: 'none', title: 'None', description: 'Blocks internet access for maximum security.' },
+    {
+      value: 'trusted',
+      title: 'Trusted',
+      description: 'Downloads packages from verified sources.'
+    },
+    {
+      value: 'full',
+      title: 'Full',
+      description: 'Unrestricted internet access for maximum flexibility.'
+    },
+    { value: 'custom', title: 'Custom', description: 'Create a list of allowed domains.' }
+  ]
+
+  const networkLabel = $derived(
+    NETWORK_LEVELS.find((level) => level.value === networkLevel)?.title ?? networkLevel
+  )
+
   const modelLabel = $derived(
     modelChoice === CUSTOM_MODEL
       ? 'Custom…'
@@ -121,6 +154,9 @@
       : CUSTOM_MODEL
     days = buildDays(loaded.availability_windows)
     skipDates = [...loaded.availability_skip_dates]
+    networkLevel = loaded.network_access_level
+    networkDomains = loaded.network_access_domains.join('\n')
+    networkIncludeDefaults = loaded.network_access_include_defaults
     const env = await listEnvVars()
     envRows = env.variables.map(toEnvRow)
   }
@@ -157,6 +193,23 @@
       availability_skip_dates: skipDates
     })
     scheduleSavedAt = new Date().toLocaleTimeString()
+  }
+
+  async function saveNetwork() {
+    if (!settings) {
+      return
+    }
+    const domains = networkDomains
+      .split(/\s+/)
+      .map((domain) => domain.trim())
+      .filter(Boolean)
+    settings = await updateSettings({
+      network_access_level: networkLevel,
+      network_access_domains: domains,
+      network_access_include_defaults: networkIncludeDefaults
+    })
+    networkDomains = settings.network_access_domains.join('\n')
+    networkSavedAt = new Date().toLocaleTimeString()
   }
 
   function addEnvRow() {
@@ -536,6 +589,66 @@
             {#if scheduleSavedAt}<span class="text-sm text-muted-foreground">Saved at {scheduleSavedAt}</span>{/if}
           </div>
         {/if}
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Network access</Card.Title>
+        <Card.Description>
+          Controls outbound connectivity for the agent's workspace. The choice is written into the
+          agent's <code class="rounded bg-secondary px-1 py-0.5 text-xs">~/.claude/settings.json</code>
+          permissions on the next Recreate, so save here, then Recreate the workspace to apply.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="network-level">Access level</Label>
+          <Select.Root
+            type="single"
+            value={networkLevel}
+            onValueChange={(value) => (networkLevel = value as NetworkAccessLevel)}
+          >
+            <Select.Trigger id="network-level" class="w-full">{networkLabel}</Select.Trigger>
+            <Select.Content>
+              {#each NETWORK_LEVELS as level}
+                <Select.Item value={level.value} label={level.title}>
+                  <span class="flex flex-col gap-0.5 py-0.5">
+                    <span>{level.title}</span>
+                    <span class="text-xs text-muted-foreground">{level.description}</span>
+                  </span>
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        {#if networkLevel === 'custom'}
+          <div class="space-y-1.5">
+            <Label for="network-domains">Allowed domains</Label>
+            <Textarea
+              id="network-domains"
+              rows={5}
+              class="font-mono"
+              placeholder={'api.example.com\n*.internal.example.com\nregistry.example.com'}
+              bind:value={networkDomains}
+            />
+            <p class="text-xs leading-relaxed text-muted-foreground">
+              One domain per line, or separated by spaces. Use
+              <code class="rounded bg-secondary px-1 py-0.5 text-xs">*.</code> for wildcard
+              subdomain matching.
+            </p>
+            <label class="flex items-center gap-2">
+              <Switch bind:checked={networkIncludeDefaults} />
+              <span class="text-sm">Also include the default list of common package managers</span>
+            </label>
+          </div>
+        {/if}
+
+        <div class="flex items-center gap-3">
+          <Button onclick={saveNetwork}>Save network access</Button>
+          {#if networkSavedAt}<span class="text-sm text-muted-foreground">Saved at {networkSavedAt}</span>{/if}
+        </div>
       </Card.Content>
     </Card.Root>
 

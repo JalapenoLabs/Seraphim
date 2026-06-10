@@ -73,7 +73,7 @@ pub fn is_available(settings: &Settings, now: DateTime<Utc>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{AvailabilityWindow, ReviewPolicy};
+    use crate::db::models::{AvailabilityWindow, NetworkAccessLevel, ReviewPolicy};
     use chrono::TimeZone;
     use sqlx::types::Json;
 
@@ -103,6 +103,9 @@ mod tests {
             availability_timezone: timezone.to_string(),
             availability_windows: Json(windows),
             availability_skip_dates: Json(skip_dates),
+            network_access_level: NetworkAccessLevel::Full,
+            network_access_domains: Json(Vec::new()),
+            network_access_include_defaults: true,
             claude_token_preview: None,
             github_token_preview: None,
         }
