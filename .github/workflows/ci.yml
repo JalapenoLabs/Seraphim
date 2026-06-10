@@ -64,19 +64,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      # The frontend uses Yarn Berry (see frontend/package.json `packageManager`),
+      # enabled through Corepack which ships with Node.
+      - name: Enable Corepack
+        run: corepack enable
 
       - name: Install
-        run: npm ci
+        run: yarn install --immutable
 
       - name: Type-check
         if: ${{ !cancelled() }}
-        run: npm run check
+        run: yarn check
 
       - name: Build
         if: ${{ !cancelled() }}
-        run: npm run build
+        run: yarn build
 
   images:
     name: Docker images

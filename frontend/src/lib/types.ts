@@ -47,6 +47,10 @@ export const STATUS_BADGE = {
 
 export type ReviewPolicy = 'auto_squash_merge' | 'human_review' | 'none'
 
+// How much of the internet the agent's workspace may reach (modeled on Claude
+// Code on the web's network access levels).
+export type NetworkAccessLevel = 'none' | 'trusted' | 'full' | 'custom'
+
 export type SourceKind = 'github' | 'jira'
 
 export type Task = {
@@ -102,6 +106,12 @@ export type Settings = {
   availability_windows: AvailabilityWindow[]
   // ISO calendar dates ("YYYY-MM-DD") to skip entirely.
   availability_skip_dates: string[]
+  // Outbound network access policy for the agent's workspace.
+  network_access_level: NetworkAccessLevel
+  // Operator-defined allow-list (used only when the level is "custom").
+  network_access_domains: string[]
+  // For "custom": also allow the built-in package-manager/registry domains.
+  network_access_include_defaults: boolean
   // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null

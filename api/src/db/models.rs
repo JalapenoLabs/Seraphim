@@ -31,6 +31,24 @@ pub enum ReviewPolicy {
     None,
 }
 
+/// How much of the internet the agent's workspace may reach, modeled on Claude
+/// Code on the web's network access levels. Translated into the agent's
+/// `~/.claude/settings.json` permissions during provisioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "network_access_level", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAccessLevel {
+    /// No outbound network access.
+    None,
+    /// The built-in allow-list of package registries, version-control hosts, and
+    /// cloud SDKs only.
+    Trusted,
+    /// Any destination (unrestricted).
+    Full,
+    /// The operator's own allow-list, optionally plus the built-in defaults.
+    Custom,
+}
+
 /// The kanban lane a card sits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "task_column", rename_all = "snake_case")]
@@ -144,6 +162,12 @@ pub struct Settings {
     pub availability_windows: Json<Vec<AvailabilityWindow>>,
     /// Calendar dates to skip entirely (vacations, holidays).
     pub availability_skip_dates: Json<Vec<NaiveDate>>,
+    /// Outbound network access level enforced in the agent's workspace.
+    pub network_access_level: NetworkAccessLevel,
+    /// Operator-defined allow-list (used only when the level is `custom`).
+    pub network_access_domains: Json<Vec<String>>,
+    /// For `custom`: also allow the built-in package-manager/registry domains.
+    pub network_access_include_defaults: bool,
     /// Masked preview of the stored Claude token, e.g. `sk-ant-****abcd`. Not a
     /// DB column; the settings handler fills it from the raw token so an operator
     /// can recognize what is stored without it being revealed.
