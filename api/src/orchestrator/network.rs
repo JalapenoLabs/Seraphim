@@ -252,6 +252,7 @@ mod tests {
             usage_limit_pause_enabled: true,
             usage_limit_threshold: 80,
             usage_paused_until: None,
+            post_thoughts_enabled: false,
             claude_token_preview: None,
             github_token_preview: None,
         }

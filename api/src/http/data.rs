@@ -43,6 +43,8 @@ pub struct SettingsExport {
     pub usage_limit_pause_enabled: bool,
     #[serde(default = "default_usage_threshold")]
     pub usage_limit_threshold: i32,
+    #[serde(default)]
+    pub post_thoughts_enabled: bool,
 }
 
 /// Matches the database default so an older bundle imports as plain UTC.
@@ -109,6 +111,7 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             network_access_include_defaults: settings.network_access_include_defaults,
             usage_limit_pause_enabled: settings.usage_limit_pause_enabled,
             usage_limit_threshold: settings.usage_limit_threshold,
+            post_thoughts_enabled: settings.post_thoughts_enabled,
         },
         repositories: repositories
             .into_iter()
@@ -155,6 +158,7 @@ pub async fn import(
         Some(settings.network_access_include_defaults),
         Some(settings.usage_limit_pause_enabled),
         Some(settings.usage_limit_threshold),
+        Some(settings.post_thoughts_enabled),
     )
     .await?;
 

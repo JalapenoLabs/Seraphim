@@ -118,6 +118,8 @@ export type Settings = {
   usage_limit_threshold: number
   // While set and in the future, the agent is auto-paused for usage (ISO string).
   usage_paused_until: string | null
+  // Post a per-turn summary of the agent's reasoning back to the source issue.
+  post_thoughts_enabled: boolean
   // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null

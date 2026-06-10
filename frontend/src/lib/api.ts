@@ -150,6 +150,7 @@ export type UpdateSettingsRequest = {
   network_access_include_defaults?: boolean
   usage_limit_pause_enabled?: boolean
   usage_limit_threshold?: number
+  post_thoughts_enabled?: boolean
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {

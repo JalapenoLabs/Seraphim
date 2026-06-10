@@ -176,6 +176,8 @@ pub struct Settings {
     /// Runtime state: while set and in the future, the agent is auto-paused for
     /// usage and pulls no new work; cleared once the limit window resets.
     pub usage_paused_until: Option<DateTime<Utc>>,
+    /// Post a per-turn summary of the agent's reasoning back to the source issue.
+    pub post_thoughts_enabled: bool,
     /// Masked preview of the stored Claude token, e.g. `sk-ant-****abcd`. Not a
     /// DB column; the settings handler fills it from the raw token so an operator
     /// can recognize what is stored without it being revealed.
