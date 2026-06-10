@@ -49,6 +49,7 @@ pub struct UpdateSettingsRequest {
     pub network_access_include_defaults: Option<bool>,
     pub usage_limit_pause_enabled: Option<bool>,
     pub usage_limit_threshold: Option<i32>,
+    pub post_thoughts_enabled: Option<bool>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -74,6 +75,7 @@ pub async fn update(
         body.network_access_include_defaults,
         body.usage_limit_pause_enabled,
         body.usage_limit_threshold,
+        body.post_thoughts_enabled,
     )
     .await?;
     state.notify_board();

@@ -31,7 +31,7 @@ const SETTINGS_COLUMNS: &str =
      availability_enabled, availability_timezone, availability_windows, \
      availability_skip_dates, network_access_level, network_access_domains, \
      network_access_include_defaults, usage_limit_pause_enabled, \
-     usage_limit_threshold, usage_paused_until";
+     usage_limit_threshold, usage_paused_until, post_thoughts_enabled";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -65,6 +65,7 @@ pub async fn update_settings(
     network_access_include_defaults: Option<bool>,
     usage_limit_pause_enabled: Option<bool>,
     usage_limit_threshold: Option<i32>,
+    post_thoughts_enabled: Option<bool>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -86,6 +87,7 @@ pub async fn update_settings(
          usage_limit_pause_enabled = \
              COALESCE($15, usage_limit_pause_enabled), \
          usage_limit_threshold = COALESCE($16, usage_limit_threshold), \
+         post_thoughts_enabled = COALESCE($17, post_thoughts_enabled), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -106,6 +108,7 @@ pub async fn update_settings(
     .bind(network_access_include_defaults)
     .bind(usage_limit_pause_enabled)
     .bind(usage_limit_threshold)
+    .bind(post_thoughts_enabled)
     .fetch_one(pool)
     .await
 }
