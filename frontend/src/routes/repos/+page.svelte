@@ -4,7 +4,7 @@
   import { onMount } from 'svelte'
   import { Pencil, Trash2 } from '@lucide/svelte'
 
-  import { deleteRepo, importOrg, listRepos, updateRepo, upsertRepo } from '$lib/api'
+  import { deleteRepo, getSettings, importOrg, listRepos, updateRepo, upsertRepo } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
   import * as Select from '$lib/components/ui/select'
   import { Button } from '$lib/components/ui/button'
@@ -39,7 +39,8 @@
   function loadPrefs(): FormPrefs {
     const fallback: FormPrefs = {
       default_branch: 'main',
-      branch_template: 'seraphim/issue-{number}-{slug}',
+      // Blank inherits the global template set in Settings.
+      branch_template: '',
       review_policy: '',
       enabled: true,
       sync_issues: true,
@@ -76,6 +77,9 @@
   }
 
   let repos = $state<Repository[]>([])
+  // The global branch template, shown as the placeholder when a repo's override
+  // is blank (it inherits this).
+  let globalBranchTemplate = $state('seraphim/issue-{number}-{slug}')
   let form = $state<FormState>(emptyForm())
   // The id of the repo being edited, or null when adding a new one. Editing
   // updates that row by id (rename-safe); adding upserts by full name.
@@ -95,7 +99,9 @@
   }
 
   async function load() {
-    repos = await listRepos()
+    const [loadedRepos, settings] = await Promise.all([listRepos(), getSettings()])
+    repos = loadedRepos
+    globalBranchTemplate = settings.default_branch_template
   }
 
   function clearForm() {
@@ -109,7 +115,7 @@
       full_name: repo.full_name,
       clone_url: repo.clone_url,
       default_branch: repo.default_branch,
-      branch_template: repo.branch_template,
+      branch_template: repo.branch_template ?? '',
       review_policy: repo.review_policy ?? '',
       instructions: repo.instructions,
       setup_script: repo.setup_script,
@@ -132,7 +138,8 @@
       full_name: form.full_name.trim(),
       clone_url: cloneUrl,
       default_branch: form.default_branch,
-      branch_template: form.branch_template,
+      // Blank inherits the global template (sent as null, like review policy).
+      branch_template: form.branch_template.trim() || null,
       review_policy: form.review_policy === '' ? null : form.review_policy,
       instructions: form.instructions,
       setup_script: form.setup_script,
@@ -251,7 +258,13 @@
         </div>
         <div class="space-y-1.5">
           <Label for="tmpl">Branch template</Label>
-          <Input id="tmpl" bind:value={form.branch_template} />
+          <Input id="tmpl" placeholder={`inherit: ${globalBranchTemplate}`} bind:value={form.branch_template} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Leave blank to inherit the global template from
+            <a href="/settings" class="underline">Settings</a>. Supports
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">{'{number}'}</code> and
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">{'{slug}'}</code>.
+          </p>
         </div>
         <div class="space-y-1.5">
           <Label for="rpolicy">Review policy</Label>

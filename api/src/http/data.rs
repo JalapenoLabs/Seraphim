@@ -59,7 +59,9 @@ pub struct RepoExport {
     pub full_name: String,
     pub clone_url: String,
     pub default_branch: String,
-    pub branch_template: String,
+    // None / omitted inherits the global default_branch_template.
+    #[serde(default)]
+    pub branch_template: Option<String>,
     pub setup_script: String,
     pub instructions: String,
     pub review_policy: Option<ReviewPolicy>,
@@ -148,7 +150,7 @@ pub async fn import(
             &repo.full_name,
             &repo.clone_url,
             &repo.default_branch,
-            &repo.branch_template,
+            repo.branch_template.as_deref(),
             &repo.setup_script,
             &repo.instructions,
             repo.review_policy,
