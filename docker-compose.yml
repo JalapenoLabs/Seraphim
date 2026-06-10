@@ -89,8 +89,8 @@ services:
     volumes:
       # Persistent agent home: cloned repos + the single Claude conversation.
       - workspace-data:/workspace
-      # Host ~/.claude, read-only: AGENTS.md, docs, manuals, skills.
-      - ${CLAUDE_HOME}:/host-claude:ro
+      # Host ~/.ssh, read-only: keys for cloning git@ SSH repos.
+      - ${SSH_HOME}:/host-ssh:ro
       # Lets the agent run docker/earthly for the repos it works on.
       - ${DOCKER_SOCKET}:/var/run/docker.sock
     networks:

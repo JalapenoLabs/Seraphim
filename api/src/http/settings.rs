@@ -21,6 +21,8 @@ pub struct UpdateSettingsRequest {
     pub default_review_policy: Option<ReviewPolicy>,
     pub claude_model: Option<String>,
     pub base_setup_script: Option<String>,
+    pub config_repo_url: Option<String>,
+    pub default_branch_template: Option<String>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -35,6 +37,8 @@ pub async fn update(
         body.default_review_policy,
         body.claude_model,
         body.base_setup_script,
+        body.config_repo_url,
+        body.default_branch_template,
     )
     .await?;
     state.notify_board();

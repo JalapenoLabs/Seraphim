@@ -5,6 +5,7 @@
 //! free of error plumbing.
 
 mod board;
+mod data;
 mod repos;
 mod settings;
 mod sources;
@@ -62,10 +63,14 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/:id", axum::routing::delete(repos::delete))
         .route("/sources", get(sources::list).post(sources::create))
         .route("/sources/:id", axum::routing::delete(sources::delete))
+        .route("/sources/sync", post(sources::sync))
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
         .route("/workspace/restart", post(workspace::restart))
         .route("/workspace/recreate", post(workspace::recreate))
+        .route("/workspace/provision", post(workspace::provision))
+        .route("/export", get(data::export))
+        .route("/import", post(data::import))
         .with_state(state);
 
     Router::new()

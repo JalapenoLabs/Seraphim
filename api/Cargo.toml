@@ -36,6 +36,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Encodes instruction-file contents so they cross the docker exec boundary
+# without any shell-quoting hazards.
+base64 = "0.22"
 
 # Errors, logging, config
 eyre = "0.6"

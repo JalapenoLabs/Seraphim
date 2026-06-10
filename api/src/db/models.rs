@@ -68,6 +68,10 @@ pub struct Settings {
     pub claude_model: String,
     pub workspace_image_tag: String,
     pub base_setup_script: String,
+    /// Git URL of the `~/.claude` config repo cloned into the workspace.
+    pub config_repo_url: String,
+    /// Branch template applied to repos auto-discovered from an org.
+    pub default_branch_template: String,
     pub current_session_id: Option<String>,
     pub updated_at: DateTime<Utc>,
 }

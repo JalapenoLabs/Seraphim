@@ -14,12 +14,16 @@ use super::models::{
 
 // --- Settings ----------------------------------------------------------------
 
+/// Every settings column, for SELECT/RETURNING reuse.
+const SETTINGS_COLUMNS: &str =
+    "org_name, global_instructions, default_review_policy, agent_paused, \
+     claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
+     default_branch_template, current_session_id, updated_at";
+
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
-    sqlx::query_as::<_, Settings>(
-        "SELECT org_name, global_instructions, default_review_policy, agent_paused, \
-         claude_model, workspace_image_tag, base_setup_script, current_session_id, updated_at \
-         FROM settings WHERE id = 1",
-    )
+    sqlx::query_as::<_, Settings>(&format!(
+        "SELECT {SETTINGS_COLUMNS} FROM settings WHERE id = 1"
+    ))
     .fetch_one(pool)
     .await
 }
@@ -33,24 +37,29 @@ pub async fn update_settings(
     default_review_policy: Option<ReviewPolicy>,
     claude_model: Option<String>,
     base_setup_script: Option<String>,
+    config_repo_url: Option<String>,
+    default_branch_template: Option<String>,
 ) -> sqlx::Result<Settings> {
-    sqlx::query_as::<_, Settings>(
+    sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
          org_name = COALESCE($1, org_name), \
          global_instructions = COALESCE($2, global_instructions), \
          default_review_policy = COALESCE($3, default_review_policy), \
          claude_model = COALESCE($4, claude_model), \
          base_setup_script = COALESCE($5, base_setup_script), \
+         config_repo_url = COALESCE($6, config_repo_url), \
+         default_branch_template = COALESCE($7, default_branch_template), \
          updated_at = now() \
          WHERE id = 1 \
-         RETURNING org_name, global_instructions, default_review_policy, agent_paused, \
-         claude_model, workspace_image_tag, base_setup_script, current_session_id, updated_at",
-    )
+         RETURNING {SETTINGS_COLUMNS}"
+    ))
     .bind(org_name)
     .bind(global_instructions)
     .bind(default_review_policy)
     .bind(claude_model)
     .bind(base_setup_script)
+    .bind(config_repo_url)
+    .bind(default_branch_template)
     .fetch_one(pool)
     .await
 }
@@ -82,6 +91,16 @@ pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
 pub async fn get_repository(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Repository>> {
     sqlx::query_as::<_, Repository>("SELECT * FROM repositories WHERE id = $1")
         .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn get_repository_by_full_name(
+    pool: &PgPool,
+    full_name: &str,
+) -> sqlx::Result<Option<Repository>> {
+    sqlx::query_as::<_, Repository>("SELECT * FROM repositories WHERE full_name = $1")
+        .bind(full_name)
         .fetch_optional(pool)
         .await
 }

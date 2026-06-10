@@ -6,8 +6,11 @@
 
 use crate::db::models::{Repository, Settings, Task};
 
+use super::provision::repo_dir_name;
+
 /// Builds the full instruction text for working `task` on `branch`.
 pub fn build(settings: &Settings, repo: &Repository, task: &Task, branch: &str) -> String {
+    let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let mut prompt = String::new();
 
     prompt.push_str(&format!(
@@ -42,14 +45,18 @@ pub fn build(settings: &Settings, repo: &Repository, task: &Task, branch: &str) 
 
     prompt.push_str(&format!(
         "# Working agreement\n\
-         - You are on a fresh branch `{branch}` cut from `{default}` in `{repo}`, cwd is the repo root.\n\
+         - Your cwd is `/workspace`. Every configured repo is cloned here as a sibling \
+         directory, so you can read and edit across repos as needed.\n\
+         - The focus repo for this issue is `{repo}` at `{repo_path}`, already on a fresh \
+         branch `{branch}` cut from `{default}`. `cd` there to do the primary work.\n\
          - Implement the change, then run the project's build/tests/linters and make them pass.\n\
          - Commit your work and push the branch.\n\
          - Open a pull request against `{default}` with `gh pr create`, referencing issue #{number}.\n\
          - When done, finish with a short summary of what you changed.\n",
+        repo = repo.full_name,
+        repo_path = repo_path,
         branch = branch,
         default = repo.default_branch,
-        repo = repo.full_name,
         number = task.external_id,
     ));
 

@@ -11,7 +11,7 @@ use octocrab::Octocrab;
 
 use crate::db::models::{IssueSource, SourceKind};
 use github::{GitHubConfig, GitHubSource};
-use types::Issue;
+use types::{Issue, RepoTarget};
 
 /// A configured, ready-to-poll issue source.
 #[derive(Debug, Clone)]
@@ -38,16 +38,17 @@ impl Source {
         }
     }
 
-    /// The `owner/repo` this source targets, if applicable.
-    pub fn repo_full_name(&self) -> Option<String> {
+    /// The repos this source resolves to (one, or many in org mode).
+    pub async fn targets(&self) -> Result<Vec<RepoTarget>> {
         match self {
-            Self::GitHub(source) => Some(source.repo_full_name()),
+            Self::GitHub(source) => source.targets().await,
         }
     }
 
-    pub async fn list_issues(&self) -> Result<Vec<Issue>> {
+    /// Lists open issues for one resolved repo target.
+    pub async fn list_issues_for(&self, target: &RepoTarget) -> Result<Vec<Issue>> {
         match self {
-            Self::GitHub(source) => source.list_issues().await,
+            Self::GitHub(source) => source.list_issues_for(&target.owner, &target.repo).await,
         }
     }
 }

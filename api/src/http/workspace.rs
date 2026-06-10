@@ -6,7 +6,6 @@ use serde_json::json;
 use tracing::info;
 
 use super::ApiResult;
-use crate::db::queries;
 use crate::state::AppState;
 
 /// `POST /api/v1/workspace/restart` - restart the agent container in place.
@@ -16,35 +15,21 @@ pub async fn restart(State(state): State<AppState>) -> ApiResult<Json<serde_json
     Ok(Json(json!({ "status": "restarted" })))
 }
 
-/// `POST /api/v1/workspace/recreate` - recreate the container, then re-run the
-/// base setup script. The persistent `/workspace` volume (repos + Claude
-/// session) is preserved, so the conversation continues afterward.
+/// `POST /api/v1/workspace/recreate` - recreate the container, then fully
+/// reprovision it (config repo, environment setup, all repos). The persistent
+/// `/workspace` volume (repos + Claude session) is preserved, so the
+/// conversation continues afterward.
 pub async fn recreate(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     info!("recreating workspace container");
     state.workspace.recreate().await?;
-
-    let settings = queries::get_settings(&state.db).await?;
-    if !settings.base_setup_script.trim().is_empty() {
-        let output = state
-            .workspace
-            .exec_capture(
-                "/workspace",
-                vec![
-                    "bash".to_string(),
-                    "-lc".to_string(),
-                    settings.base_setup_script.clone(),
-                ],
-                Vec::new(),
-            )
-            .await?;
-        if !output.succeeded() {
-            return Ok(Json(json!({
-                "status": "recreated",
-                "setup_exit_code": output.exit_code,
-                "setup_output": output.output,
-            })));
-        }
-    }
-
+    crate::orchestrator::provision_workspace(&state).await?;
     Ok(Json(json!({ "status": "recreated" })))
+}
+
+/// `POST /api/v1/workspace/provision` - reprovision in place (no recreate):
+/// refresh the config repo, all repos, instruction files, and setup scripts.
+pub async fn provision(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    info!("provisioning workspace");
+    crate::orchestrator::provision_workspace(&state).await?;
+    Ok(Json(json!({ "status": "provisioned" })))
 }

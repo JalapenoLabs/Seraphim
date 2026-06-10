@@ -10,6 +10,9 @@
 //! completion before the next is considered, so turns never overlap.
 
 mod prompt;
+mod provision;
+
+pub use provision::provision_workspace;
 
 use std::time::Duration;
 
@@ -32,11 +35,22 @@ const REVIEW_POLL: Duration = Duration::from_secs(30);
 /// Fallback issue-sync cadence when a source omits its own interval.
 const DEFAULT_SYNC_POLL: Duration = Duration::from_secs(120);
 
-/// Launches the three background loops. Returns immediately.
+/// Launches the background loops and an initial workspace provision. Returns
+/// immediately.
 pub fn spawn(state: AppState) {
+    tokio::spawn(provision_on_startup(state.clone()));
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
     tokio::spawn(agent_loop(state));
+}
+
+/// Best-effort full provision at boot so the workspace is ready before the first
+/// task. Failures (e.g. no token yet) are logged; per-task prep retries anyway.
+async fn provision_on_startup(state: AppState) {
+    match provision::provision_workspace(&state).await {
+        Ok(()) => info!("workspace provisioned"),
+        Err(error) => warn!(error = %error, "initial workspace provision failed"),
+    }
 }
 
 // --- Sync loop ---------------------------------------------------------------
@@ -50,7 +64,10 @@ async fn sync_loop(state: AppState) {
     }
 }
 
-async fn sync_once(state: &AppState) -> Result<()> {
+/// Runs one full issue-sync pass across all enabled sources. Also callable from
+/// the HTTP layer to power the "Check issues" button.
+pub async fn sync_once(state: &AppState) -> Result<()> {
+    let settings = queries::get_settings(&state.db).await?;
     let sources = queries::list_enabled_issue_sources(&state.db).await?;
     let mut changed = false;
 
@@ -63,39 +80,50 @@ async fn sync_once(state: &AppState) -> Result<()> {
             }
         };
 
-        let issues = source.list_issues().await?;
-        // Resolve the repo once so synced issues link to a working repository.
-        let repo = match source.repo_full_name() {
-            Some(full_name) => queries::list_repositories(&state.db)
-                .await?
-                .into_iter()
-                .find(|repo| repo.full_name == full_name),
-            None => None,
+        let targets = match source.targets().await {
+            Ok(targets) => targets,
+            Err(error) => {
+                warn!(error = %error, "failed to resolve source repos");
+                continue;
+            }
         };
 
-        for issue in issues {
-            // New issues land at the end of Available; existing ones only refresh.
-            let next_position = queries::max_position_in_column(&state.db, TaskColumn::Available)
-                .await?
-                .unwrap_or(0.0)
-                + 1.0;
+        for target in &targets {
+            // Make sure a repository row exists so synced issues are workable.
+            let repo = ensure_repository(state, &settings, target).await?;
 
-            let task = queries::upsert_issue_task(
-                &state.db,
-                source.kind(),
-                &issue.external_id,
-                repo.as_ref().map(|repo| repo.id),
-                &issue.title,
-                &issue.body,
-                &issue.url,
-                next_position,
-            )
-            .await?;
+            let issues = match source.list_issues_for(target).await {
+                Ok(issues) => issues,
+                Err(error) => {
+                    warn!(error = %error, repo = %target.full_name, "failed to list issues");
+                    continue;
+                }
+            };
 
-            if let Some(repo) = &repo {
-                queries::set_task_repo(&state.db, task.id, repo.id).await?;
+            for issue in issues {
+                // New issues land at the end of Available; existing ones refresh.
+                let next_position =
+                    queries::max_position_in_column(&state.db, TaskColumn::Available)
+                        .await?
+                        .unwrap_or(0.0)
+                        + 1.0;
+
+                let task = queries::upsert_issue_task(
+                    &state.db,
+                    source.kind(),
+                    &issue.external_id,
+                    Some(repo.id),
+                    &issue.title,
+                    &issue.body,
+                    &issue.url,
+                    next_position,
+                )
+                .await?;
+                queries::set_task_repo(&state.db, task.id, repo.id)
+                    .await
+                    .ok();
+                changed = true;
             }
-            changed = true;
         }
     }
 
@@ -103,6 +131,33 @@ async fn sync_once(state: &AppState) -> Result<()> {
         state.notify_board();
     }
     Ok(())
+}
+
+/// Returns the repository row for a target, auto-creating it (with org-level
+/// defaults) the first time we discover it. Existing rows are left untouched so
+/// the agent never clobbers your manual edits.
+async fn ensure_repository(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+    target: &crate::sources::types::RepoTarget,
+) -> Result<Repository> {
+    if let Some(repo) = queries::get_repository_by_full_name(&state.db, &target.full_name).await? {
+        return Ok(repo);
+    }
+
+    let repo = queries::upsert_repository(
+        &state.db,
+        &target.full_name,
+        &target.clone_url,
+        &target.default_branch,
+        &settings.default_branch_template,
+        "",
+        "",
+        None, // inherit the default review policy
+        true,
+    )
+    .await?;
+    Ok(repo)
 }
 
 // --- Agent loop --------------------------------------------------------------
@@ -150,12 +205,12 @@ async fn work_task(state: &AppState, task: Task) -> Result<()> {
         return fail(state, &task, "the linked repository no longer exists").await;
     };
 
+    let settings = queries::get_settings(&state.db).await?;
     let branch = render_branch(&repo.branch_template, &task);
-    if let Err(error) = prepare_repo(state, &repo, &branch).await {
+    if let Err(error) = provision::prepare_branch(state, &settings, &repo, &branch).await {
         return fail(state, &task, &format!("repo preparation failed: {error}")).await;
     }
 
-    let settings = queries::get_settings(&state.db).await?;
     queries::mark_task_started(
         &state.db,
         task.id,
@@ -205,7 +260,8 @@ async fn run_agent_turn(
     branch: &str,
 ) -> Result<Option<String>> {
     let prompt = prompt::build(settings, repo, task, branch);
-    let working_dir = format!("/workspace/{}", repo.full_name);
+    // Claude runs at the workspace root so it can work across all cloned repos.
+    let working_dir = "/workspace".to_string();
 
     let idx = queries::next_turn_idx(&state.db, task.id).await?;
     let turn = queries::create_turn(
@@ -285,51 +341,6 @@ async fn run_agent_turn(
         return Err(eyre!("claude turn ended in an error"));
     }
     Ok(session_id)
-}
-
-/// Clones or refreshes the repo and checks out a fresh work branch.
-async fn prepare_repo(state: &AppState, repo: &Repository, branch: &str) -> Result<()> {
-    let dir = format!("/workspace/{}", repo.full_name);
-    // One robust script: clone if absent, otherwise fetch; then branch off the
-    // up-to-date default branch. `gh`/`git` are authed via GH_TOKEN.
-    let script = format!(
-        "set -e\n\
-         if [ -d \"{dir}/.git\" ]; then\n\
-           cd \"{dir}\" && git fetch origin\n\
-         else\n\
-           mkdir -p \"$(dirname \"{dir}\")\"\n\
-           gh repo clone \"{full_name}\" \"{dir}\"\n\
-           cd \"{dir}\"\n\
-         fi\n\
-         git checkout \"{default_branch}\"\n\
-         git pull --ff-only origin \"{default_branch}\" || true\n\
-         git checkout -B \"{branch}\" \"origin/{default_branch}\"\n\
-         {setup}\n",
-        dir = dir,
-        full_name = repo.full_name,
-        default_branch = repo.default_branch,
-        branch = branch,
-        setup = repo.setup_script,
-    );
-
-    let token = format!("GH_TOKEN={}", state.config.gh_token);
-    let output = state
-        .workspace
-        .exec_capture(
-            "/workspace",
-            vec!["bash".to_string(), "-lc".to_string(), script],
-            vec![token],
-        )
-        .await?;
-
-    if !output.succeeded() {
-        return Err(eyre!(
-            "repo prep exited {}: {}",
-            output.exit_code,
-            output.output
-        ));
-    }
-    Ok(())
 }
 
 // --- Review loop -------------------------------------------------------------

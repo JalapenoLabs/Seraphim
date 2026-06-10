@@ -47,3 +47,9 @@ pub async fn delete(
     queries::delete_issue_source(&state.db, id).await?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
+
+/// `POST /api/v1/sources/sync` - run an immediate issue sync ("Check issues").
+pub async fn sync(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    crate::orchestrator::sync_once(&state).await?;
+    Ok(Json(serde_json::json!({ "status": "synced" })))
+}

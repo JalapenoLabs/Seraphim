@@ -13,7 +13,7 @@ ARG DOCKER_VERSION=27.3.1
 # --- Base tooling (stable layer) ---------------------------------------------
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git jq sudo less ripgrep \
+        ca-certificates curl gnupg git jq sudo less ripgrep openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # --- GitHub CLI --------------------------------------------------------------
