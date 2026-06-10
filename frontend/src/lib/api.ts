@@ -92,7 +92,7 @@ export type UpsertRepoRequest = {
   full_name: string
   clone_url: string
   default_branch?: string
-  branch_template?: string
+  branch_template?: string | null
   setup_script?: string
   instructions?: string
   review_policy?: ReviewPolicy | null

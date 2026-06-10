@@ -261,7 +261,7 @@ mod tests {
             full_name: "navarrotech/seraphim".to_string(),
             clone_url: String::new(),
             default_branch: "v3.0.0".to_string(),
-            branch_template: String::new(),
+            branch_template: None,
             setup_script: String::new(),
             instructions: String::new(),
             review_policy: None,

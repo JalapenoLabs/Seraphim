@@ -253,18 +253,25 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
 
     let settings = queries::get_settings(&state.db).await?;
 
+    // The per-repo branch template is an optional override of the global default.
+    let branch_template = repo
+        .branch_template
+        .as_deref()
+        .filter(|template| !template.trim().is_empty())
+        .unwrap_or(&settings.default_branch_template);
+
     // A resumed task already has its branch and working tree; only a fresh task
     // is moved into In Progress and re-cut from the default branch.
     let branch = if resume {
         task.branch
             .clone()
-            .unwrap_or_else(|| render_branch(&repo.branch_template, &task))
+            .unwrap_or_else(|| render_branch(branch_template, &task))
     } else {
         queries::move_task(&state.db, task.id, TaskColumn::InProgress, task.position).await?;
         queries::set_task_status(&state.db, task.id, TaskStatus::Preparing).await?;
         state.notify_board();
 
-        let branch = render_branch(&repo.branch_template, &task);
+        let branch = render_branch(branch_template, &task);
         if let Err(error) = provision::prepare_branch(state, &settings, &repo, &branch).await {
             return fail(state, &task, &format!("repo preparation failed: {error}")).await;
         }

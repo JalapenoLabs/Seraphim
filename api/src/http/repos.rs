@@ -23,8 +23,8 @@ pub struct UpsertRepoRequest {
     pub clone_url: String,
     #[serde(default = "default_branch")]
     pub default_branch: String,
-    #[serde(default = "default_branch_template")]
-    pub branch_template: String,
+    /// Per-repo override of the global branch template; omitted/blank inherits it.
+    pub branch_template: Option<String>,
     #[serde(default)]
     pub setup_script: String,
     #[serde(default)]
@@ -42,8 +42,13 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
-fn default_branch_template() -> String {
-    "seraphim/issue-{number}-{slug}".to_string()
+/// A blank per-repo template means "inherit the global default", so normalize it
+/// to `None` (matching how an omitted field deserializes).
+fn branch_template_override(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|template| !template.is_empty())
 }
 
 fn default_true() -> bool {
@@ -60,7 +65,7 @@ pub async fn upsert(
         &body.full_name,
         &body.clone_url,
         &body.default_branch,
-        &body.branch_template,
+        branch_template_override(&body.branch_template),
         &body.setup_script,
         &body.instructions,
         body.review_policy,
@@ -86,7 +91,7 @@ pub async fn update(
         &body.full_name,
         &body.clone_url,
         &body.default_branch,
-        &body.branch_template,
+        branch_template_override(&body.branch_template),
         &body.setup_script,
         &body.instructions,
         body.review_policy,
@@ -122,7 +127,6 @@ pub async fn import_org(
     State(state): State<AppState>,
     Json(body): Json<ImportOrgRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let settings = queries::get_settings(&state.db).await?;
     let github = state.github().await?;
     let discovered = git::list_org_repos(&github, &body.owner).await?;
 
@@ -131,12 +135,13 @@ pub async fn import_org(
         let existed = queries::get_repository_by_full_name(&state.db, &repo.full_name)
             .await?
             .is_some();
+        // Newly discovered repos inherit the global branch template (override later).
         queries::create_repository_if_absent(
             &state.db,
             &repo.full_name,
             &repo.clone_url,
             &repo.default_branch,
-            &settings.default_branch_template,
+            None,
             true,
             &body.issue_labels,
         )

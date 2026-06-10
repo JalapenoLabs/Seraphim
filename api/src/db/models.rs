@@ -210,7 +210,9 @@ pub struct Repository {
     pub full_name: String,
     pub clone_url: String,
     pub default_branch: String,
-    pub branch_template: String,
+    /// Per-repo branch-name template, or `None` to inherit
+    /// [`Settings::default_branch_template`].
+    pub branch_template: Option<String>,
     pub setup_script: String,
     pub instructions: String,
     pub review_policy: Option<ReviewPolicy>,

@@ -375,6 +375,18 @@
         </div>
 
         <div class="space-y-1.5">
+          <Label for="branch-template">Default branch template</Label>
+          <Input id="branch-template" bind:value={settings.default_branch_template} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            The branch name the agent creates for each task. Supports
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">{'{number}'}</code> (the issue
+            number) and <code class="rounded bg-secondary px-1 py-0.5 text-xs">{'{slug}'}</code> (a
+            slug of the title). Individual repositories can override this on the
+            <a href="/repos" class="underline">Repositories</a> page.
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
           <Label for="global">Global agent instructions</Label>
           <Textarea id="global" rows={5} bind:value={settings.global_instructions} />
           <p class="text-xs leading-relaxed text-muted-foreground">
