@@ -74,8 +74,9 @@ impl Workspace {
                     cmd: Some(command),
                     working_dir: Some(working_dir.to_string()),
                     env: Some(env),
-                    // Run as the non-root agent user (sudo-capable, docker-group).
-                    user: Some("node".to_string()),
+                    // Run as the non-root agent user (the universal devcontainer
+                    // image's `codespace`; sudo-capable).
+                    user: Some("codespace".to_string()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()

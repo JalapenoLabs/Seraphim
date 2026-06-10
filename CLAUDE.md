@@ -57,7 +57,7 @@ GitHub issues ──poll──▶ API ──▶ Postgres ──SSE──▶ Kanb
                          │                            │ (drag issue into "To Do")
                          ▼ auto-pull top of To Do     ▼
                   orchestrator (one task at a time)
-                         │ docker exec (as user `node`, cwd /workspace)
+                         │ docker exec (as user `codespace`, cwd /workspace)
                          ▼
         workspace: claude -p --resume <session> ──stream-json──▶ live UI
                          │ (agent runs git + gh, opens a PR)
@@ -139,7 +139,7 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 
 ## How the agent runtime works (the workspace)
 
-- Claude is **always spawned at `/workspace`** as the non-root `node` user.
+- Claude is **always spawned at `/workspace`** as the non-root `codespace` user (the universal devcontainer image's user).
 - **Every enabled repo** is cloned flat at `/workspace/{repo-name}` (name = part
   after `/`), so cross-repo work is natural. The task names a focus repo + branch.
 - **Instructions become files:** global → `/workspace/AGENTS.md`; per-repo →
@@ -156,7 +156,7 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   succeeds. A blank `config_repo_url` bypasses the halt (agent runs unconfigured).
 - **Claude invocation** (`api/src/claude/exec.rs`):
   `claude -p <prompt> --output-format stream-json --verbose --permission-mode bypassPermissions --model <model> [--resume <session>]`,
-  exec'd as user `node`, cwd `/workspace`. All tasks resume the one shared
+  exec'd as user `codespace`, cwd `/workspace`. All tasks resume the one shared
   `current_session_id`; Claude auto-compacts.
 - **Auth:** `CLAUDE_CODE_OAUTH_TOKEN` (subscription) for Claude; mounted host
   `~/.ssh` for `git@` clones; `GH_TOKEN` for HTTPS + octocrab.
@@ -238,7 +238,7 @@ fail-fast) on every PR and on `main`/`develop`.
 - **sqlx uses runtime queries** (`query_as::<_, T>`), not the compile-time macros,
   so the crate builds without a live DB. Keep it that way.
 - **Claude must run as non-root** for `bypassPermissions`; both exec sites set
-  `user: "node"`. Don't remove that.
+  `user: "codespace"`. Don't remove that.
 - **stream-json schema can drift** across Claude Code versions; the parser keeps
   unknown shapes as `Other` rather than failing. Verify against the installed
   version when touching `claude/events.rs`.

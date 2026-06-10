@@ -96,8 +96,9 @@ pub fn run_turn(docker: &Docker, args: TurnArgs) -> impl Stream<Item = Result<Ag
                     // Secrets are injected per-exec from the database, never baked
                     // into the container's environment.
                     env: Some(build_env(&args)),
-                    // Claude must not run as root with bypassPermissions.
-                    user: Some("node".to_string()),
+                    // Claude must not run as root with bypassPermissions; the
+                    // universal devcontainer image's non-root user is `codespace`.
+                    user: Some("codespace".to_string()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()

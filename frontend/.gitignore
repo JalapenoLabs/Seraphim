@@ -1,0 +1,10 @@
+# Yarn Berry: commit the lockfile and config, never the local cache/state.
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+node_modules/

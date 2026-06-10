@@ -1,31 +1,33 @@
-# The agent's workspace sandbox.
+# The agent's workspace sandbox (issue #77).
 #
-# A long-lived container with everything Claude Code needs to act like a
-# developer: the CLI itself, git, the GitHub CLI, a Docker client (talking to the
-# mounted host socket), Earthly, Node, and passwordless sudo. The API drives it
-# via `docker exec`; the container itself just idles.
+# Based on Microsoft's universal devcontainer image: Python, Node (via nvm), Go,
+# Java, .NET, PHP, Ruby, plus version managers, out of the box. On top we add the
+# tools the agents need that it doesn't ship: Rust/Cargo, the Claude Code CLI, the
+# GitHub CLI, a Docker client, Earthly, and the org cloud CLIs (jira, doctl,
+# gcloud, wrangler, bunny). Work runs as the image's non-root `codespace` user;
+# the API drives it via `docker exec`, the container itself just idles.
 
-FROM node:22-bookworm
+FROM mcr.microsoft.com/devcontainers/universal:latest
 
 # Static Docker client version pulled below (client only; talks to host socket).
 ARG DOCKER_VERSION=27.3.1
+USER root
 
-# --- Base tooling (stable layer) ---------------------------------------------
+# --- Base CLIs we rely on (most already present; ensure the rest) ------------
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg git jq sudo less ripgrep openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# --- GitHub CLI --------------------------------------------------------------
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
+# --- GitHub CLI (release tarball; no dependency on an apt source) ------------
+RUN tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest | sed -E 's#.*/tag/##')" \
+    && ver="${tag#v}" \
+    && curl -fsSL "https://github.com/cli/cli/releases/download/${tag}/gh_${ver}_linux_amd64.tar.gz" -o /tmp/gh.tgz \
+    && tar -xzf /tmp/gh.tgz -C /tmp \
+    && install -m 0755 "/tmp/gh_${ver}_linux_amd64/bin/gh" /usr/local/bin/gh \
+    && rm -rf /tmp/gh*
 
-# --- Docker client (static binary) -------------------------------------------
+# --- Docker client (static binary; talks to the mounted host socket) ---------
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" \
         | tar xz --strip-components=1 -C /usr/local/bin docker/docker
 
@@ -34,35 +36,56 @@ RUN curl -fsSL https://github.com/earthly/earthly/releases/latest/download/earth
         -o /usr/local/bin/earthly \
     && chmod +x /usr/local/bin/earthly
 
-# --- Claude Code CLI ---------------------------------------------------------
-RUN npm install -g @anthropic-ai/claude-code
+# --- Rust / Cargo (not in the universal image) -------------------------------
+# Installed system-wide so every user/shell finds it on PATH; the registry/cache
+# dirs are world-writable so the non-root agent can build and fetch crates.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
+    && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
 
-# --- pnpm via corepack -------------------------------------------------------
-# Enable the corepack pnpm shim here (as root) so repo setup scripts never need
-# `sudo corepack enable`, which fails for the non-root `node` user (it can't
-# symlink into the root-owned /usr/local/bin). Classic yarn ships in the base
-# image already; projects that pin a pnpm version get it on first use.
-RUN corepack enable pnpm
+# --- Org cloud CLIs (jira, doctl, gcloud) ------------------------------------
+RUN tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/ankitpokhrel/jira-cli/releases/latest | sed -E 's#.*/tag/##')" \
+    && ver="${tag#v}" \
+    && curl -fsSL "https://github.com/ankitpokhrel/jira-cli/releases/download/${tag}/jira_${ver}_linux_x86_64.tar.gz" -o /tmp/jira.tgz \
+    && tar -xzf /tmp/jira.tgz -C /tmp \
+    && install -m 0755 "/tmp/jira_${ver}_linux_x86_64/bin/jira" /usr/local/bin/jira \
+    && rm -rf /tmp/jira*
 
-# --- Passwordless sudo for the agent (trusted sandbox) -----------------------
-RUN echo "node ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/node && chmod 0440 /etc/sudoers.d/node
+RUN tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/digitalocean/doctl/releases/latest | sed -E 's#.*/tag/##')" \
+    && ver="${tag#v}" \
+    && curl -fsSL "https://github.com/digitalocean/doctl/releases/download/${tag}/doctl-${ver}-linux-amd64.tar.gz" -o /tmp/doctl.tgz \
+    && tar -xzf /tmp/doctl.tgz -C /tmp \
+    && install -m 0755 /tmp/doctl /usr/local/bin/doctl \
+    && rm -rf /tmp/doctl*
 
-# --- seraphim-suggest: the agent's "recommend a setup change" helper ---------
-# A dependency-free Node CLI (uses Node 22's global fetch) that posts setup
-# recommendations to the API. The orchestrator injects SERAPHIM_API_URL and
-# SERAPHIM_TASK_ID into the turn's exec environment.
+RUN curl -fsSL "https://storage.googleapis.com/cloud-sdk-release/google-cloud-cli-linux-x86_64.tar.gz" -o /tmp/gcloud.tgz \
+    && tar -xzf /tmp/gcloud.tgz -C /opt \
+    && rm /tmp/gcloud.tgz \
+    && /opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false --command-completion=false \
+    && for b in gcloud gsutil bq; do ln -sf "/opt/google-cloud-sdk/bin/$b" "/usr/local/bin/$b"; done
+
+# --- Node-based CLIs as the codespace user (uses the image's nvm Node) -------
+# Claude Code plus the npm-delivered org CLIs. Installed under codespace's Node,
+# then symlinked onto /usr/local/bin so a non-login `docker exec` finds them.
+USER codespace
+RUN bash -lc 'npm install -g @anthropic-ai/claude-code wrangler @bunny.net/cli'
+USER root
+RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
+    && for b in node npm npx corepack yarn pnpm claude wrangler bunny; do \
+         [ -x "$node_dir/$b" ] && ln -sf "$node_dir/$b" "/usr/local/bin/$b"; \
+       done; true
+
+# --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest
-RUN chmod +x /usr/local/bin/seraphim-suggest
-
-# --- seraphim-ask: the agent's "ask the user for help" helper ----------------
-# A dependency-free Node CLI (uses Node 22's global fetch) that posts a question
-# to the API. The orchestrator injects SERAPHIM_API_URL and SERAPHIM_TASK_ID.
 COPY seraphim-ask /usr/local/bin/seraphim-ask
-RUN chmod +x /usr/local/bin/seraphim-ask
+RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-# The container idles; the API runs Claude via `docker exec`.
+# The container idles as root; the API runs Claude as `codespace` via docker exec.
 CMD ["tail", "-f", "/dev/null"]
