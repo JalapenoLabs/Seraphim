@@ -13,7 +13,7 @@
 </script>
 
 <div
-  class="prose prose-sm prose-invert max-w-none break-words prose-pre:bg-secondary prose-pre:text-foreground prose-code:text-foreground prose-a:text-primary"
+  class="prose prose-sm prose-invert max-w-none break-words font-sans prose-pre:bg-secondary prose-pre:text-foreground prose-code:text-foreground prose-a:text-primary"
 >
   {#if source?.trim()}
     {@html html}
