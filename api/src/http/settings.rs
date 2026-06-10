@@ -1,17 +1,30 @@
-//! Org/environment settings endpoints, including the agent pause switch.
+//! Org/environment settings endpoints, including the agent pause switch and the
+//! user-defined environment variables.
 
 use axum::extract::State;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::ApiResult;
-use crate::db::models::{ReviewPolicy, Settings};
+use crate::db::models::{EnvVarWrite, ReviewPolicy, Settings};
 use crate::db::queries;
+use crate::secrets::mask;
 use crate::state::AppState;
+
+/// Loads the settings and fills in the masked token previews, so the UI can show
+/// a recognizable hint of each stored secret without ever receiving the raw value.
+async fn settings_view(state: &AppState) -> ApiResult<Settings> {
+    let mut settings = queries::get_settings(&state.db).await?;
+    let claude = queries::get_claude_token(&state.db).await?;
+    let github = queries::get_github_token(&state.db).await?;
+    settings.claude_token_preview = (!claude.is_empty()).then(|| mask(&claude));
+    settings.github_token_preview = (!github.is_empty()).then(|| mask(&github));
+    Ok(settings)
+}
 
 /// `GET /api/v1/settings`
 pub async fn get(State(state): State<AppState>) -> ApiResult<Json<Settings>> {
-    Ok(Json(queries::get_settings(&state.db).await?))
+    Ok(Json(settings_view(&state).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,7 +43,7 @@ pub async fn update(
     State(state): State<AppState>,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> ApiResult<Json<Settings>> {
-    let settings = queries::update_settings(
+    queries::update_settings(
         &state.db,
         body.org_name,
         body.global_instructions,
@@ -42,7 +55,7 @@ pub async fn update(
     )
     .await?;
     state.notify_board();
-    Ok(Json(settings))
+    Ok(Json(settings_view(&state).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +77,7 @@ pub async fn set_tokens(
         body.github_token.filter(|token| !token.is_empty()),
     )
     .await?;
-    Ok(Json(queries::get_settings(&state.db).await?))
+    Ok(Json(settings_view(&state).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,5 +92,63 @@ pub async fn set_pause(
 ) -> ApiResult<Json<Settings>> {
     queries::set_paused(&state.db, body.paused).await?;
     state.notify_board();
-    Ok(Json(queries::get_settings(&state.db).await?))
+    Ok(Json(settings_view(&state).await?))
+}
+
+// --- Environment variables ---------------------------------------------------
+
+/// One environment variable as the UI sees it. A secret's `value` is the masked
+/// preview, never the raw secret.
+#[derive(Debug, Serialize)]
+pub struct EnvVarView {
+    pub key: String,
+    pub value: String,
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnvVarsResponse {
+    pub variables: Vec<EnvVarView>,
+}
+
+/// Builds the masked, UI-facing view of the stored environment variables.
+async fn env_vars_view(state: &AppState) -> ApiResult<EnvVarsResponse> {
+    let variables = queries::list_environment_variables(&state.db)
+        .await?
+        .into_iter()
+        .map(|variable| EnvVarView {
+            key: variable.key,
+            // Secrets are only ever exposed masked, so the operator can identify
+            // a value without it being revealed.
+            value: if variable.is_secret {
+                mask(&variable.value)
+            } else {
+                variable.value
+            },
+            is_secret: variable.is_secret,
+        })
+        .collect();
+    Ok(EnvVarsResponse { variables })
+}
+
+/// `GET /api/v1/settings/env` - list environment variables (secrets masked).
+pub async fn list_env(State(state): State<AppState>) -> ApiResult<Json<EnvVarsResponse>> {
+    Ok(Json(env_vars_view(&state).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetEnvRequest {
+    pub variables: Vec<EnvVarWrite>,
+}
+
+/// `PUT /api/v1/settings/env` - replace the whole set of environment variables.
+///
+/// A secret whose `value` is omitted keeps its stored value (the UI never holds
+/// the raw secret to resend). Responds with the refreshed, masked list.
+pub async fn set_env(
+    State(state): State<AppState>,
+    Json(body): Json<SetEnvRequest>,
+) -> ApiResult<Json<EnvVarsResponse>> {
+    queries::replace_environment_variables(&state.db, &body.variables).await?;
+    Ok(Json(env_vars_view(&state).await?))
 }

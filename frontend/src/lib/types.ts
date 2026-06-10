@@ -53,6 +53,18 @@ export type Settings = {
   updated_at: string
   claude_token_set: boolean
   github_token_set: boolean
+  // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
+  // unset. The raw tokens are never sent.
+  claude_token_preview: string | null
+  github_token_preview: string | null
+}
+
+// A user-defined environment variable as the UI sees it. For a secret, `value`
+// is the masked preview returned by the API, never the raw secret.
+export type EnvVar = {
+  key: string
+  value: string
+  is_secret: boolean
 }
 
 export type Repository = {
