@@ -266,8 +266,15 @@ pub async fn move_task(
     column: TaskColumn,
     position: f64,
 ) -> sqlx::Result<Task> {
+    // Re-queuing a card (into To Do or Available) clears any prior failure so it
+    // starts clean, including after a failed run.
     sqlx::query_as::<_, Task>(
-        "UPDATE tasks SET board_column = $2, position = $3, updated_at = now() \
+        "UPDATE tasks SET board_column = $2, position = $3, \
+         status = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
+                       THEN 'queued'::task_status ELSE status END, \
+         error = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
+                      THEN NULL ELSE error END, \
+         updated_at = now() \
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
