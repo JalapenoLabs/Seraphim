@@ -2,6 +2,8 @@
   import '../app.css'
   import { page } from '$app/stores'
 
+  import Notifications from '$lib/components/Notifications.svelte'
+
   let { children } = $props()
 
   const links = [
@@ -21,6 +23,8 @@
         </a>
       {/each}
     </nav>
+    <div class="spacer"></div>
+    <Notifications />
   </header>
   <main>
     {@render children()}
@@ -53,6 +57,10 @@
   nav {
     display: flex;
     gap: 0.4rem;
+  }
+
+  .spacer {
+    flex: 1;
   }
 
   .nav-link {

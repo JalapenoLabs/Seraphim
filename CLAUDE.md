@@ -116,6 +116,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `error`, `hold`, `session_id`.
 - **`turns`** / **`events`** — per-task Claude invocations and the append-only
   parsed stream-json (live feed + chat history).
+- **`questions`** — decisions the agent escalated to the user, stored on the task
+  (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
+  Posted by the agent's `seraphim-ask` helper, answered in the task view, and
+  surfaced as toasts + native notifications + a sidebar.
 
 ## How the agent runtime works (the workspace)
 
@@ -141,9 +145,15 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
    them into **Available** (never clobbers human-set column/position). Tasks are
    unique per `(repo_id, source_kind, external_id)`. Callable via `POST /sync`.
-2. **agent** — single-threaded: when not paused and idle, pulls top of **To Do**,
-   prepares the branch, drives one Claude turn, detects the PR, moves to
-   **In Review**. One task awaited to completion before the next (no overlap).
+2. **agent** — single-threaded: when not paused and idle, it first resumes any
+   task whose question the user just answered, otherwise pulls top of **To Do**.
+   It prepares the branch (fresh only), drives one Claude turn, then either
+   **parks** the task in `waiting_for_input` if the agent asked a question,
+   fails, or detects the PR and moves to **In Review**. One task at a time.
+   The agent asks via the `seraphim-ask` CLI (baked into the workspace image),
+   which posts to `POST /agent/questions`; the exec injects `SERAPHIM_TASK_ID` +
+   `SERAPHIM_API_URL`. Once every question is answered, the shared session is
+   resumed with the answers (see `prompt::build_resume`).
 3. **review** — for `auto_squash_merge` repos, polls CI and squash-merges when
    green → **Done**.
 

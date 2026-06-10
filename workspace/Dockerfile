@@ -40,6 +40,12 @@ RUN npm install -g @anthropic-ai/claude-code
 # --- Passwordless sudo for the agent (trusted sandbox) -----------------------
 RUN echo "node ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/node && chmod 0440 /etc/sudoers.d/node
 
+# --- seraphim-ask: the agent's "ask the user for help" helper ----------------
+# A dependency-free Node CLI (uses Node 22's global fetch) that posts a question
+# to the API. The orchestrator injects SERAPHIM_API_URL and SERAPHIM_TASK_ID.
+COPY seraphim-ask /usr/local/bin/seraphim-ask
+RUN chmod +x /usr/local/bin/seraphim-ask
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

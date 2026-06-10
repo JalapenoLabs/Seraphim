@@ -51,11 +51,39 @@ pub enum TaskStatus {
     Queued,
     Preparing,
     Working,
+    /// Parked while the agent waits for the user to answer its question(s).
+    WaitingForInput,
     OpeningPr,
     AwaitingReview,
     Merging,
     Done,
     Failed,
+}
+
+/// Lifecycle of a question the agent escalated to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "question_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionStatus {
+    /// Awaiting the user's answer.
+    Pending,
+    /// The user picked an option or typed a custom answer.
+    Answered,
+    /// The user declined to choose and wants to discuss it instead.
+    Declined,
+}
+
+/// How the user responded to a question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "answer_kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerKind {
+    /// One of the agent's suggested options.
+    Option,
+    /// Free-form text the user typed instead.
+    Custom,
+    /// The user declined to answer and asked to discuss it.
+    Declined,
 }
 
 /// The single-row org / environment profile.
@@ -151,5 +179,41 @@ pub struct Event {
     #[serde(rename = "type")]
     pub event_type: String,
     pub payload: Json<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One suggested answer the agent offers alongside a question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// A decision the agent escalated to the user, stored on its task.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Question {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub prompt: String,
+    /// Up to three suggested answers; the UI adds "something else" and "decline".
+    pub options: Json<Vec<QuestionOption>>,
+    pub status: QuestionStatus,
+    pub answer_kind: Option<AnswerKind>,
+    pub answer: Option<String>,
+    /// Whether the answer has already been delivered to the agent on a resume.
+    pub acknowledged: bool,
+    pub created_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+/// A pending question plus its task's title, for the notifications sidebar.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PendingQuestion {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub task_title: String,
+    pub prompt: String,
+    pub options: Json<Vec<QuestionOption>>,
     pub created_at: DateTime<Utc>,
 }

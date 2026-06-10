@@ -1,16 +1,29 @@
 <script lang="ts">
-  import type { AgentEvent, Task } from '$lib/types'
+  import type { AgentEvent, AnswerKind, Question, Task } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { page } from '$app/stores'
 
-  import { getTask } from '$lib/api'
+  import { answerQuestion, getTask } from '$lib/api'
 
   const taskId = $page.params.id ?? ''
 
   let task = $state<Task | null>(null)
   let events = $state<Pick<AgentEvent, 'type' | 'payload'>[]>([])
+  let questions = $state<Question[]>([])
   let eventSource: EventSource | null = null
+
+  // Per-question free-text inputs for the "something else" and "decline" choices.
+  let customText = $state<Record<string, string>>({})
+  let declineText = $state<Record<string, string>>({})
+
+  const pendingQuestions = $derived(questions.filter((question) => question.status === 'pending'))
+  const answeredQuestions = $derived(questions.filter((question) => question.status !== 'pending'))
+
+  async function submitAnswer(questionId: string, kind: AnswerKind, text: string) {
+    await answerQuestion(questionId, kind, text)
+    await load()
+  }
 
   // Which events are expanded. Tool use/results start collapsed; multiple can be
   // open at once.
@@ -28,6 +41,7 @@
     const detail = await getTask(taskId)
     task = detail.task
     events = detail.events.map((event) => ({ type: event.type, payload: event.payload }))
+    questions = detail.questions
   }
 
   // Render an event's payload into a readable line based on its type.
@@ -89,6 +103,74 @@
 
     {#if task.body_snapshot}
       <section class="body">{task.body_snapshot}</section>
+    {/if}
+
+    {#if pendingQuestions.length}
+      <section class="questions">
+        <h2>The agent needs your input</h2>
+        {#each pendingQuestions as question (question.id)}
+          <div class="question">
+            <p class="prompt">{question.prompt}</p>
+            <div class="options">
+              {#each question.options as option}
+                <button class="option" onclick={() => submitAnswer(question.id, 'option', option.title)}>
+                  <span class="option-title">{option.title}</span>
+                  {#if option.description}
+                    <span class="option-desc">{option.description}</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+
+            <div class="freeform">
+              <label for={`custom-${question.id}`}>Something else</label>
+              <div class="row">
+                <input
+                  id={`custom-${question.id}`}
+                  placeholder="Type your own answer"
+                  bind:value={customText[question.id]}
+                />
+                <button
+                  class="primary"
+                  disabled={!customText[question.id]?.trim()}
+                  onclick={() => submitAnswer(question.id, 'custom', customText[question.id]?.trim() ?? '')}
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+
+            <div class="freeform">
+              <label for={`decline-${question.id}`}>Decline and chat about this</label>
+              <div class="row">
+                <input
+                  id={`decline-${question.id}`}
+                  placeholder="Optional note for the agent"
+                  bind:value={declineText[question.id]}
+                />
+                <button onclick={() => submitAnswer(question.id, 'declined', declineText[question.id]?.trim() ?? '')}>
+                  Decline
+                </button>
+              </div>
+            </div>
+          </div>
+        {/each}
+      </section>
+    {/if}
+
+    {#if answeredQuestions.length}
+      <section class="questions">
+        <h2>Decisions</h2>
+        {#each answeredQuestions as question (question.id)}
+          <div class="decision">
+            <p class="prompt">{question.prompt}</p>
+            <p class="answer">
+              <span class="badge {question.status}">{question.status}</span>
+              {question.answer || (question.status === 'declined' ? 'Declined to choose' : '')}
+            </p>
+          </div>
+        {/each}
+      </section>
     {/if}
 
     <section class="stream">
@@ -171,6 +253,95 @@
   .stream h2 {
     font-size: 1rem;
     color: var(--muted);
+  }
+
+  .questions {
+    margin: 1.2rem 0;
+  }
+
+  .questions h2 {
+    font-size: 1rem;
+  }
+
+  .question {
+    background: var(--panel);
+    border: 1px solid var(--warn);
+    border-radius: var(--radius);
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .prompt {
+    margin: 0 0 0.8rem;
+    font-weight: 600;
+  }
+
+  .options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.9rem;
+  }
+
+  .option {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+  }
+
+  .option:hover {
+    border-color: var(--accent);
+  }
+
+  .option-title {
+    font-weight: 600;
+  }
+
+  .option-desc {
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+
+  .freeform {
+    margin-top: 0.6rem;
+  }
+
+  .freeform label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 0.3rem;
+  }
+
+  .freeform .row {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .freeform input {
+    flex: 1;
+  }
+
+  .decision {
+    border-left: 2px solid var(--border);
+    padding: 0.2rem 0 0.4rem 0.8rem;
+    margin: 0.6rem 0;
+  }
+
+  .decision .prompt {
+    margin-bottom: 0.3rem;
+    font-weight: 500;
+  }
+
+  .decision .answer {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--muted);
+    font-size: 0.9rem;
   }
 
   .event {
