@@ -133,7 +133,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).
 - **`~/.claude`** comes from cloning `settings.config_repo_url` into
   `CLAUDE_CONFIG_DIR=/workspace/.claude` (git init+fetch+checkout so untracked
-  `projects/` — the persisted session — survives). No host mount.
+  `projects/` — the persisted session — survives). No host mount. This is a
+  **dedicated, hard-failing step** (`provision::provision_config_repo`): on
+  failure it records `settings.config_repo_error`, the board shows a red banner,
+  and `next_actionable_task` **halts the agent** (refuses to pull work) until it
+  succeeds. A blank `config_repo_url` bypasses the halt (agent runs unconfigured).
 - **Claude invocation** (`api/src/claude/exec.rs`):
   `claude -p <prompt> --output-format stream-json --verbose --permission-mode bypassPermissions --model <model> [--resume <session>]`,
   exec'd as user `node`, cwd `/workspace`. All tasks resume the one shared

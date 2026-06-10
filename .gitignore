@@ -24,3 +24,5 @@ Thumbs.db
 
 # Runtime data
 /data
+/tmp/*
+/tmp

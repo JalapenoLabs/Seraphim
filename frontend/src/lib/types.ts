@@ -50,6 +50,7 @@ export type Settings = {
   base_setup_script: string
   config_repo_url: string
   default_branch_template: string
+  config_repo_error: string | null
   current_session_id: string | null
   updated_at: string
   claude_token_set: boolean

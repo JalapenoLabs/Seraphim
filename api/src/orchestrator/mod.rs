@@ -46,9 +46,23 @@ pub fn spawn(state: AppState) {
 /// Best-effort full provision at boot so the workspace is ready before the first
 /// task. Failures (e.g. no token yet) are logged; per-task prep retries anyway.
 async fn provision_on_startup(state: AppState) {
+    // Mark provisioning in-progress so the agent halts until the config repo is
+    // verified this boot (only matters when a config repo is configured).
+    if let Ok(settings) = queries::get_settings(&state.db).await {
+        if !settings.config_repo_url.trim().is_empty() {
+            let _ = queries::set_config_repo_error(
+                &state.db,
+                Some("workspace provisioning in progress"),
+            )
+            .await;
+        }
+    }
+
     match provision::provision_workspace(&state).await {
         Ok(()) => info!("workspace provisioned"),
-        Err(error) => warn!(error = %error, "initial workspace provision failed"),
+        Err(error) => {
+            error!(error = %error, "workspace provision failed (agent halted until resolved)");
+        }
     }
 }
 
@@ -141,13 +155,19 @@ async fn agent_loop(state: AppState) {
     }
 }
 
-/// The next card to work, or `None` if paused or there is nothing to do.
+/// The next card to work, or `None` if paused, halted, or there is nothing to do.
 ///
 /// A task whose question the user just answered takes priority over fresh work,
 /// so a half-finished task is carried to completion before a new one is started.
 async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, TaskMode)>> {
     let settings = queries::get_settings(&state.db).await?;
     if settings.agent_paused {
+        return Ok(None);
+    }
+    // Hard halt: a configured config repo that failed to set up means the agent
+    // is missing its instructions/skills. Refuse to pull work until it's fixed.
+    // Bypassed only when no config repo is configured (blank url).
+    if !settings.config_repo_url.trim().is_empty() && settings.config_repo_error.is_some() {
         return Ok(None);
     }
     if let Some(task) = queries::pick_resume_ready(&state.db).await? {
