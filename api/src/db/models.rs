@@ -168,6 +168,14 @@ pub struct Settings {
     pub network_access_domains: Json<Vec<String>>,
     /// For `custom`: also allow the built-in package-manager/registry domains.
     pub network_access_include_defaults: bool,
+    /// Auto-pause new work when the subscription usage limit is (nearly) hit.
+    pub usage_limit_pause_enabled: bool,
+    /// Utilization percent (0-100) at which to auto-pause; Claude's own
+    /// early-warning fires around 80%.
+    pub usage_limit_threshold: i32,
+    /// Runtime state: while set and in the future, the agent is auto-paused for
+    /// usage and pulls no new work; cleared once the limit window resets.
+    pub usage_paused_until: Option<DateTime<Utc>>,
     /// Masked preview of the stored Claude token, e.g. `sk-ant-****abcd`. Not a
     /// DB column; the settings handler fills it from the raw token so an operator
     /// can recognize what is stored without it being revealed.

@@ -85,6 +85,7 @@
   let networkDomains = $state('')
   let networkIncludeDefaults = $state(true)
   let networkSavedAt = $state<string | null>(null)
+  let usageSavedAt = $state<string | null>(null)
 
   // Order and copy mirror the claude.ai network-access selector.
   const NETWORK_LEVELS: { value: NetworkAccessLevel; title: string; description: string }[] = [
@@ -210,6 +211,17 @@
     })
     networkDomains = settings.network_access_domains.join('\n')
     networkSavedAt = new Date().toLocaleTimeString()
+  }
+
+  async function saveUsage() {
+    if (!settings) {
+      return
+    }
+    settings = await updateSettings({
+      usage_limit_pause_enabled: settings.usage_limit_pause_enabled,
+      usage_limit_threshold: settings.usage_limit_threshold
+    })
+    usageSavedAt = new Date().toLocaleTimeString()
   }
 
   function addEnvRow() {
@@ -660,6 +672,57 @@
         <div class="flex items-center gap-3">
           <Button onclick={saveNetwork}>Save network access</Button>
           {#if networkSavedAt}<span class="text-sm text-muted-foreground">Saved at {networkSavedAt}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Usage limits</Card.Title>
+        <Card.Description>
+          When the agent's subscription usage approaches its limit, pause new work until the limit
+          window resets, then resume automatically. A task already in progress always finishes first.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="flex items-center gap-2">
+          <Switch id="usage-enabled" bind:checked={settings.usage_limit_pause_enabled} />
+          <Label for="usage-enabled">Auto-pause near the usage limit</Label>
+        </div>
+
+        {#if settings.usage_limit_pause_enabled}
+          <div class="space-y-1.5">
+            <Label for="usage-threshold">Pause at utilization</Label>
+            <div class="flex items-center gap-2">
+              <Input
+                id="usage-threshold"
+                type="number"
+                min="1"
+                max="100"
+                class="w-24"
+                bind:value={settings.usage_limit_threshold}
+              />
+              <span class="text-sm text-muted-foreground">% of the current window</span>
+            </div>
+            <p class="text-xs leading-relaxed text-muted-foreground">
+              Claude reports utilization once a window crosses its early-warning threshold (around
+              80%), so the default pauses as soon as that warning fires. A reached (100%) limit
+              always pauses regardless.
+            </p>
+          </div>
+
+          {#if settings.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
+            <div class="rounded-md border border-warning/40 bg-card p-3 text-sm">
+              Paused for usage until
+              <strong>{new Date(settings.usage_paused_until).toLocaleString()}</strong>. The agent
+              resumes automatically when the window resets.
+            </div>
+          {/if}
+        {/if}
+
+        <div class="flex items-center gap-3">
+          <Button onclick={saveUsage}>Save usage limits</Button>
+          {#if usageSavedAt}<span class="text-sm text-muted-foreground">Saved at {usageSavedAt}</span>{/if}
         </div>
       </Card.Content>
     </Card.Root>
