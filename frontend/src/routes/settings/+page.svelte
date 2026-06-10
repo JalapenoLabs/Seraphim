@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { AvailabilityWindow, ReviewPolicy, Settings } from '$lib/types'
+  import type { AvailabilityWindow, EnvVar, ReviewPolicy, Settings } from '$lib/types'
+  import type { EnvVarWrite } from '$lib/api'
 
   import { onMount } from 'svelte'
 
@@ -10,8 +11,10 @@
     exportConfig,
     getSettings,
     importConfig,
+    listEnvVars,
     recreateWorkspace,
     restartWorkspace,
+    setEnvVars,
     setTokens,
     updateSettings
   } from '$lib/api'
@@ -22,6 +25,16 @@
   // allows several windows per day, but a single contiguous shift covers the
   // common "9 to 5" case and keeps the UI legible.
   type DayRow = { active: boolean; start: string; end: string }
+
+  // One editable row in the environment-variables table. For a secret loaded from
+  // the server, `value` starts blank and `preview` holds the masked stored value;
+  // leaving it blank on save keeps the stored secret unchanged.
+  type EnvRow = {
+    key: string
+    value: string
+    is_secret: boolean
+    preview: string | null
+  }
 
   let settings = $state<Settings | null>(null)
   let savedAt = $state<string | null>(null)
@@ -45,6 +58,10 @@
   // The browser's full IANA zone list, when the engine exposes it.
   const timezones =
     typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []
+
+  // Environment variables (DigitalOcean-style rows).
+  let envRows = $state<EnvRow[]>([])
+  let envMessage = $state<string | null>(null)
 
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
 
@@ -71,6 +88,17 @@
     })
   }
 
+  function toEnvRow(variable: EnvVar): EnvRow {
+    return {
+      key: variable.key,
+      // Secrets arrive masked; show that as a placeholder and keep the input
+      // blank so an unedited secret is preserved on save.
+      value: variable.is_secret ? '' : variable.value,
+      is_secret: variable.is_secret,
+      preview: variable.is_secret ? variable.value : null
+    }
+  }
+
   async function load() {
     const loaded = await getSettings()
     settings = loaded
@@ -79,6 +107,8 @@
       : CUSTOM_MODEL
     days = buildDays(loaded.availability_windows)
     skipDates = [...loaded.availability_skip_dates]
+    const env = await listEnvVars()
+    envRows = env.variables.map(toEnvRow)
   }
 
   function addSkipDate(date: string) {
@@ -113,6 +143,34 @@
       availability_skip_dates: skipDates
     })
     scheduleSavedAt = new Date().toLocaleTimeString()
+  }
+
+  function addEnvRow() {
+    envRows = [...envRows, { key: '', value: '', is_secret: false, preview: null }]
+  }
+
+  function removeEnvRow(index: number) {
+    envRows = envRows.filter((_, position) => position !== index)
+  }
+
+  async function saveEnv() {
+    const variables: EnvVarWrite[] = envRows
+      .filter((row) => row.key.trim())
+      .map((row) => {
+        const key = row.key.trim()
+        if (!row.is_secret) {
+          return { key, value: row.value, is_secret: false }
+        }
+        // A blank secret input keeps the stored value, so omit it; otherwise the
+        // typed value becomes the new secret.
+        if (row.value) {
+          return { key, value: row.value, is_secret: true }
+        }
+        return { key, is_secret: true }
+      })
+    const saved = await setEnvVars(variables)
+    envRows = saved.variables.map(toEnvRow)
+    envMessage = 'Saved.'
   }
 
   function onModelChange() {
@@ -375,6 +433,9 @@
           placeholder="from `claude setup-token`"
           bind:value={claudeTokenInput}
         />
+        {#if settings.claude_token_preview}
+          <p class="hint">Stored: <code>{settings.claude_token_preview}</code></p>
+        {/if}
       </div>
       <div class="field">
         <label for="gh-token">
@@ -390,10 +451,54 @@
           placeholder="PAT with repo + issues scope"
           bind:value={githubTokenInput}
         />
+        {#if settings.github_token_preview}
+          <p class="hint">Stored: <code>{settings.github_token_preview}</code></p>
+        {/if}
       </div>
       <div class="actions">
         <button class="primary" onclick={saveTokens}>Save secrets</button>
         {#if tokensMessage}<span class="muted">{tokensMessage}</span>{/if}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Environment variables</h2>
+      <p class="hint">
+        Injected into the agent's environment at runtime (alongside its tokens) and available to
+        setup scripts. Mark a row <strong>secret</strong> to have its value scrubbed from the
+        agent's output before it reaches the logs or database, and only ever shown here masked.
+      </p>
+
+      {#if envRows.length}
+        <div class="env-table">
+          {#each envRows as row, index}
+            <div class="env-row">
+              <input class="env-key" placeholder="KEY" bind:value={row.key} />
+              <input
+                class="env-value"
+                type={row.is_secret ? 'password' : 'text'}
+                placeholder={row.is_secret && row.preview ? `${row.preview} (leave blank to keep)` : 'value'}
+                autocomplete="off"
+                bind:value={row.value}
+              />
+              <label class="env-secret" title="Scrub this value from all output">
+                <input type="checkbox" bind:checked={row.is_secret} />
+                <span>secret</span>
+              </label>
+              <button class="env-delete" title="Remove" onclick={() => removeEnvRow(index)}>
+                ✕
+              </button>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <p class="muted">No environment variables yet.</p>
+      {/if}
+
+      <div class="actions">
+        <button onclick={addEnvRow}>+ Add another</button>
+        <button class="primary" onclick={saveEnv}>Save variables</button>
+        {#if envMessage}<span class="muted">{envMessage}</span>{/if}
       </div>
     </section>
 
@@ -551,6 +656,19 @@
     gap: 0.5rem;
   }
 
+  .env-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0.6rem 0 0.9rem;
+  }
+
+  .env-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   .times input {
     width: auto;
   }
@@ -581,6 +699,33 @@
   .chip.suggest {
     border-style: dashed;
     color: var(--muted);
+  }
+
+  .env-key {
+    flex: 0 0 30%;
+    font-family: monospace;
+  }
+
+  .env-value {
+    flex: 1;
+  }
+
+  .env-secret {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .env-secret input {
+    width: auto;
+  }
+
+  .env-delete {
+    flex: 0 0 auto;
+    padding: 0.4rem 0.6rem;
   }
 
   .import-button {

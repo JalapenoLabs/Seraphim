@@ -94,6 +94,7 @@ mod tests {
             base_setup_script: String::new(),
             config_repo_url: String::new(),
             default_branch_template: String::new(),
+            config_repo_error: None,
             current_session_id: None,
             updated_at: Utc::now(),
             claude_token_set: false,
@@ -102,6 +103,8 @@ mod tests {
             availability_timezone: timezone.to_string(),
             availability_windows: Json(windows),
             availability_skip_dates: Json(skip_dates),
+            claude_token_preview: None,
+            github_token_preview: None,
         }
     }
 

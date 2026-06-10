@@ -7,6 +7,7 @@ import type {
   AvailabilityWindow,
   BoardResponse,
   ConfigBundle,
+  EnvVar,
   Repository,
   ReviewPolicy,
   Settings,
@@ -108,6 +109,26 @@ export type TokensRequest = {
 
 export function setTokens(body: TokensRequest) {
   return apiClient.post('settings/tokens', { json: body }).json<Settings>()
+}
+
+type EnvVarsResponse = {
+  variables: EnvVar[]
+}
+
+export function listEnvVars() {
+  return apiClient.get('settings/env').json<EnvVarsResponse>()
+}
+
+// One variable to write. `value` is omitted for a secret left unchanged, so the
+// server keeps its stored value (the UI never holds the raw secret to resend).
+export type EnvVarWrite = {
+  key: string
+  value?: string
+  is_secret: boolean
+}
+
+export function setEnvVars(variables: EnvVarWrite[]) {
+  return apiClient.put('settings/env', { json: { variables } }).json<EnvVarsResponse>()
 }
 
 export function restartWorkspace() {

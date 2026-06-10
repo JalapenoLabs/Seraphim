@@ -65,6 +65,10 @@ pub fn router(state: AppState) -> Router {
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
         .route("/settings/tokens", post(settings::set_tokens))
+        .route(
+            "/settings/env",
+            get(settings::list_env).put(settings::set_env),
+        )
         .route("/workspace/restart", post(workspace::restart))
         .route("/workspace/recreate", post(workspace::recreate))
         .route("/workspace/provision", post(workspace::provision))

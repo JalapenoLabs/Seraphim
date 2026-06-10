@@ -27,6 +27,7 @@ use crate::claude::{run_turn, AgentEventKind, TurnArgs};
 use crate::db::models::{Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
 use crate::db::queries;
 use crate::git;
+use crate::secrets::Scrubber;
 use crate::state::AppState;
 
 /// How often the agent loop checks for work when idle.
@@ -48,9 +49,23 @@ pub fn spawn(state: AppState) {
 /// Best-effort full provision at boot so the workspace is ready before the first
 /// task. Failures (e.g. no token yet) are logged; per-task prep retries anyway.
 async fn provision_on_startup(state: AppState) {
+    // Mark provisioning in-progress so the agent halts until the config repo is
+    // verified this boot (only matters when a config repo is configured).
+    if let Ok(settings) = queries::get_settings(&state.db).await {
+        if !settings.config_repo_url.trim().is_empty() {
+            let _ = queries::set_config_repo_error(
+                &state.db,
+                Some("workspace provisioning in progress"),
+            )
+            .await;
+        }
+    }
+
     match provision::provision_workspace(&state).await {
         Ok(()) => info!("workspace provisioned"),
-        Err(error) => warn!(error = %error, "initial workspace provision failed"),
+        Err(error) => {
+            error!(error = %error, "workspace provision failed (agent halted until resolved)");
+        }
     }
 }
 
@@ -134,13 +149,20 @@ async fn agent_loop(state: AppState) {
     }
 }
 
-/// The next card to work, or `None` if paused, outside the availability
+/// The next card to work, or `None` if paused, halted, outside the availability
 /// schedule, or the queue is empty.
 async fn next_actionable_task(state: &AppState) -> Result<Option<Task>> {
     let settings = queries::get_settings(&state.db).await?;
     if settings.agent_paused {
         return Ok(None);
     }
+    // Hard halt: a configured config repo that failed to set up means the agent
+    // is missing its instructions/skills. Refuse to pull work until it's fixed.
+    // Bypassed only when no config repo is configured (blank url).
+    if !settings.config_repo_url.trim().is_empty() && settings.config_repo_error.is_some() {
+        return Ok(None);
+    }
+    // Optional availability schedule (hours/days/skip-dates in the user's zone).
     if !availability::is_available(&settings, Utc::now()) {
         return Ok(None);
     }
@@ -244,6 +266,16 @@ async fn run_agent_turn(
     )
     .await?;
 
+    // User-defined environment variables are injected into the agent's exec.
+    let env = queries::list_environment_variables(&state.db)
+        .await?
+        .into_iter()
+        .map(|variable| (variable.key, variable.value))
+        .collect();
+    // Every secret (env vars + tokens) is scrubbed from output before it is
+    // persisted or streamed, so a secret the agent echoes never leaks.
+    let scrubber = Scrubber::new(queries::list_secret_values(&state.db).await?);
+
     let args = TurnArgs {
         container: state.workspace.container().to_string(),
         working_dir,
@@ -252,6 +284,7 @@ async fn run_agent_turn(
         model: settings.claude_model.clone(),
         oauth_token: queries::get_claude_token(&state.db).await?,
         github_token: queries::get_github_token(&state.db).await?,
+        env,
     };
 
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));
@@ -281,20 +314,23 @@ async fn run_agent_turn(
         } = &event.kind
         {
             total_cost = *total_cost_usd;
-            result_text.clone_from(text);
+            result_text = text.as_deref().map(|text| scrubber.scrub_text(text));
             if *is_error {
-                error_message = Some(
-                    text.clone()
-                        .unwrap_or_else(|| "the agent reported an error".to_string()),
-                );
+                let message = text
+                    .clone()
+                    .unwrap_or_else(|| "the agent reported an error".to_string());
+                error_message = Some(scrubber.scrub_text(&message));
             }
         }
 
         let label = event.type_label();
-        queries::append_event(&state.db, turn.id, seq, label, event.raw.clone()).await?;
+        // Scrub secrets out of the payload before it touches the DB or the stream.
+        let mut payload = event.raw.clone();
+        scrubber.scrub_value(&mut payload);
+        queries::append_event(&state.db, turn.id, seq, label, payload.clone()).await?;
         state.notify_task(
             task.id,
-            serde_json::json!({ "type": label, "payload": event.raw }),
+            serde_json::json!({ "type": label, "payload": payload }),
         );
         queries::set_task_status(&state.db, task.id, TaskStatus::Working)
             .await

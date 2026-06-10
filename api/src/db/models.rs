@@ -92,6 +92,8 @@ pub struct Settings {
     pub config_repo_url: String,
     /// Branch template applied to repos auto-discovered from an org.
     pub default_branch_template: String,
+    /// Config-repo setup error, if any (NULL = healthy / no config repo).
+    pub config_repo_error: Option<String>,
     pub current_session_id: Option<String>,
     pub updated_at: DateTime<Utc>,
     /// Whether a Claude OAuth token is stored (the token itself is never sent).
@@ -107,6 +109,39 @@ pub struct Settings {
     pub availability_windows: Json<Vec<AvailabilityWindow>>,
     /// Calendar dates to skip entirely (vacations, holidays).
     pub availability_skip_dates: Json<Vec<NaiveDate>>,
+    /// Masked preview of the stored Claude token, e.g. `sk-ant-****abcd`. Not a
+    /// DB column; the settings handler fills it from the raw token so an operator
+    /// can recognize what is stored without it being revealed.
+    #[sqlx(default)]
+    pub claude_token_preview: Option<String>,
+    /// Masked preview of the stored GitHub token. Filled like
+    /// [`Self::claude_token_preview`].
+    #[sqlx(default)]
+    pub github_token_preview: Option<String>,
+}
+
+/// A user-defined environment variable injected into the agent's execs.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct EnvVar {
+    pub id: Uuid,
+    pub key: String,
+    pub value: String,
+    /// When true, the value is scrubbed from output and only ever returned masked.
+    pub is_secret: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One environment variable as submitted by the settings UI.
+///
+/// `value` is optional so a secret can be left unchanged: `None` means "keep the
+/// stored value" (the UI never receives raw secrets to send back), while `Some`
+/// sets a new value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvVarWrite {
+    pub key: String,
+    pub value: Option<String>,
+    pub is_secret: bool,
 }
 
 /// A repository the agent is allowed to clone and work in.

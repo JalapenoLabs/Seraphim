@@ -58,6 +58,7 @@ export type Settings = {
   base_setup_script: string
   config_repo_url: string
   default_branch_template: string
+  config_repo_error: string | null
   current_session_id: string | null
   updated_at: string
   claude_token_set: boolean
@@ -67,6 +68,18 @@ export type Settings = {
   availability_windows: AvailabilityWindow[]
   // ISO calendar dates ("YYYY-MM-DD") to skip entirely.
   availability_skip_dates: string[]
+  // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
+  // unset. The raw tokens are never sent.
+  claude_token_preview: string | null
+  github_token_preview: string | null
+}
+
+// A user-defined environment variable as the UI sees it. For a secret, `value`
+// is the masked preview returned by the API, never the raw secret.
+export type EnvVar = {
+  key: string
+  value: string
+  is_secret: boolean
 }
 
 export type Repository = {

@@ -104,14 +104,19 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (= environment setup), `config_repo_url`, `default_branch_template`,
   `current_session_id` (the one shared Claude session), the secret columns
   `claude_oauth_token` / `github_token` (the API only ever exposes
-  `*_token_set` booleans, never the raw values; write via `POST /settings/tokens`),
-  and the optional **availability schedule** (`availability_enabled`,
-  `availability_timezone` (IANA), `availability_windows` JSONB, and
-  `availability_skip_dates` JSONB). When enabled, the agent only pulls new work
-  during the configured weekly windows in the operator's time zone, skipping
+  `*_token_set` booleans plus a masked `*_token_preview`, never the raw values;
+  write via `POST /settings/tokens`), and the optional **availability schedule**
+  (`availability_enabled`, `availability_timezone` (IANA), `availability_windows`
+  JSONB, `availability_skip_dates` JSONB). When enabled, the agent only pulls new
+  work during the configured weekly windows in the operator's time zone, skipping
   listed dates; empty windows mean "any time of day". The gate is the pure,
   unit-tested `orchestrator::availability::is_available`, checked alongside
   `agent_paused`.
+- **`environment_variables`** — user-defined `key` / `value` / `is_secret` rows,
+  injected into the agent's turn and setup execs at runtime. A secret value is
+  scrubbed out of Claude's output before anything is persisted or streamed
+  (`secrets::Scrubber`), and the API only ever returns it masked. CRUD via
+  `GET`/`PUT /settings/env`.
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
   `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this
@@ -136,7 +141,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).
 - **`~/.claude`** comes from cloning `settings.config_repo_url` into
   `CLAUDE_CONFIG_DIR=/workspace/.claude` (git init+fetch+checkout so untracked
-  `projects/` — the persisted session — survives). No host mount.
+  `projects/` — the persisted session — survives). No host mount. This is a
+  **dedicated, hard-failing step** (`provision::provision_config_repo`): on
+  failure it records `settings.config_repo_error`, the board shows a red banner,
+  and `next_actionable_task` **halts the agent** (refuses to pull work) until it
+  succeeds. A blank `config_repo_url` bypasses the halt (agent runs unconfigured).
 - **Claude invocation** (`api/src/claude/exec.rs`):
   `claude -p <prompt> --output-format stream-json --verbose --permission-mode bypassPermissions --model <model> [--resume <session>]`,
   exec'd as user `node`, cwd `/workspace`. All tasks resume the one shared
