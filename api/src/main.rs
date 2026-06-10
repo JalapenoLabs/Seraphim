@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         settings.workspace_image_tag.clone(),
     )?;
 
-    let state = AppState::new(db, workspace);
+    let state = AppState::new(db, workspace, config.internal_api_url.clone());
     orchestrator::spawn(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&config.api_bind)

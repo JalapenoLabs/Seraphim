@@ -30,16 +30,24 @@ pub struct TurnArgs {
     pub oauth_token: String,
     /// GitHub token, so the agent's `gh`/`git` are authed for this turn.
     pub github_token: String,
+    /// The task being worked, so the agent's `seraphim-ask` can attribute its
+    /// questions (exported as `SERAPHIM_TASK_ID`).
+    pub task_id: String,
+    /// URL the workspace uses to reach the API (exported as `SERAPHIM_API_URL`).
+    pub internal_api_url: String,
     /// User-defined environment variables (`key`, `value`) for this exec.
     pub env: Vec<(String, String)>,
 }
 
-/// Builds the exec environment: the auth tokens plus any user-defined variables.
-/// User variables come last so they cannot shadow the tokens we control.
+/// Builds the exec environment: auth tokens, the `seraphim-ask` wiring, and any
+/// user-defined variables. User variables come last so they cannot shadow the
+/// tokens we control.
 fn build_env(args: &TurnArgs) -> Vec<String> {
     let mut env = vec![
         format!("CLAUDE_CODE_OAUTH_TOKEN={}", args.oauth_token),
         format!("GH_TOKEN={}", args.github_token),
+        format!("SERAPHIM_TASK_ID={}", args.task_id),
+        format!("SERAPHIM_API_URL={}", args.internal_api_url),
     ];
     for (key, value) in &args.env {
         env.push(format!("{key}={value}"));
@@ -148,6 +156,8 @@ mod tests {
             model: "claude-opus-4-8[1m]".to_string(),
             oauth_token: "tok".to_string(),
             github_token: "gh".to_string(),
+            task_id: "task-1".to_string(),
+            internal_api_url: "http://api:27182".to_string(),
             env: vec![],
         };
         let command = build_command(&args);
@@ -167,6 +177,8 @@ mod tests {
             model: "claude-opus-4-8[1m]".to_string(),
             oauth_token: "tok".to_string(),
             github_token: "gh".to_string(),
+            task_id: "task-1".to_string(),
+            internal_api_url: "http://api:27182".to_string(),
             env: vec![],
         };
         let command = build_command(&args);

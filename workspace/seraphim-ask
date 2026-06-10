@@ -1,0 +1,106 @@
+#!/usr/bin/env node
+// seraphim-ask: the agent's way to escalate a decision to the human.
+//
+// It posts one or more questions to the Seraphim API, which stores them on the
+// current task and notifies the user. The agent then ends its turn; once the
+// user answers, the orchestrator resumes the session with their guidance. This
+// script does NOT block waiting for the answer, so it never times out.
+//
+// Usage (the payload is JSON, passed as an argument or on stdin):
+//   seraphim-ask '{"questions":[{"prompt":"Which DB?","options":[
+//                  {"title":"Postgres","description":"already used here"}]}]}'
+//   echo '<json>' | seraphim-ask
+//
+// A bare string, a single {prompt, options} object, or an array of those are all
+// accepted for convenience. Up to 3 options per question are kept; the UI always
+// adds "something else" and "decline and chat" choices.
+
+const API_URL = process.env.SERAPHIM_API_URL
+const TASK_ID = process.env.SERAPHIM_TASK_ID
+
+function fail(message) {
+  console.error(`seraphim-ask: ${message}`)
+  process.exit(1)
+}
+
+// Reads the whole of stdin, for the `echo ... | seraphim-ask` form.
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk) => (data += chunk))
+    process.stdin.on('end', () => resolve(data))
+  })
+}
+
+// Normalizes the many accepted input shapes into an array of questions.
+function normalizeQuestions(parsed) {
+  const rawList = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.questions)
+      ? parsed.questions
+      : [parsed]
+
+  return rawList
+    .map((entry) => {
+      const question = typeof entry === 'string' ? { prompt: entry } : entry
+      const options = Array.isArray(question?.options) ? question.options : []
+      return {
+        prompt: String(question?.prompt ?? '').trim(),
+        options: options.slice(0, 3).map((option) => ({
+          title: String(option?.title ?? '').trim(),
+          description: String(option?.description ?? '').trim()
+        }))
+      }
+    })
+    .filter((question) => question.prompt.length > 0)
+}
+
+async function main() {
+  if (!API_URL || !TASK_ID) {
+    fail('SERAPHIM_API_URL and SERAPHIM_TASK_ID must be set (they are injected by the orchestrator)')
+  }
+
+  const rawInput = process.argv[2] ?? (await readStdin())
+  if (!rawInput || !rawInput.trim()) {
+    fail('no question provided (pass JSON as an argument or on stdin)')
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(rawInput)
+  } catch {
+    // Allow a plain, unquoted question string as a convenience.
+    parsed = rawInput.trim()
+  }
+
+  const questions = normalizeQuestions(parsed)
+  if (!questions.length) {
+    fail('could not find any question text in the input')
+  }
+
+  let response
+  try {
+    response = await fetch(`${API_URL}/api/v1/agent/questions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task_id: TASK_ID, questions })
+    })
+  } catch (error) {
+    fail(`could not reach the Seraphim API at ${API_URL}: ${error.message}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    fail(`the API rejected the question (HTTP ${response.status}): ${detail}`)
+  }
+
+  const count = questions.length
+  console.log(
+    `Posted ${count} question${count === 1 ? '' : 's'} to the user. ` +
+      'STOP working now and end your turn. You will be automatically resumed ' +
+      "once the user answers. Do not guess at the answer in the meantime."
+  )
+}
+
+main().catch((error) => fail(error.message))

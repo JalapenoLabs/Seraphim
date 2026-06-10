@@ -10,6 +10,8 @@
   import { isWithinSchedule } from '$lib/schedule'
   import { Toaster } from '$lib/components/ui/sonner'
 
+  import Notifications from '$lib/components/Notifications.svelte'
+
   let { children } = $props()
 
   const links = [
@@ -106,7 +108,6 @@
         </a>
       {/each}
     </nav>
-
     {#if status}
       <span
         class="ml-auto inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold {PILLS[
@@ -124,6 +125,7 @@
         {status.label}
       </span>
     {/if}
+    <Notifications />
   </header>
   <main class="min-h-0 flex-1 overflow-auto">
     {@render children()}

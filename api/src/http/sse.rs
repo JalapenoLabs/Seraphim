@@ -22,8 +22,40 @@ pub async fn board_stream(
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("board").data("{}"));
                 }
-                Ok(ServerEvent::Task { .. }) => {}
+                Ok(ServerEvent::Task { .. } | ServerEvent::Notification { .. }) => {}
                 // A lagged consumer just resyncs; a closed channel ends the stream.
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `GET /api/v1/notifications/stream` - app-wide stream for the notifications
+/// sidebar: a `notification` event when the agent asks something (driving toasts
+/// and native notifications), and a `refresh` tick on any board change so the
+/// pending list stays current as questions are answered.
+pub async fn notification_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut receiver = state.events.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            match receiver.recv().await {
+                Ok(ServerEvent::Notification { task_id, task_title, prompt }) => {
+                    let payload = serde_json::json!({
+                        "task_id": task_id,
+                        "task_title": task_title,
+                        "prompt": prompt,
+                    });
+                    let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("notification").data(data));
+                }
+                Ok(ServerEvent::Board) => {
+                    yield Ok(Event::default().event("refresh").data("{}"));
+                }
+                Ok(ServerEvent::Task { .. }) => {}
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             }

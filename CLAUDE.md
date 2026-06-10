@@ -128,6 +128,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `error`, `hold`, `session_id`.
 - **`turns`** / **`events`** — per-task Claude invocations and the append-only
   parsed stream-json (live feed + chat history).
+- **`questions`** — decisions the agent escalated to the user, stored on the task
+  (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
+  Posted by the agent's `seraphim-ask` helper, answered in the task view, and
+  surfaced as toasts + native notifications + a sidebar.
 
 ## How the agent runtime works (the workspace)
 
@@ -157,13 +161,17 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
    them into **Available** (never clobbers human-set column/position). Tasks are
    unique per `(repo_id, source_kind, external_id)`. Callable via `POST /sync`.
-2. **agent** — single-threaded: when not paused, inside the availability schedule,
-   and idle, picks work by priority — (a) a PR with failing CI to fix
-   (`ci_failing`), (b) top of **To Do** (fresh issue → branch → Claude turn →
-   detect PR → **In Review**), then (c) when nothing else is queued, *revisit* a
-   PR it gave up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min),
-   trying once more to clear a merge conflict (merge the base in) or fix CI. One
-   task awaited to completion before the next (no overlap).
+2. **agent** — single-threaded: when not paused, the config repo is healthy, and
+   inside the availability schedule, it picks work by priority — (a) **resume** a
+   task whose question the user just answered (`waiting_for_input` → deliver the
+   answers via `prompt::build_resume`), (b) a PR with failing CI to fix
+   (`ci_failing`), (c) top of **To Do** (fresh issue → branch → Claude turn →
+   detect PR → **In Review**, or **park** as `waiting_for_input` if the agent
+   asked a question), then (d) when nothing else is queued, *revisit* a PR it gave
+   up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min). The agent
+   asks via the `seraphim-ask` CLI (baked into the workspace image), which posts
+   to `POST /agent/questions`; the exec injects `SERAPHIM_TASK_ID` +
+   `SERAPHIM_API_URL`. One task awaited to completion before the next (no overlap).
 3. **review** — watches every open PR's CI: green → squash-merge
    (`auto_squash_merge` repos) → **Done**, else wait; red → hand back to the
    agent, bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for

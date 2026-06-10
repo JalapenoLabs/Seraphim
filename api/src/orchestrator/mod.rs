@@ -58,6 +58,8 @@ const REVISIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 enum WorkMode {
     /// A fresh issue: cut a branch, implement, and open a PR.
     Fresh,
+    /// A parked task the user just answered: resume the existing session.
+    Resume,
     /// An open PR with failing CI: re-engage on its branch to fix the checks.
     FixCi,
     /// A PR the agent gave up on (CI or merge conflict), retried while idle.
@@ -209,6 +211,9 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
     if !availability::is_available(&settings, Utc::now()) {
         return Ok(None);
     }
+    if let Some(task) = queries::pick_resume_ready(&state.db).await? {
+        return Ok(Some((task, WorkMode::Resume)));
+    }
     if let Some(task) = queries::pick_next_ci_fix(&state.db).await? {
         return Ok(Some((task, WorkMode::FixCi)));
     }
@@ -227,20 +232,16 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
 /// Dispatches a pulled card to the right end-to-end flow.
 async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
     match mode {
-        WorkMode::Fresh => work_fresh(state, task).await,
+        WorkMode::Fresh => work_fresh(state, task, false).await,
+        WorkMode::Resume => work_fresh(state, task, true).await,
         WorkMode::FixCi => work_ci_fix(state, task, false).await,
         WorkMode::Revisit => work_ci_fix(state, task, true).await,
     }
 }
 
 /// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR.
-async fn work_fresh(state: &AppState, task: Task) -> Result<()> {
-    info!(task_id = %task.id, title = %task.title, "starting task");
-
-    // Move the card into In Progress and mark it preparing.
-    queries::move_task(&state.db, task.id, TaskColumn::InProgress, task.position).await?;
-    queries::set_task_status(&state.db, task.id, TaskStatus::Preparing).await?;
-    state.notify_board();
+async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
+    info!(task_id = %task.id, title = %task.title, resume, "working task");
 
     let Some(repo_id) = task.repo_id else {
         return fail(state, &task, "no repository is configured for this issue").await;
@@ -250,29 +251,60 @@ async fn work_fresh(state: &AppState, task: Task) -> Result<()> {
     };
 
     let settings = queries::get_settings(&state.db).await?;
-    let branch = render_branch(&repo.branch_template, &task);
-    if let Err(error) = provision::prepare_branch(state, &settings, &repo, &branch).await {
-        return fail(state, &task, &format!("repo preparation failed: {error}")).await;
-    }
 
-    queries::mark_task_started(
-        &state.db,
-        task.id,
-        &branch,
-        settings.current_session_id.as_deref(),
-    )
-    .await?;
+    // A resumed task already has its branch and working tree; only a fresh task
+    // is moved into In Progress and re-cut from the default branch.
+    let branch = if resume {
+        task.branch
+            .clone()
+            .unwrap_or_else(|| render_branch(&repo.branch_template, &task))
+    } else {
+        queries::move_task(&state.db, task.id, TaskColumn::InProgress, task.position).await?;
+        queries::set_task_status(&state.db, task.id, TaskStatus::Preparing).await?;
+        state.notify_board();
+
+        let branch = render_branch(&repo.branch_template, &task);
+        if let Err(error) = provision::prepare_branch(state, &settings, &repo, &branch).await {
+            return fail(state, &task, &format!("repo preparation failed: {error}")).await;
+        }
+        queries::mark_task_started(
+            &state.db,
+            task.id,
+            &branch,
+            settings.current_session_id.as_deref(),
+        )
+        .await?;
+        branch
+    };
+
     queries::set_task_status(&state.db, task.id, TaskStatus::Working).await?;
     state.notify_board();
 
-    // Drive the Claude turn and capture the (possibly new) session id.
-    let prompt = prompt::build(&settings, &repo, &task, &branch);
+    // On a fresh run the prompt is the task brief; on resume it delivers the
+    // user's answers to the question(s) the agent asked.
+    let prompt = if resume {
+        let answers = queries::list_unacknowledged_answers(&state.db, task.id).await?;
+        let prompt = prompt::build_resume(&repo, &task, &branch, &answers);
+        queries::acknowledge_answers(&state.db, task.id).await?;
+        prompt
+    } else {
+        prompt::build(&settings, &repo, &task, &branch)
+    };
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
     // Surface a turn failure (e.g. "Not logged in") on the task itself, instead
     // of letting it fall through to the generic "no pull request" message.
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
+    }
+
+    // If the agent asked the user something, park the task until it is answered
+    // rather than treating the missing PR as a failure.
+    if queries::count_pending_questions(&state.db, task.id).await? > 0 {
+        queries::set_task_status(&state.db, task.id, TaskStatus::WaitingForInput).await?;
+        state.notify_board();
+        info!(task_id = %task.id, "task parked awaiting the user's answer");
+        return Ok(());
     }
 
     // Deterministically detect the PR the agent opened for this branch. Retry to
@@ -467,6 +499,8 @@ async fn run_agent_turn(
         model: settings.claude_model.clone(),
         oauth_token: queries::get_claude_token(&state.db).await?,
         github_token: queries::get_github_token(&state.db).await?,
+        task_id: task.id.to_string(),
+        internal_api_url: state.internal_api_url.clone(),
         env,
     };
 
