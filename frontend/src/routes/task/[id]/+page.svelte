@@ -17,7 +17,7 @@
   let expanded = $state<Record<number, boolean>>({})
 
   function isCollapsible(type: string) {
-    return type === 'tool_use' || type === 'tool_result'
+    return type === 'tool_use' || type === 'tool_result' || type === 'thinking'
   }
 
   function toggle(index: number) {
@@ -33,6 +33,9 @@
   // Render an event's payload into a readable line based on its type.
   function describe(event: { type: string; payload: unknown }): string {
     const payload = event.payload as Record<string, unknown>
+    if (event.type === 'thinking') {
+      return String(payload?.thinking ?? '')
+    }
     if (event.type === 'assistant_text') {
       return String(payload?.text ?? '')
     }
@@ -108,7 +111,9 @@
           </button>
           <pre
             class="event-body"
-            class:clamp3={collapsible && event.type === 'tool_result' && !open}
+            class:clamp3={collapsible &&
+              (event.type === 'tool_result' || event.type === 'thinking') &&
+              !open}
             class:clamp1={collapsible && event.type === 'tool_use' && !open}
           >{describe(event)}</pre>
         </div>
@@ -180,6 +185,15 @@
 
   .event.result {
     border-color: var(--accent-2);
+  }
+
+  .event.thinking {
+    border-color: var(--warn);
+  }
+
+  .event.thinking .event-body {
+    font-style: italic;
+    opacity: 0.85;
   }
 
   .event-head {

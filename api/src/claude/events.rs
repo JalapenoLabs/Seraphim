@@ -29,6 +29,8 @@ pub struct AgentEvent {
 pub enum AgentEventKind {
     /// Session initialization; carries the model name.
     Init { model: Option<String> },
+    /// The agent's extended-thinking / reasoning.
+    Thinking { text: String },
     /// A chunk of assistant prose.
     AssistantText { text: String },
     /// The agent invoking a tool.
@@ -50,6 +52,7 @@ impl AgentEvent {
     pub fn type_label(&self) -> &'static str {
         match self.kind {
             AgentEventKind::Init { .. } => "system",
+            AgentEventKind::Thinking { .. } => "thinking",
             AgentEventKind::AssistantText { .. } => "assistant_text",
             AgentEventKind::ToolUse { .. } => "tool_use",
             AgentEventKind::ToolResult { .. } => "tool_result",
@@ -141,6 +144,30 @@ fn parse_assistant(value: &Value, session_id: Option<&str>, raw: Value) -> Vec<A
     let mut events = Vec::new();
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                // Extended-thinking blocks carry their text under `thinking`.
+                // Skip empty ones (e.g. when the model omits thinking text).
+                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        events.push(AgentEvent {
+                            kind: AgentEventKind::Thinking {
+                                text: text.to_string(),
+                            },
+                            session_id: session_id.map(str::to_string),
+                            raw: block.clone(),
+                        });
+                    }
+                }
+            }
+            Some("redacted_thinking") => {
+                events.push(AgentEvent {
+                    kind: AgentEventKind::Thinking {
+                        text: "[redacted thinking]".to_string(),
+                    },
+                    session_id: session_id.map(str::to_string),
+                    raw: block.clone(),
+                });
+            }
             Some("text") => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     events.push(AgentEvent {
@@ -250,6 +277,31 @@ mod tests {
             }
             other => panic!("expected tool_use, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn assistant_line_emits_thinking_then_text() {
+        let line = r#"{"type":"assistant","session_id":"s1","message":{"content":[
+            {"type":"thinking","thinking":"Let me check the config first."},
+            {"type":"thinking","thinking":"   "},
+            {"type":"text","text":"Done."}
+        ]}}"#;
+        let events = parse_line(line);
+        // Empty thinking is skipped, so: one thinking + one text.
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].kind,
+            AgentEventKind::Thinking {
+                text: "Let me check the config first.".to_string()
+            }
+        );
+        assert_eq!(events[0].type_label(), "thinking");
+        assert_eq!(
+            events[1].kind,
+            AgentEventKind::AssistantText {
+                text: "Done.".to_string()
+            }
+        );
     }
 
     #[test]
