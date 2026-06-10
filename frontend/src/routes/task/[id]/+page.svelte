@@ -19,6 +19,7 @@
   import { buttonVariants } from '$lib/components/ui/button'
   import IssueView from '$lib/components/IssueView.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
+  import JsonHighlight from '$lib/components/JsonHighlight.svelte'
 
   const taskId = $page.params.id ?? ''
 
@@ -497,7 +498,7 @@
                     class="flex w-full gap-2 py-0.5 text-left hover:opacity-80 {indent}"
                   >
                     <span class="w-[1ch] flex-none {markerColor(event.type)}">{marker(event.type)}</span>
-                    <span class={lineClasses(event.type, open)}>{describe(event)}</span>
+                    <span class={lineClasses(event.type, open)}><JsonHighlight text={describe(event)} /></span>
                   </button>
                 {:else}
                   <div class="flex items-start gap-2 py-0.5 {indent}">
@@ -506,7 +507,7 @@
                       <!-- Render the agent's prose as full markdown. -->
                       <div class="min-w-0 flex-1"><Markdown source={describe(event)} /></div>
                     {:else}
-                      <span class={lineClasses(event.type, open)}>{describe(event)}</span>
+                      <span class={lineClasses(event.type, open)}><JsonHighlight text={describe(event)} /></span>
                     {/if}
                   </div>
                 {/if}
