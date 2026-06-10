@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 
 use super::ApiResult;
-use crate::db::models::{AvailabilityWindow, ReviewPolicy};
+use crate::db::models::{AvailabilityWindow, NetworkAccessLevel, ReviewPolicy};
 use crate::db::queries;
 use crate::state::AppState;
 
@@ -31,11 +31,27 @@ pub struct SettingsExport {
     pub availability_windows: Vec<AvailabilityWindow>,
     #[serde(default)]
     pub availability_skip_dates: Vec<NaiveDate>,
+    // Default so bundles exported before the network-access feature still import.
+    #[serde(default = "default_network_level")]
+    pub network_access_level: NetworkAccessLevel,
+    #[serde(default)]
+    pub network_access_domains: Vec<String>,
+    #[serde(default = "default_true")]
+    pub network_access_include_defaults: bool,
 }
 
 /// Matches the database default so an older bundle imports as plain UTC.
 fn default_timezone() -> String {
     "UTC".to_string()
+}
+
+/// Matches the database default (`full`) so older bundles import unrestricted.
+fn default_network_level() -> NetworkAccessLevel {
+    NetworkAccessLevel::Full
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,6 +92,9 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             availability_timezone: settings.availability_timezone,
             availability_windows: settings.availability_windows.0,
             availability_skip_dates: settings.availability_skip_dates.0,
+            network_access_level: settings.network_access_level,
+            network_access_domains: settings.network_access_domains.0,
+            network_access_include_defaults: settings.network_access_include_defaults,
         },
         repositories: repositories
             .into_iter()
@@ -117,6 +136,9 @@ pub async fn import(
         Some(settings.availability_timezone),
         Some(SqlxJson(settings.availability_windows)),
         Some(SqlxJson(settings.availability_skip_dates)),
+        Some(settings.network_access_level),
+        Some(SqlxJson(settings.network_access_domains)),
+        Some(settings.network_access_include_defaults),
     )
     .await?;
 

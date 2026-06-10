@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 
 use super::ApiResult;
-use crate::db::models::{AvailabilityWindow, EnvVarWrite, ReviewPolicy, Settings};
+use crate::db::models::{
+    AvailabilityWindow, EnvVarWrite, NetworkAccessLevel, ReviewPolicy, Settings,
+};
 use crate::db::queries;
 use crate::secrets::mask;
 use crate::state::AppState;
@@ -42,6 +44,9 @@ pub struct UpdateSettingsRequest {
     pub availability_timezone: Option<String>,
     pub availability_windows: Option<Vec<AvailabilityWindow>>,
     pub availability_skip_dates: Option<Vec<NaiveDate>>,
+    pub network_access_level: Option<NetworkAccessLevel>,
+    pub network_access_domains: Option<Vec<String>>,
+    pub network_access_include_defaults: Option<bool>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -62,6 +67,9 @@ pub async fn update(
         body.availability_timezone,
         body.availability_windows.map(SqlxJson),
         body.availability_skip_dates.map(SqlxJson),
+        body.network_access_level,
+        body.network_access_domains.map(SqlxJson),
+        body.network_access_include_defaults,
     )
     .await?;
     state.notify_board();

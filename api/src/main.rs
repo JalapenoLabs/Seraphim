@@ -87,6 +87,9 @@ async fn bootstrap_settings(db: &sqlx::PgPool, config: &Config) -> Result<()> {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .await?;
     }

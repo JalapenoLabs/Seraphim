@@ -10,6 +10,7 @@
 //! completion before the next is considered, so turns never overlap.
 
 mod availability;
+mod network;
 mod prompt;
 mod provision;
 
