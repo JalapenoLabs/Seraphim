@@ -27,14 +27,15 @@
   let tokensMessage = $state<string | null>(null)
 
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
-  let modelChoice = $state<string>(KNOWN_MODELS[0])
+  let modelChoice = $state<string>(KNOWN_MODELS[0].value)
 
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
 
   async function load() {
-    settings = await getSettings()
-    modelChoice = KNOWN_MODELS.includes(settings.claude_model)
-      ? settings.claude_model
+    const loaded = await getSettings()
+    settings = loaded
+    modelChoice = KNOWN_MODELS.some((model) => model.value === loaded.claude_model)
+      ? loaded.claude_model
       : CUSTOM_MODEL
   }
 
@@ -132,17 +133,21 @@
         <label for="model">Claude model</label>
         <select id="model" bind:value={modelChoice} onchange={onModelChange}>
           {#each KNOWN_MODELS as model}
-            <option value={model}>{model}</option>
+            <option value={model.value}>{model.label}</option>
           {/each}
           <option value={CUSTOM_MODEL}>Custom…</option>
         </select>
         {#if modelChoice === CUSTOM_MODEL}
           <input
             class="custom-model"
-            placeholder="exact model id, e.g. a brand-new release"
+            placeholder="exact model id, e.g. claude-opus-4-8[1m]"
             bind:value={settings.claude_model}
           />
         {/if}
+        <p class="hint">
+          Friendly names shown here; the coded model id is what's sent to the agent. Fable 5, Opus
+          4.x, and Sonnet 4.6 are 1M-context; Haiku 4.5 is 200K.
+        </p>
       </div>
 
       <div class="field">
