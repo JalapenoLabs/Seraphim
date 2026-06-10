@@ -4,6 +4,7 @@
 import ky from 'ky'
 
 import type {
+  AnswerKind,
   AvailabilityWindow,
   BoardResponse,
   ConfigBundle,
@@ -12,6 +13,8 @@ import type {
   IssueComment,
   IssueDetail,
   IssueThread,
+  PendingQuestion,
+  Question,
   Repository,
   ReviewPolicy,
   Settings,
@@ -62,6 +65,20 @@ export function acknowledgeSuggestion(suggestionId: string, acknowledged: boolea
   return apiClient
     .post(`suggestions/${suggestionId}/ack`, { json: { acknowledged } })
     .json<EnvSuggestion>()
+}
+
+// --- Questions ---------------------------------------------------------------
+
+type PendingQuestionsResponse = {
+  questions: PendingQuestion[]
+}
+
+export function getPendingQuestions() {
+  return apiClient.get('questions/pending').json<PendingQuestionsResponse>()
+}
+
+export function answerQuestion(questionId: string, kind: AnswerKind, text: string) {
+  return apiClient.post(`questions/${questionId}/answer`, { json: { kind, text } }).json<Question>()
 }
 
 // --- Repositories ------------------------------------------------------------

@@ -30,8 +30,9 @@ pub struct TurnArgs {
     pub oauth_token: String,
     /// GitHub token, so the agent's `gh`/`git` are authed for this turn.
     pub github_token: String,
-    /// The task being worked, so the agent's helpers can attribute their output
-    /// (exported as `SERAPHIM_TASK_ID`).
+    /// The task being worked, so the agent's helpers (`seraphim-ask`,
+    /// `seraphim-suggest`) can attribute their output (exported as
+    /// `SERAPHIM_TASK_ID`).
     pub task_id: String,
     /// URL the workspace uses to reach the API (exported as `SERAPHIM_API_URL`).
     pub internal_api_url: String,

@@ -12,8 +12,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, Repository, ReviewPolicy, Settings,
-    SourceKind, Task, TaskColumn, TaskStatus, Turn,
+    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, PendingQuestion, Question,
+    QuestionOption, QuestionStatus, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn,
+    TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -794,4 +795,124 @@ pub async fn unacknowledged_suggestion_counts(pool: &PgPool) -> sqlx::Result<Vec
     )
     .fetch_all(pool)
     .await
+}
+
+// --- Questions ---------------------------------------------------------------
+
+/// Records one question the agent is asking the user, in `pending` state.
+pub async fn create_question(
+    pool: &PgPool,
+    task_id: Uuid,
+    prompt: &str,
+    options: &[QuestionOption],
+) -> sqlx::Result<Question> {
+    sqlx::query_as::<_, Question>(
+        "INSERT INTO questions (task_id, prompt, options) VALUES ($1, $2, $3) RETURNING *",
+    )
+    .bind(task_id)
+    .bind(prompt)
+    .bind(Json(options))
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn get_question(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Question>> {
+    sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Every question on a task, oldest first; powers the decision history on the
+/// task detail view.
+pub async fn list_questions_for_task(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<Question>> {
+    sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE task_id = $1 ORDER BY created_at")
+        .bind(task_id)
+        .fetch_all(pool)
+        .await
+}
+
+/// All unanswered questions across every task, for the notifications sidebar.
+pub async fn list_pending_questions(pool: &PgPool) -> sqlx::Result<Vec<PendingQuestion>> {
+    sqlx::query_as::<_, PendingQuestion>(
+        "SELECT q.id, q.task_id, t.title AS task_title, q.prompt, q.options, q.created_at \
+         FROM questions q JOIN tasks t ON q.task_id = t.id \
+         WHERE q.status = 'pending' ORDER BY q.created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Records the user's answer to a question and stamps it answered.
+pub async fn answer_question(
+    pool: &PgPool,
+    id: Uuid,
+    status: QuestionStatus,
+    answer_kind: AnswerKind,
+    answer: &str,
+) -> sqlx::Result<Question> {
+    sqlx::query_as::<_, Question>(
+        "UPDATE questions SET status = $2, answer_kind = $3, answer = $4, answered_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(answer_kind)
+    .bind(answer)
+    .fetch_one(pool)
+    .await
+}
+
+/// How many questions on a task are still awaiting an answer.
+pub async fn count_pending_questions(pool: &PgPool, task_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM questions WHERE task_id = $1 AND status = 'pending'",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// A task that is parked on a question whose answer has arrived but not yet been
+/// delivered to the agent: in progress, nothing pending, at least one answered
+/// question still unacknowledged. This is what the agent loop resumes.
+pub async fn pick_resume_ready(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT t.* FROM tasks t \
+         WHERE t.board_column = 'in_progress' \
+           AND EXISTS (SELECT 1 FROM questions q WHERE q.task_id = t.id \
+                       AND q.status <> 'pending' AND q.acknowledged = FALSE) \
+           AND NOT EXISTS (SELECT 1 FROM questions q WHERE q.task_id = t.id \
+                           AND q.status = 'pending') \
+         ORDER BY t.position LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The answered-but-undelivered questions for a task, oldest first, that a resume
+/// turn should hand back to the agent.
+pub async fn list_unacknowledged_answers(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Vec<Question>> {
+    sqlx::query_as::<_, Question>(
+        "SELECT * FROM questions WHERE task_id = $1 AND status <> 'pending' \
+         AND acknowledged = FALSE ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Marks delivered answers acknowledged so a later resume does not repeat them.
+pub async fn acknowledge_answers(pool: &PgPool, task_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE questions SET acknowledged = TRUE \
+         WHERE task_id = $1 AND status <> 'pending' AND acknowledged = FALSE",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
