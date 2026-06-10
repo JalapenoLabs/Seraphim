@@ -72,6 +72,8 @@ pub struct Settings {
     pub config_repo_url: String,
     /// Branch template applied to repos auto-discovered from an org.
     pub default_branch_template: String,
+    /// Config-repo setup error, if any (NULL = healthy / no config repo).
+    pub config_repo_error: Option<String>,
     pub current_session_id: Option<String>,
     pub updated_at: DateTime<Utc>,
     /// Whether a Claude OAuth token is stored (the token itself is never sent).
