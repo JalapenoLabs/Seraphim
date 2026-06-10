@@ -11,6 +11,7 @@
 //! - `{"type":"assistant","message":{content:[...]},"session_id":...}`
 //! - `{"type":"user","message":{content:[{type:"tool_result",...}]}}`
 //! - `{"type":"result","subtype":"success","result":...,"session_id":...,"total_cost_usd":...}`
+//! - `{"type":"rate_limit_event","rate_limit_info":{...},"session_id":...}`
 
 use serde_json::Value;
 
@@ -43,6 +44,10 @@ pub enum AgentEventKind {
         result_text: Option<String>,
         is_error: bool,
     },
+    /// A subscription rate-limit notice. The structured `rate_limit_info` rides
+    /// along in the event payload (`raw`) for the UI to render; we only classify
+    /// the line here so it can be styled instead of dumped as raw JSON.
+    RateLimit,
     /// Any other line, preserved as-is.
     Other,
 }
@@ -57,6 +62,7 @@ impl AgentEvent {
             AgentEventKind::ToolUse { .. } => "tool_use",
             AgentEventKind::ToolResult { .. } => "tool_result",
             AgentEventKind::Result { .. } => "result",
+            AgentEventKind::RateLimit => "rate_limit",
             AgentEventKind::Other => "other",
         }
     }
@@ -127,6 +133,13 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                             .is_some_and(|subtype| subtype != "success")
                     }),
             },
+            session_id,
+            raw: value,
+        }],
+        // A periodic usage notice (`rate_limit_info` payload). Classify it so the
+        // UI can render it cleanly rather than dumping the raw JSON line.
+        Some("rate_limit_event") => vec![AgentEvent {
+            kind: AgentEventKind::RateLimit,
             session_id,
             raw: value,
         }],
@@ -386,5 +399,19 @@ mod tests {
         let events = parse_line("warning: something happened");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, AgentEventKind::Other);
+    }
+
+    #[test]
+    fn classifies_rate_limit_event_and_keeps_its_payload() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","status":"allowed","resetsAt":1781142000},"session_id":"s9"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, AgentEventKind::RateLimit);
+        assert_eq!(events[0].type_label(), "rate_limit");
+        // The structured info rides along in the payload for the UI to render.
+        assert_eq!(
+            events[0].raw.pointer("/rate_limit_info/rateLimitType"),
+            Some(&Value::String("five_hour".to_string()))
+        );
     }
 }
