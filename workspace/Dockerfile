@@ -44,6 +44,12 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
+    && rustup component add rustfmt clippy \
+    # Pre-install the toolchain api/rust-toolchain.toml pins, with fmt + clippy,
+    # so `cargo +1.88 fmt --check` / `clippy` / `test` work on a fresh workspace
+    # with no first-run download or "component not installed" stall.
+    && rustup toolchain install 1.88 --profile minimal \
+    && rustup component add --toolchain 1.88 rustfmt clippy \
     && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
 
 # --- Org cloud CLIs (jira, doctl, gcloud) ------------------------------------
