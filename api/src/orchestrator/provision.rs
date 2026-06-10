@@ -125,14 +125,19 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
     let dir = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let setup = repo.setup_script.trim();
 
-    // Run setup after a fresh clone; during a full provision, run it every time.
-    let clone_setup = if setup.is_empty() {
+    // Run the setup script in a subshell `cd`'d into the repo. `cd` is on its own
+    // line so every newline-separated command runs there, sequentially, under the
+    // outer `set -e` (no `&&` chaining required by the user).
+    let setup_block = if setup.is_empty() {
         String::new()
     } else {
-        format!("( cd \"{dir}\" && {setup} )\n")
+        format!("(\ncd \"{dir}\"\n{setup}\n)\n")
     };
-    let update_setup = if always_setup && !setup.is_empty() {
-        format!("( cd \"{dir}\" && {setup} )\n")
+
+    // Run setup after a fresh clone; during a full provision, run it every time.
+    let clone_setup = setup_block.clone();
+    let update_setup = if always_setup {
+        setup_block
     } else {
         String::new()
     };
