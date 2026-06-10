@@ -132,6 +132,18 @@ pub async fn provision_workspace(state: &AppState) -> Result<()> {
     run(state, &script).await
 }
 
+/// Bash that returns a repo's working tree to a clean state before a checkout.
+///
+/// A turn interrupted mid-merge/rebase (e.g. the API restarting during a
+/// conflict-resolving revisit) leaves an unresolved index that makes every later
+/// `git checkout` fail with "you need to resolve your current index first". These
+/// are safe no-ops when nothing is in progress.
+fn reset_tree_snippet() -> &'static str {
+    "git merge --abort 2>/dev/null || true\n\
+     git rebase --abort 2>/dev/null || true\n\
+     git reset --hard 2>/dev/null || true\n"
+}
+
 /// Per-task prep: ensure config + AGENTS.md + the focus repo, then cut `branch`.
 pub async fn prepare_branch(
     state: &AppState,
@@ -145,13 +157,44 @@ pub async fn prepare_branch(
     script.push_str(&prelude_agents(settings));
     // Ensure the focus repo exists (clone + setup on first sight), then branch.
     script.push_str(&repo_block(repo, false));
+    script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
+    script.push_str(reset_tree_snippet());
     script.push_str(&format!(
-        "cd \"{dir}\"\n\
-         git checkout \"{default}\"\n\
+        "git checkout \"{default}\"\n\
          git pull --ff-only origin \"{default}\" || true\n\
-         git checkout -B \"{branch}\" \"origin/{default}\"\n",
-        dir = dir,
+         git checkout -B \"{branch}\" \"origin/{default}\"\n\
+         git submodule update --init --recursive || true\n",
         default = repo.default_branch,
+        branch = branch,
+    ));
+
+    run(state, &script).await
+}
+
+/// Per-task prep for a CI fix: ensure the repo and AGENTS.md, then check out the
+/// PR's existing branch at its pushed tip (so the agent's earlier commits are
+/// present). Unlike [`prepare_branch`], this never re-cuts the branch from the
+/// default, which would discard the work the PR is built on.
+pub async fn prepare_existing_branch(
+    state: &AppState,
+    settings: &Settings,
+    repo: &Repository,
+    branch: &str,
+) -> Result<()> {
+    let dir = format!("/workspace/{}", repo_dir_name(&repo.full_name));
+
+    let mut script = String::from("set -e\n");
+    script.push_str(&prelude_agents(settings));
+    // Ensure the focus repo exists (clone on first sight), then sync to the
+    // remote branch tip CI actually tested.
+    script.push_str(&repo_block(repo, false));
+    script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
+    script.push_str(reset_tree_snippet());
+    script.push_str(&format!(
+        "git fetch origin\n\
+         git checkout -B \"{branch}\" \"origin/{branch}\"\n\
+         git reset --hard \"origin/{branch}\"\n\
+         git submodule update --init --recursive || true\n",
         branch = branch,
     ));
 
@@ -181,12 +224,14 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
         String::new()
     };
 
+    // Submodules are common across the user's orgs, so fetch them on update and
+    // pull them down on a fresh clone.
     format!(
         "if [ -d \"{dir}/.git\" ]; then\n\
-           git -C \"{dir}\" fetch origin || true\n\
+           git -C \"{dir}\" fetch origin --recurse-submodules || true\n\
            {update_setup}\
          else\n\
-           git clone \"{clone_url}\" \"{dir}\"\n\
+           git clone --recurse-submodules \"{clone_url}\" \"{dir}\"\n\
            {clone_setup}\
          fi\n\
          {claude_md}",
@@ -202,7 +247,11 @@ async fn run(state: &AppState, script: &str) -> Result<()> {
     // Wire git's credential helper for HTTPS remotes (GH_TOKEN is in this exec's
     // env); SSH remotes use the mounted key instead.
     let full_script = format!("gh auth setup-git >/dev/null 2>&1 || true\n{script}");
-    let env = vec![format!("GH_TOKEN={github_token}")];
+    // User-defined env vars are available to setup scripts (e.g. registry tokens).
+    let mut env = vec![format!("GH_TOKEN={github_token}")];
+    for variable in queries::list_environment_variables(&state.db).await? {
+        env.push(format!("{}={}", variable.key, variable.value));
+    }
     let output = state
         .workspace
         .exec_capture(

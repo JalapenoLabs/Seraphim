@@ -1,15 +1,26 @@
 <script lang="ts">
   import type { AgentEvent, AnswerKind, Question, Task } from '$lib/types'
 
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount, onDestroy, tick } from 'svelte'
   import { page } from '$app/stores'
 
   import { answerQuestion, getTask } from '$lib/api'
+  import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
+  import { PaneGroup, type PaneGroupAPI } from 'paneforge'
+
+  import { Badge } from '$lib/components/ui/badge'
+  import { Button } from '$lib/components/ui/button'
+  import { Input } from '$lib/components/ui/input'
+  import * as Alert from '$lib/components/ui/alert'
+  import * as Resizable from '$lib/components/ui/resizable'
+  import IssueView from '$lib/components/IssueView.svelte'
 
   const taskId = $page.params.id ?? ''
 
+  type StreamEvent = Pick<AgentEvent, 'type' | 'payload'>
+
   let task = $state<Task | null>(null)
-  let events = $state<Pick<AgentEvent, 'type' | 'payload'>[]>([])
+  let events = $state<StreamEvent[]>([])
   let questions = $state<Question[]>([])
   let eventSource: EventSource | null = null
 
@@ -25,12 +36,91 @@
     await load()
   }
 
-  // Which events are expanded. Tool use/results start collapsed; multiple can be
-  // open at once.
+  // Tool use/results/thinking start collapsed; any number can be open at once.
   let expanded = $state<Record<number, boolean>>({})
 
-  function isCollapsible(type: string) {
+  // The resizable split's imperative handle, so double-clicking the divider can
+  // snap the panes back to an even 50/50.
+  let paneGroup = $state<PaneGroupAPI>()
+
+  function resetSplit() {
+    paneGroup?.setLayout([50, 50])
+  }
+
+  // Activity log autoscroll: follow new events only while the user is parked at
+  // the bottom. Scrolling up pauses it; returning to the bottom re-engages it.
+  const STICK_THRESHOLD_PX = 48
+  let logEl = $state<HTMLDivElement>()
+  let stickToBottom = $state(true)
+
+  function onLogScroll() {
+    if (!logEl) {
+      return
+    }
+    const distanceFromBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight
+    stickToBottom = distanceFromBottom < STICK_THRESHOLD_PX
+  }
+
+  $effect(() => {
+    // Re-run whenever an event arrives; scroll only if we're still following.
+    events.length
+    if (stickToBottom && logEl) {
+      tick().then(() => {
+        if (logEl) {
+          logEl.scrollTop = logEl.scrollHeight
+        }
+      })
+    }
+  })
+
+  // Leading glyph per event type, modeled on Claude Code's transcript: a filled
+  // dot for the agent's own actions, a corner connector for their output.
+  const MARKERS = {
+    assistant_text: '●',
+    tool_use: '●',
+    result: '●',
+    thinking: '✻',
+    tool_result: '⎿',
+    system: '⎿'
+  } as const satisfies Record<string, string>
+
+  const MARKER_COLORS = {
+    assistant_text: 'text-foreground',
+    tool_use: 'text-primary',
+    result: 'text-success',
+    thinking: 'text-warning',
+    tool_result: 'text-muted-foreground',
+    system: 'text-muted-foreground'
+  } as const satisfies Record<string, string>
+
+  function marker(type: string): string {
+    return MARKERS[type as keyof typeof MARKERS] ?? '●'
+  }
+
+  function markerColor(type: string): string {
+    return MARKER_COLORS[type as keyof typeof MARKER_COLORS] ?? 'text-foreground'
+  }
+
+  function isCollapsible(type: string): boolean {
     return type === 'tool_use' || type === 'tool_result' || type === 'thinking'
+  }
+
+  // The classes for an event's text line: its color, plus how it clamps when
+  // collapsed (tool calls to one line, output/thinking to a few).
+  function lineClasses(type: string, open: boolean): string {
+    let color = 'text-foreground'
+    if (type === 'tool_result' || type === 'system') {
+      color = 'text-muted-foreground'
+    } else if (type === 'thinking') {
+      color = 'italic text-warning'
+    }
+    if (!open && type === 'tool_use') {
+      return `min-w-0 flex-1 truncate ${color}`
+    }
+    if (!open && (type === 'tool_result' || type === 'thinking')) {
+      return `min-w-0 flex-1 whitespace-pre-wrap break-words line-clamp-4 ${color}`
+    }
+    return `min-w-0 flex-1 whitespace-pre-wrap break-words ${color}`
   }
 
   function toggle(index: number) {
@@ -44,8 +134,18 @@
     questions = detail.questions
   }
 
-  // Render an event's payload into a readable line based on its type.
-  function describe(event: { type: string; payload: unknown }): string {
+  // The most telling argument of a tool call, so `Bash(cargo build)` reads at a
+  // glance instead of a wall of JSON. Falls back to the whole input object.
+  function toolSummary(payload: Record<string, unknown>): string {
+    const name = String(payload?.name ?? 'tool')
+    const input = (payload?.input ?? {}) as Record<string, unknown>
+    const headline =
+      input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.description
+    const argument = headline === undefined ? JSON.stringify(input) : String(headline)
+    return `${name}(${argument})`
+  }
+
+  function describe(event: StreamEvent): string {
     const payload = event.payload as Record<string, unknown>
     if (event.type === 'thinking') {
       return String(payload?.thinking ?? '')
@@ -54,7 +154,7 @@
       return String(payload?.text ?? '')
     }
     if (event.type === 'tool_use') {
-      return `${payload?.name ?? 'tool'} ${JSON.stringify(payload?.input ?? {})}`
+      return toolSummary(payload)
     }
     if (event.type === 'tool_result') {
       const content = payload?.content
@@ -74,9 +174,8 @@
     load()
     eventSource = new EventSource(`/api/v1/tasks/${taskId}/stream`)
     eventSource.addEventListener('task', (message) => {
-      const envelope = JSON.parse(message.data) as { type: string; payload: unknown }
+      const envelope = JSON.parse(message.data) as StreamEvent
       events = [...events, envelope]
-      // Keep the card header roughly current as the turn progresses.
       load()
     })
   })
@@ -84,338 +183,141 @@
   onDestroy(() => eventSource?.close())
 </script>
 
-<div class="detail">
-  <a class="back" href="/">← Board</a>
+<div class="flex h-full flex-col gap-3 p-4">
+  <a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Board</a>
 
   {#if task}
-    <header class="head">
-      <div>
-        <h1>#{task.external_id} {task.title}</h1>
-        <div class="meta">
-          <span class="badge {task.status}">{task.status.replace('_', ' ')}</span>
-          {#if task.branch}<span class="mono">{task.branch}</span>{/if}
-          {#if task.pr_url}<a href={task.pr_url} target="_blank" rel="noreferrer">pull request ↗</a>{/if}
-          {#if task.url}<a href={task.url} target="_blank" rel="noreferrer">issue ↗</a>{/if}
-        </div>
-        {#if task.error}<div class="error">{task.error}</div>{/if}
-      </div>
-    </header>
-
-    {#if task.body_snapshot}
-      <section class="body">{task.body_snapshot}</section>
-    {/if}
-
     {#if pendingQuestions.length}
-      <section class="questions">
-        <h2>The agent needs your input</h2>
+      <div class="rounded-lg border border-warning/40 bg-card p-4">
+        <h2 class="mb-3 text-sm font-semibold">The agent needs your input</h2>
         {#each pendingQuestions as question (question.id)}
-          <div class="question">
-            <p class="prompt">{question.prompt}</p>
-            <div class="options">
+          <div class="mb-3 rounded-md border border-border p-3 last:mb-0">
+            <p class="mb-3 font-medium">{question.prompt}</p>
+            <div class="mb-3 flex flex-col gap-2">
               {#each question.options as option}
-                <button class="option" onclick={() => submitAnswer(question.id, 'option', option.title)}>
-                  <span class="option-title">{option.title}</span>
+                <Button
+                  variant="outline"
+                  class="h-auto flex-col items-start whitespace-normal py-2 text-left"
+                  onclick={() => submitAnswer(question.id, 'option', option.title)}
+                >
+                  <span class="font-semibold">{option.title}</span>
                   {#if option.description}
-                    <span class="option-desc">{option.description}</span>
+                    <span class="text-xs font-normal text-muted-foreground">{option.description}</span>
                   {/if}
-                </button>
+                </Button>
               {/each}
             </div>
-
-            <div class="freeform">
-              <label for={`custom-${question.id}`}>Something else</label>
-              <div class="row">
-                <input
-                  id={`custom-${question.id}`}
-                  placeholder="Type your own answer"
-                  bind:value={customText[question.id]}
-                />
-                <button
-                  class="primary"
+            <div class="mb-2">
+              <label class="mb-1 block text-xs text-muted-foreground" for={`custom-${question.id}`}>
+                Something else
+              </label>
+              <div class="flex gap-2">
+                <Input id={`custom-${question.id}`} placeholder="Type your own answer" bind:value={customText[question.id]} />
+                <Button
                   disabled={!customText[question.id]?.trim()}
                   onclick={() => submitAnswer(question.id, 'custom', customText[question.id]?.trim() ?? '')}
                 >
                   Send
-                </button>
+                </Button>
               </div>
             </div>
-
-            <div class="freeform">
-              <label for={`decline-${question.id}`}>Decline and chat about this</label>
-              <div class="row">
-                <input
-                  id={`decline-${question.id}`}
-                  placeholder="Optional note for the agent"
-                  bind:value={declineText[question.id]}
-                />
-                <button onclick={() => submitAnswer(question.id, 'declined', declineText[question.id]?.trim() ?? '')}>
+            <div>
+              <label class="mb-1 block text-xs text-muted-foreground" for={`decline-${question.id}`}>
+                Decline and chat about this
+              </label>
+              <div class="flex gap-2">
+                <Input id={`decline-${question.id}`} placeholder="Optional note for the agent" bind:value={declineText[question.id]} />
+                <Button variant="secondary" onclick={() => submitAnswer(question.id, 'declined', declineText[question.id]?.trim() ?? '')}>
                   Decline
-                </button>
+                </Button>
               </div>
             </div>
           </div>
         {/each}
-      </section>
+      </div>
     {/if}
 
     {#if answeredQuestions.length}
-      <section class="questions">
-        <h2>Decisions</h2>
+      <div class="rounded-lg border border-border bg-card p-4">
+        <h2 class="mb-2 text-sm font-semibold">Decisions</h2>
         {#each answeredQuestions as question (question.id)}
-          <div class="decision">
-            <p class="prompt">{question.prompt}</p>
-            <p class="answer">
-              <span class="badge {question.status}">{question.status}</span>
+          <div class="mb-2 border-l-2 border-border pl-3 last:mb-0">
+            <p class="text-sm font-medium">{question.prompt}</p>
+            <p class="flex items-center gap-2 text-sm text-muted-foreground">
+              <Badge variant="outline">{question.status}</Badge>
               {question.answer || (question.status === 'declined' ? 'Declined to choose' : '')}
             </p>
           </div>
         {/each}
-      </section>
+      </div>
     {/if}
 
-    <section class="stream">
-      <h2>Activity</h2>
-      {#if events.length === 0}
-        <p class="muted">No activity yet.</p>
-      {/if}
-      {#each events as event, index (index)}
-        {@const collapsible = isCollapsible(event.type)}
-        {@const open = expanded[index] ?? false}
-        <div class="event {event.type}">
-          <button
-            type="button"
-            class="event-head"
-            class:clickable={collapsible}
-            onclick={() => collapsible && toggle(index)}
-          >
-            {#if collapsible}<span class="arrow">{open ? '▾' : '▸'}</span>{/if}
-            <span class="kind">{event.type.replace('_', ' ')}</span>
-          </button>
-          <pre
-            class="event-body"
-            class:clamp3={collapsible &&
-              (event.type === 'tool_result' || event.type === 'thinking') &&
-              !open}
-            class:clamp1={collapsible && event.type === 'tool_use' && !open}
-          >{describe(event)}</pre>
+    <PaneGroup
+      bind:this={paneGroup}
+      direction="horizontal"
+      autoSaveId="seraphim-task-split-v2"
+      class="flex min-h-0 w-full flex-1 overflow-hidden"
+    >
+      <Resizable.Pane defaultSize={55} minSize={30} class="min-w-0">
+        <div class="h-full min-w-0 pr-3">
+          <IssueView {task} />
         </div>
-      {/each}
-    </section>
+      </Resizable.Pane>
+
+      <Resizable.Handle
+        withHandle
+        ondblclick={resetSplit}
+        title="Drag to resize · double-click to reset to 50/50"
+        class="w-1.5 bg-border transition-colors hover:bg-primary data-[active]:bg-primary"
+      />
+
+      <Resizable.Pane defaultSize={45} minSize={25} class="min-w-0">
+        <div class="ml-3 flex h-full min-w-0 flex-col rounded-lg border border-border bg-card">
+          <header class="flex items-center gap-2 border-b border-border px-4 py-2.5">
+            <span class="text-xs uppercase tracking-wide text-muted-foreground">Agent activity</span>
+            <Badge variant="outline" class="ml-auto {STATUS_BADGE[task.status]}">
+              {STATUS_LABELS[task.status] ?? task.status}
+            </Badge>
+          </header>
+          {#if task.error}
+            <Alert.Root variant="destructive" class="m-3 mb-0">
+              <Alert.Description class="break-words text-xs">{task.error}</Alert.Description>
+            </Alert.Root>
+          {/if}
+          <div
+            bind:this={logEl}
+            onscroll={onLogScroll}
+            class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 pb-[25vh] font-mono text-sm leading-relaxed"
+          >
+            {#if events.length === 0}
+              <p class="text-muted-foreground">No activity yet.</p>
+            {/if}
+            {#each events as event, index (index)}
+              {@const collapsible = isCollapsible(event.type)}
+              {@const open = expanded[index] ?? false}
+              {@const indent = event.type === 'tool_result' || event.type === 'system' ? 'pl-4' : ''}
+              {#if collapsible}
+                <button
+                  type="button"
+                  onclick={() => toggle(index)}
+                  title={open ? 'Click to collapse' : 'Click to expand'}
+                  class="flex w-full gap-2 py-0.5 text-left hover:opacity-80 {indent}"
+                >
+                  <span class="w-[1ch] flex-none {markerColor(event.type)}">{marker(event.type)}</span>
+                  <span class={lineClasses(event.type, open)}>{describe(event)}</span>
+                </button>
+              {:else}
+                <div class="flex gap-2 py-0.5 {indent}">
+                  <span class="w-[1ch] flex-none {markerColor(event.type)}">{marker(event.type)}</span>
+                  <span class={lineClasses(event.type, open)}>{describe(event)}</span>
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      </Resizable.Pane>
+    </PaneGroup>
   {:else}
-    <p class="muted">Loading…</p>
+    <p class="text-muted-foreground">Loading…</p>
   {/if}
 </div>
-
-<style>
-  .detail {
-    max-width: 960px;
-    margin: 0 auto;
-    padding: 1.2rem 1.4rem 3rem;
-  }
-
-  .back {
-    color: var(--muted);
-  }
-
-  .head h1 {
-    font-size: 1.3rem;
-    margin: 0.6rem 0 0.4rem;
-  }
-
-  .meta {
-    display: flex;
-    gap: 0.8rem;
-    align-items: center;
-    flex-wrap: wrap;
-    font-size: 0.85rem;
-  }
-
-  .mono {
-    font-family: ui-monospace, monospace;
-    color: var(--muted);
-  }
-
-  .error {
-    margin-top: 0.6rem;
-    color: var(--danger);
-  }
-
-  .body {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.9rem;
-    margin: 1rem 0;
-    white-space: pre-wrap;
-    color: var(--muted);
-  }
-
-  .stream h2 {
-    font-size: 1rem;
-    color: var(--muted);
-  }
-
-  .questions {
-    margin: 1.2rem 0;
-  }
-
-  .questions h2 {
-    font-size: 1rem;
-  }
-
-  .question {
-    background: var(--panel);
-    border: 1px solid var(--warn);
-    border-radius: var(--radius);
-    padding: 1rem;
-    margin-bottom: 1rem;
-  }
-
-  .prompt {
-    margin: 0 0 0.8rem;
-    font-weight: 600;
-  }
-
-  .options {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin-bottom: 0.9rem;
-  }
-
-  .option {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    text-align: left;
-    padding: 0.6rem 0.8rem;
-  }
-
-  .option:hover {
-    border-color: var(--accent);
-  }
-
-  .option-title {
-    font-weight: 600;
-  }
-
-  .option-desc {
-    font-size: 0.82rem;
-    color: var(--muted);
-  }
-
-  .freeform {
-    margin-top: 0.6rem;
-  }
-
-  .freeform label {
-    display: block;
-    font-size: 0.8rem;
-    color: var(--muted);
-    margin-bottom: 0.3rem;
-  }
-
-  .freeform .row {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .freeform input {
-    flex: 1;
-  }
-
-  .decision {
-    border-left: 2px solid var(--border);
-    padding: 0.2rem 0 0.4rem 0.8rem;
-    margin: 0.6rem 0;
-  }
-
-  .decision .prompt {
-    margin-bottom: 0.3rem;
-    font-weight: 500;
-  }
-
-  .decision .answer {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: var(--muted);
-    font-size: 0.9rem;
-  }
-
-  .event {
-    border-left: 2px solid var(--border);
-    padding: 0.2rem 0 0.2rem 0.8rem;
-    margin: 0.5rem 0;
-  }
-
-  .event.tool_use {
-    border-color: var(--accent);
-  }
-
-  .event.result {
-    border-color: var(--accent-2);
-  }
-
-  .event.thinking {
-    border-color: var(--warn);
-  }
-
-  .event.thinking .event-body {
-    font-style: italic;
-    opacity: 0.85;
-  }
-
-  .event-head {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    width: 100%;
-    background: none;
-    border: none;
-    padding: 0;
-    text-align: left;
-  }
-
-  .event-head.clickable {
-    cursor: pointer;
-  }
-
-  .arrow {
-    width: 0.8rem;
-    font-size: 0.7rem;
-    color: var(--muted);
-    flex: none;
-  }
-
-  .kind {
-    font-size: 0.72rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  pre {
-    margin: 0.2rem 0 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: ui-monospace, monospace;
-    font-size: 0.82rem;
-  }
-
-  /* Collapsed tool results: first 3 lines; tool uses: a single ellipsized line. */
-  .event-body.clamp3 {
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .event-body.clamp1 {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-</style>

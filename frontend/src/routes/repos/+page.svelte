@@ -2,8 +2,17 @@
   import type { Repository, ReviewPolicy } from '$lib/types'
 
   import { onMount } from 'svelte'
+  import { Pencil, Trash2 } from '@lucide/svelte'
 
-  import { deleteRepo, importOrg, listRepos, upsertRepo } from '$lib/api'
+  import { deleteRepo, importOrg, listRepos, updateRepo, upsertRepo } from '$lib/api'
+  import * as Card from '$lib/components/ui/card'
+  import * as Select from '$lib/components/ui/select'
+  import { Button } from '$lib/components/ui/button'
+  import { Input } from '$lib/components/ui/input'
+  import { Label } from '$lib/components/ui/label'
+  import { Textarea } from '$lib/components/ui/textarea'
+  import { Switch } from '$lib/components/ui/switch'
+  import { Badge } from '$lib/components/ui/badge'
 
   // Form preferences (the defaults you tend to reuse) are remembered locally so a
   // new repo form pre-fills with your last choices.
@@ -68,14 +77,34 @@
 
   let repos = $state<Repository[]>([])
   let form = $state<FormState>(emptyForm())
+  // The id of the repo being edited, or null when adding a new one. Editing
+  // updates that row by id (rename-safe); adding upserts by full name.
+  let editingId = $state<string | null>(null)
   let importOwner = $state('')
   let importMessage = $state<string | null>(null)
+
+  // The review-policy select uses an "inherit" sentinel since Bits UI dislikes an
+  // empty-string option value; the form keeps '' to mean "inherit default".
+  const policyValue = $derived(form.review_policy === '' ? 'inherit' : form.review_policy)
+  const policyLabel = $derived(
+    form.review_policy === '' ? 'inherit default' : form.review_policy.replace(/_/g, ' ')
+  )
+
+  function choosePolicy(value: string) {
+    form.review_policy = value === 'inherit' ? '' : (value as ReviewPolicy)
+  }
 
   async function load() {
     repos = await listRepos()
   }
 
+  function clearForm() {
+    editingId = null
+    form = emptyForm()
+  }
+
   function edit(repo: Repository) {
+    editingId = repo.id
     form = {
       full_name: repo.full_name,
       clone_url: repo.clone_url,
@@ -99,7 +128,7 @@
       .split(',')
       .map((label) => label.trim())
       .filter(Boolean)
-    await upsertRepo({
+    const body = {
       full_name: form.full_name.trim(),
       clone_url: cloneUrl,
       default_branch: form.default_branch,
@@ -110,9 +139,14 @@
       enabled: form.enabled,
       sync_issues: form.sync_issues,
       issue_labels: labels
-    })
+    }
+    if (editingId) {
+      await updateRepo(editingId, body)
+    } else {
+      await upsertRepo(body)
+    }
     savePrefs(form)
-    form = emptyForm()
+    clearForm()
     await load()
   }
 
@@ -135,200 +169,146 @@
   onMount(load)
 </script>
 
-<div class="page">
-  <h1>Repositories</h1>
+<div class="mx-auto max-w-4xl space-y-5 px-6 py-6">
+  <h1 class="text-2xl font-semibold">Repositories</h1>
 
-  <section class="panel">
-    <h2>Import from org</h2>
-    <p class="muted">
-      Pull in every repository under a GitHub org/user at once. New repos are added with issue-sync
-      on and your default branch template + review policy; existing repos are left untouched.
-    </p>
-    <div class="import-row">
-      <input placeholder="org or user (e.g. MooreslabAI)" bind:value={importOwner} />
-      <button onclick={runImportOrg}>Import</button>
-      {#if importMessage}<span class="muted">{importMessage}</span>{/if}
-    </div>
-  </section>
+  <Card.Root>
+    <Card.Header>
+      <Card.Title>Import from org</Card.Title>
+      <Card.Description>
+        Pull in every repository under a GitHub org/user at once. New repos are added with issue-sync
+        on and your default branch template + review policy; existing repos are left untouched.
+      </Card.Description>
+    </Card.Header>
+    <Card.Content>
+      <div class="flex items-center gap-3">
+        <Input class="max-w-xs" placeholder="org or user (e.g. MooreslabAI)" bind:value={importOwner} />
+        <Button variant="outline" onclick={runImportOrg}>Import</Button>
+        {#if importMessage}<span class="text-sm text-muted-foreground">{importMessage}</span>{/if}
+      </div>
+    </Card.Content>
+  </Card.Root>
 
-  <section class="panel">
-    <h2>{form.full_name ? `Edit ${form.full_name}` : 'Add a repository'}</h2>
-    <div class="grid">
-      <div class="field">
-        <label for="full">Full name (owner/repo)</label>
-        <input id="full" placeholder="navarrotech/seraphim" bind:value={form.full_name} />
-      </div>
-      <div class="field">
-        <label for="clone">Clone URL (optional)</label>
-        <input id="clone" placeholder="defaults from full name" bind:value={form.clone_url} />
-      </div>
-      <div class="field">
-        <label for="branch">Default branch</label>
-        <input id="branch" bind:value={form.default_branch} />
-      </div>
-      <div class="field">
-        <label for="tmpl">Branch template</label>
-        <input id="tmpl" bind:value={form.branch_template} />
-      </div>
-      <div class="field">
-        <label for="rpolicy">Review policy</label>
-        <select id="rpolicy" bind:value={form.review_policy}>
-          <option value="">inherit default</option>
-          <option value="auto_squash_merge">auto squash merge</option>
-          <option value="human_review">human review</option>
-          <option value="none">none</option>
-        </select>
-      </div>
-      <div class="field checkbox">
-        <label for="enabled">Enabled</label>
-        <input id="enabled" type="checkbox" bind:checked={form.enabled} />
-      </div>
-      <div class="field checkbox">
-        <label for="sync">Sync issues from this repo</label>
-        <input id="sync" type="checkbox" bind:checked={form.sync_issues} />
-      </div>
-      <div class="field">
-        <label for="labels">Issue label filter (optional)</label>
-        <input id="labels" placeholder="comma-separated; blank = all" bind:value={form.issue_labels} />
-      </div>
-    </div>
-    <p class="hint">
-      <strong>Sync issues</strong> polls this repo's open issues into the Available column. Clone URL
-      accepts SSH (<code>git@github.com:owner/repo.git</code>, uses your mounted <code>~/.ssh</code>
-      key) or HTTPS (uses <code>GH_TOKEN</code>).
-    </p>
-    <div class="field">
-      <label for="instr">Repo-specific instructions</label>
-      <textarea id="instr" rows="3" bind:value={form.instructions}></textarea>
-      <p class="hint">
-        Written to <code>/workspace/{'{repo}'}/CLAUDE.md</code>, loaded whenever the agent works in
-        this repo. Put build/test commands and repo-specific gotchas here.
-      </p>
-    </div>
-    <div class="field">
-      <label for="rsetup">Setup script (run after clone/checkout)</label>
-      <textarea id="rsetup" rows="3" bind:value={form.setup_script}></textarea>
-      <p class="hint">
-        Runs in this repo after it's cloned/updated. Newlines execute sequentially (no
-        <code>&amp;&amp;</code> needed), e.g. <code>corepack enable</code> then
-        <code>yarn install</code>. Tools shared across all repos belong in the environment setup
-        script under Settings.
-      </p>
-    </div>
-    <div class="actions">
-      <button class="primary" onclick={submit}>Save repository</button>
-      <button onclick={() => (form = emptyForm())}>Clear</button>
-    </div>
-  </section>
+  {#if repos.length}
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Managed repositories</Card.Title>
+      </Card.Header>
+      <Card.Content class="divide-y divide-border">
+        {#each repos as repo (repo.id)}
+          <div class="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+            <div class="min-w-0">
+              <div class="truncate font-medium">{repo.full_name}</div>
+              <div class="mt-1 flex flex-wrap items-center gap-2">
+                <Badge variant="outline" class="text-muted-foreground">
+                  {repo.review_policy ? repo.review_policy.replace(/_/g, ' ') : 'inherit'}
+                </Badge>
+                {#if repo.sync_issues}
+                  <Badge variant="outline" class="border-primary/40 text-primary">syncing</Badge>
+                {/if}
+                {#if !repo.enabled}
+                  <Badge variant="outline" class="text-muted-foreground">disabled</Badge>
+                {/if}
+              </div>
+            </div>
+            <div class="flex flex-none gap-1">
+              <Button variant="ghost" size="icon" title="Edit" onclick={() => edit(repo)}>
+                <Pencil class="size-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                title="Delete"
+                class="text-destructive hover:text-destructive"
+                onclick={() => remove(repo.id)}
+              >
+                <Trash2 class="size-4" />
+              </Button>
+            </div>
+          </div>
+        {/each}
+      </Card.Content>
+    </Card.Root>
+  {/if}
 
-  <section class="panel">
-    <h2>Configured</h2>
-    {#if repos.length === 0}
-      <p class="muted">No repositories yet.</p>
-    {/if}
-    {#each repos as repo}
-      <div class="row">
-        <div class="info">
-          <strong>{repo.full_name}</strong>
-          <span class="badge">{repo.review_policy ?? 'inherit'}</span>
-          {#if repo.sync_issues}<span class="badge">syncing</span>{/if}
-          {#if !repo.enabled}<span class="muted">disabled</span>{/if}
+  <Card.Root>
+    <Card.Header>
+      <Card.Title>{editingId ? `Edit ${form.full_name}` : 'Add a repository'}</Card.Title>
+    </Card.Header>
+    <Card.Content class="space-y-5">
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="space-y-1.5">
+          <Label for="full">Full name (owner/repo)</Label>
+          <Input id="full" placeholder="navarrotech/seraphim" bind:value={form.full_name} />
         </div>
-        <div class="row-actions">
-          <button onclick={() => edit(repo)}>Edit</button>
-          <button onclick={() => remove(repo.id)}>Delete</button>
+        <div class="space-y-1.5">
+          <Label for="clone">Clone URL (optional)</Label>
+          <Input id="clone" placeholder="defaults from full name" bind:value={form.clone_url} />
+        </div>
+        <div class="space-y-1.5">
+          <Label for="branch">Default branch</Label>
+          <Input id="branch" bind:value={form.default_branch} />
+        </div>
+        <div class="space-y-1.5">
+          <Label for="tmpl">Branch template</Label>
+          <Input id="tmpl" bind:value={form.branch_template} />
+        </div>
+        <div class="space-y-1.5">
+          <Label for="rpolicy">Review policy</Label>
+          <Select.Root type="single" value={policyValue} onValueChange={choosePolicy}>
+            <Select.Trigger id="rpolicy" class="w-full">{policyLabel}</Select.Trigger>
+            <Select.Content>
+              <Select.Item value="inherit" label="inherit default">inherit default</Select.Item>
+              <Select.Item value="auto_squash_merge" label="auto squash merge">auto squash merge</Select.Item>
+              <Select.Item value="human_review" label="human review">human review</Select.Item>
+              <Select.Item value="none" label="none">none</Select.Item>
+            </Select.Content>
+          </Select.Root>
+        </div>
+        <div class="space-y-1.5">
+          <Label for="labels">Issue label filter (optional)</Label>
+          <Input id="labels" placeholder="comma-separated; blank = all" bind:value={form.issue_labels} />
         </div>
       </div>
-    {/each}
-  </section>
+
+      <div class="flex flex-wrap gap-6">
+        <div class="flex items-center gap-2">
+          <Switch id="enabled" bind:checked={form.enabled} />
+          <Label for="enabled">Enabled</Label>
+        </div>
+        <div class="flex items-center gap-2">
+          <Switch id="sync" bind:checked={form.sync_issues} />
+          <Label for="sync">Sync issues from this repo</Label>
+        </div>
+      </div>
+
+      <div class="space-y-1.5">
+        <Label for="instr">Repo-specific instructions</Label>
+        <Textarea id="instr" rows={3} bind:value={form.instructions} />
+        <p class="text-xs leading-relaxed text-muted-foreground">
+          Written to <code class="rounded bg-secondary px-1 py-0.5 text-xs">/workspace/{'{repo}'}/CLAUDE.md</code>,
+          loaded whenever the agent works in this repo. Put build/test commands and repo-specific
+          gotchas here.
+        </p>
+      </div>
+
+      <div class="space-y-1.5">
+        <Label for="rsetup">Setup script (run after clone/checkout)</Label>
+        <Textarea id="rsetup" rows={3} bind:value={form.setup_script} />
+        <p class="text-xs leading-relaxed text-muted-foreground">
+          Runs in this repo after it's cloned/updated, as the
+          <code class="rounded bg-secondary px-1 py-0.5 text-xs">node</code> user (passwordless
+          <code class="rounded bg-secondary px-1 py-0.5 text-xs">sudo</code> available). Newlines execute
+          sequentially, e.g. <code class="rounded bg-secondary px-1 py-0.5 text-xs">pnpm install</code> or
+          <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn install</code>. pnpm, yarn, and npm are
+          preinstalled, so skip <code class="rounded bg-secondary px-1 py-0.5 text-xs">corepack enable</code>.
+        </p>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <Button onclick={submit}>{editingId ? 'Update repository' : 'Add repository'}</Button>
+        <Button variant="outline" onclick={clearForm}>{editingId ? 'Cancel' : 'Clear'}</Button>
+      </div>
+    </Card.Content>
+  </Card.Root>
 </div>
-
-<style>
-  .page {
-    max-width: 820px;
-    margin: 0 auto;
-    padding: 1.2rem 1.4rem 3rem;
-  }
-
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1.1rem;
-    margin-bottom: 1.2rem;
-  }
-
-  .panel h2 {
-    margin-top: 0;
-    font-size: 1rem;
-  }
-
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0 1rem;
-  }
-
-  .checkbox {
-    flex-direction: row;
-    align-items: center;
-    gap: 0.6rem;
-  }
-
-  .checkbox input {
-    width: auto;
-  }
-
-  .actions {
-    display: flex;
-    gap: 0.7rem;
-  }
-
-  .import-row {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-  }
-
-  .import-row input {
-    max-width: 320px;
-  }
-
-  .row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .info {
-    display: flex;
-    align-items: center;
-    gap: 0.7rem;
-  }
-
-  .row-actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .muted {
-    color: var(--muted);
-    font-size: 0.85rem;
-  }
-
-  .hint {
-    color: var(--muted);
-    font-size: 0.8rem;
-    line-height: 1.45;
-    margin: 0.2rem 0 0.6rem;
-  }
-
-  .hint code {
-    background: var(--panel-2);
-    padding: 0.05rem 0.3rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-  }
-</style>

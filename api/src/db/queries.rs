@@ -3,14 +3,18 @@
 //! Functions take a `&PgPool` and return [`sqlx::Result`]; callers lift errors
 //! into the application's `eyre` result with `?`.
 
+use std::collections::HashMap;
+
+use chrono::NaiveDate;
 use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, PendingQuestion, Question, QuestionOption, QuestionStatus, Repository,
-    ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
+    AnswerKind, AvailabilityWindow, EnvVar, EnvVarWrite, PendingQuestion, Question, QuestionOption,
+    QuestionStatus, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus,
+    Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -23,7 +27,9 @@ const SETTINGS_COLUMNS: &str =
      claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
      default_branch_template, config_repo_error, current_session_id, updated_at, \
      (claude_oauth_token <> '') AS claude_token_set, \
-     (github_token <> '') AS github_token_set";
+     (github_token <> '') AS github_token_set, \
+     availability_enabled, availability_timezone, availability_windows, \
+     availability_skip_dates";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -34,6 +40,10 @@ pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
 }
 
 /// Patches the settings row; `NULL` arguments leave the existing value intact.
+///
+/// The four availability arguments travel together: `enabled`, the IANA
+/// `timezone`, the weekly `windows`, and the `skip_dates`. As with every other
+/// field, passing `None` keeps the stored value.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_settings(
     pool: &PgPool,
@@ -44,6 +54,10 @@ pub async fn update_settings(
     base_setup_script: Option<String>,
     config_repo_url: Option<String>,
     default_branch_template: Option<String>,
+    availability_enabled: Option<bool>,
+    availability_timezone: Option<String>,
+    availability_windows: Option<Json<Vec<AvailabilityWindow>>>,
+    availability_skip_dates: Option<Json<Vec<NaiveDate>>>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -54,6 +68,10 @@ pub async fn update_settings(
          base_setup_script = COALESCE($5, base_setup_script), \
          config_repo_url = COALESCE($6, config_repo_url), \
          default_branch_template = COALESCE($7, default_branch_template), \
+         availability_enabled = COALESCE($8, availability_enabled), \
+         availability_timezone = COALESCE($9, availability_timezone), \
+         availability_windows = COALESCE($10, availability_windows), \
+         availability_skip_dates = COALESCE($11, availability_skip_dates), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -65,6 +83,10 @@ pub async fn update_settings(
     .bind(base_setup_script)
     .bind(config_repo_url)
     .bind(default_branch_template)
+    .bind(availability_enabled)
+    .bind(availability_timezone)
+    .bind(availability_windows)
+    .bind(availability_skip_dates)
     .fetch_one(pool)
     .await
 }
@@ -126,6 +148,85 @@ pub async fn set_tokens(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// --- Environment variables ---------------------------------------------------
+
+/// All environment variables, ordered by key, with their raw values. Internal
+/// use only (injection + secret scrubbing); the HTTP layer masks secrets.
+pub async fn list_environment_variables(pool: &PgPool) -> sqlx::Result<Vec<EnvVar>> {
+    sqlx::query_as::<_, EnvVar>("SELECT * FROM environment_variables ORDER BY key")
+        .fetch_all(pool)
+        .await
+}
+
+/// Every secret value that should be scrubbed from agent output: the secret
+/// environment variables plus the stored Claude and GitHub tokens. Empty values
+/// are omitted.
+pub async fn list_secret_values(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    let values: Vec<String> = sqlx::query_scalar(
+        "SELECT value FROM environment_variables WHERE is_secret = TRUE AND value <> '' \
+         UNION ALL \
+         SELECT claude_oauth_token FROM settings WHERE id = 1 AND claude_oauth_token <> '' \
+         UNION ALL \
+         SELECT github_token FROM settings WHERE id = 1 AND github_token <> ''",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(values)
+}
+
+/// Replaces the whole set of environment variables in one transaction.
+///
+/// Keys absent from `variables` are deleted. For each entry, a `Some` value is
+/// written verbatim; a `None` value keeps the currently-stored value (used for
+/// secrets the UI never received and so cannot resend). Returns the resulting
+/// rows, ordered by key.
+pub async fn replace_environment_variables(
+    pool: &PgPool,
+    variables: &[EnvVarWrite],
+) -> sqlx::Result<Vec<EnvVar>> {
+    let mut tx = pool.begin().await?;
+
+    // Existing values, so a `None` (unchanged secret) can be preserved.
+    let existing: HashMap<String, String> =
+        sqlx::query_as::<_, (String, String)>("SELECT key, value FROM environment_variables")
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+
+    let mut keys: Vec<String> = Vec::with_capacity(variables.len());
+    for variable in variables {
+        let key = variable.key.trim();
+        if key.is_empty() {
+            continue; // Skip blank rows the UI may leave behind.
+        }
+        let value = match &variable.value {
+            Some(value) => value.clone(),
+            None => existing.get(key).cloned().unwrap_or_default(),
+        };
+        sqlx::query(
+            "INSERT INTO environment_variables (key, value, is_secret) VALUES ($1, $2, $3) \
+             ON CONFLICT (key) DO UPDATE SET \
+             value = EXCLUDED.value, is_secret = EXCLUDED.is_secret, updated_at = now()",
+        )
+        .bind(key)
+        .bind(&value)
+        .bind(variable.is_secret)
+        .execute(&mut *tx)
+        .await?;
+        keys.push(key.to_string());
+    }
+
+    // Drop any variable the UI removed.
+    sqlx::query("DELETE FROM environment_variables WHERE key <> ALL($1)")
+        .bind(&keys)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    list_environment_variables(pool).await
 }
 
 // --- Repositories ------------------------------------------------------------
@@ -195,6 +296,48 @@ pub async fn upsert_repository(
          updated_at = now() \
          RETURNING *",
     )
+    .bind(full_name)
+    .bind(clone_url)
+    .bind(default_branch)
+    .bind(branch_template)
+    .bind(setup_script)
+    .bind(instructions)
+    .bind(review_policy)
+    .bind(enabled)
+    .bind(sync_issues)
+    .bind(issue_labels)
+    .fetch_one(pool)
+    .await
+}
+
+/// Updates a repository in place by `id`, allowing `full_name` to change.
+///
+/// This is the edit path. [`upsert_repository`] keys on `full_name`, so renaming
+/// a repo through it would insert a brand-new row (and leave the old one behind);
+/// editing by `id` renames the existing row instead.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_repository(
+    pool: &PgPool,
+    id: Uuid,
+    full_name: &str,
+    clone_url: &str,
+    default_branch: &str,
+    branch_template: &str,
+    setup_script: &str,
+    instructions: &str,
+    review_policy: Option<ReviewPolicy>,
+    enabled: bool,
+    sync_issues: bool,
+    issue_labels: &[String],
+) -> sqlx::Result<Repository> {
+    sqlx::query_as::<_, Repository>(
+        "UPDATE repositories SET \
+         full_name = $2, clone_url = $3, default_branch = $4, branch_template = $5, \
+         setup_script = $6, instructions = $7, review_policy = $8, enabled = $9, \
+         sync_issues = $10, issue_labels = $11, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
     .bind(full_name)
     .bind(clone_url)
     .bind(default_branch)
@@ -314,14 +457,16 @@ pub async fn move_task(
     column: TaskColumn,
     position: f64,
 ) -> sqlx::Result<Task> {
-    // Re-queuing a card (into To Do or Available) clears any prior failure so it
-    // starts clean, including after a failed run.
+    // Re-queuing a card (into To Do or Available) clears any prior failure and
+    // resets the CI-fix counter so it starts clean, including after a failed run.
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET board_column = $2, position = $3, \
          status = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
                        THEN 'queued'::task_status ELSE status END, \
          error = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
                       THEN NULL ELSE error END, \
+         ci_fix_attempts = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
+                                THEN 0 ELSE ci_fix_attempts END, \
          updated_at = now() \
          WHERE id = $1 RETURNING *",
     )
@@ -363,13 +508,77 @@ pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
     .await
 }
 
-/// Tasks sitting in review awaiting an automated merge decision.
+/// Tasks sitting in review whose CI the review loop should (re-)evaluate.
+///
+/// Includes `merging`, so a merge interrupted by a restart or a transient error
+/// is reconsidered rather than left stuck in that state forever.
 pub async fn list_review_candidates(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
     sqlx::query_as::<_, Task>(
-        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'awaiting_review' \
-         ORDER BY position",
+        "SELECT * FROM tasks WHERE board_column = 'in_review' \
+         AND status IN ('awaiting_review', 'merging') ORDER BY position",
     )
     .fetch_all(pool)
+    .await
+}
+
+/// The next PR whose failing CI the agent should fix: top of `In Review` flagged
+/// `ci_failing`, not on hold.
+pub async fn pick_next_ci_fix(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'ci_failing' \
+         AND hold = FALSE ORDER BY position ASC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Increments a task's CI-fix attempt counter, returning the new count.
+pub async fn bump_ci_fix_attempt(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {
+    sqlx::query_scalar(
+        "UPDATE tasks SET ci_fix_attempts = ci_fix_attempts + 1, last_activity_at = now(), \
+         updated_at = now() WHERE id = $1 RETURNING ci_fix_attempts",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Resets a task's CI-fix counter (used when the agent circles back to a blocked
+/// PR, so the fresh attempt gets the full retry budget again).
+pub async fn reset_ci_fix_attempts(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE tasks SET ci_fix_attempts = 0, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The oldest blocked PR worth revisiting while the agent is otherwise idle: in
+/// review, `ci_blocked`, not on hold, and untouched for at least `cooldown_secs`
+/// (so a genuinely stuck PR is retried periodically, not in a tight loop).
+pub async fn pick_next_revisit(pool: &PgPool, cooldown_secs: i64) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'ci_blocked' \
+         AND hold = FALSE \
+         AND (last_activity_at IS NULL OR last_activity_at < now() - ($1 * interval '1 second')) \
+         ORDER BY last_activity_at ASC NULLS FIRST LIMIT 1",
+    )
+    .bind(cooldown_secs)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Leaves a PR in review for a human, recording why the agent stopped on CI. The
+/// card keeps its `in_review` lane; only the status and error note change.
+pub async fn block_task_ci(pool: &PgPool, id: Uuid, note: &str) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET status = $2, error = $3, finished_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(TaskStatus::CiBlocked)
+    .bind(note)
+    .fetch_one(pool)
     .await
 }
 

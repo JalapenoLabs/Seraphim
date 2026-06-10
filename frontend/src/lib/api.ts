@@ -5,8 +5,13 @@ import ky from 'ky'
 
 import type {
   AnswerKind,
+  AvailabilityWindow,
   BoardResponse,
   ConfigBundle,
+  EnvVar,
+  IssueComment,
+  IssueDetail,
+  IssueThread,
   PendingQuestion,
   Question,
   Repository,
@@ -27,6 +32,22 @@ export function getBoard() {
 
 export function getTask(taskId: string) {
   return apiClient.get(`tasks/${taskId}`).json<TaskDetail>()
+}
+
+export function getIssueThread(taskId: string) {
+  return apiClient.get(`tasks/${taskId}/issue`).json<IssueThread>()
+}
+
+export function addIssueComment(taskId: string, body: string) {
+  return apiClient.post(`tasks/${taskId}/comment`, { json: { body } }).json<IssueComment>()
+}
+
+export function setIssueState(
+  taskId: string,
+  state: 'open' | 'closed',
+  reason?: 'completed' | 'not_planned'
+) {
+  return apiClient.post(`tasks/${taskId}/issue/state`, { json: { state, reason } }).json<IssueDetail>()
 }
 
 export function moveTask(taskId: string, column: TaskColumn, position: number) {
@@ -74,6 +95,13 @@ export function upsertRepo(body: UpsertRepoRequest) {
   return apiClient.post('repos', { json: body }).json<Repository>()
 }
 
+// Update an existing repo by id. Used for edits so renaming the full name
+// renames the row instead of creating a duplicate (which POST, keyed on
+// full_name, would do).
+export function updateRepo(repoId: string, body: UpsertRepoRequest) {
+  return apiClient.put(`repos/${repoId}`, { json: body }).json<Repository>()
+}
+
 export function deleteRepo(repoId: string) {
   return apiClient.delete(`repos/${repoId}`).json()
 }
@@ -103,6 +131,10 @@ export type UpdateSettingsRequest = {
   base_setup_script?: string
   config_repo_url?: string
   default_branch_template?: string
+  availability_enabled?: boolean
+  availability_timezone?: string
+  availability_windows?: AvailabilityWindow[]
+  availability_skip_dates?: string[]
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {
@@ -120,6 +152,26 @@ export type TokensRequest = {
 
 export function setTokens(body: TokensRequest) {
   return apiClient.post('settings/tokens', { json: body }).json<Settings>()
+}
+
+type EnvVarsResponse = {
+  variables: EnvVar[]
+}
+
+export function listEnvVars() {
+  return apiClient.get('settings/env').json<EnvVarsResponse>()
+}
+
+// One variable to write. `value` is omitted for a secret left unchanged, so the
+// server keeps its stored value (the UI never holds the raw secret to resend).
+export type EnvVarWrite = {
+  key: string
+  value?: string
+  is_secret: boolean
+}
+
+export function setEnvVars(variables: EnvVarWrite[]) {
+  return apiClient.put('settings/env', { json: { variables } }).json<EnvVarsResponse>()
 }
 
 export function restartWorkspace() {

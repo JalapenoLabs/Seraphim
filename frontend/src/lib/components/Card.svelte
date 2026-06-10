@@ -1,9 +1,21 @@
 <script lang="ts">
   import type { Task } from '../types'
-  import { goto } from '$app/navigation'
-  import { setTaskHold } from '../api'
 
-  let { task, onchange }: { task: Task; onchange: () => void } = $props()
+  import { goto } from '$app/navigation'
+
+  import { setTaskHold } from '../api'
+  import { STATUS_BADGE, STATUS_LABELS } from '../types'
+  import { Badge } from './ui/badge'
+  import { Button } from './ui/button'
+
+  let {
+    task,
+    onchange,
+    repoName
+  }: { task: Task; onchange: () => void; repoName?: string } = $props()
+
+  // Show just the repo name (after the owner); the full owner/repo is on hover.
+  const repoShort = $derived(repoName ? repoName.split('/').pop() : null)
 
   async function toggleHold(event: MouseEvent) {
     event.stopPropagation()
@@ -17,85 +29,43 @@
 </script>
 
 <div
-  class="card"
-  class:held={task.hold}
-  onclick={open}
-  onkeydown={(event) => event.key === 'Enter' && open()}
   role="button"
   tabindex="0"
+  onclick={open}
+  onkeydown={(event) => event.key === 'Enter' && open()}
+  class="cursor-grab rounded-lg border bg-secondary p-3 transition-colors hover:border-primary {task.hold
+    ? 'border-dashed opacity-60'
+    : 'border-border'}"
 >
-  <div class="top">
-    <span class="num">#{task.external_id}</span>
-    <span class="badge {task.status}">{task.status.replace('_', ' ')}</span>
+  <div class="flex items-center justify-between gap-2">
+    <span class="truncate text-xs tabular-nums text-muted-foreground">
+      {#if repoShort}<span class="font-semibold text-primary" title={repoName}>{repoShort}</span> · {/if}#{task.external_id}
+    </span>
+    <Badge variant="outline" class={STATUS_BADGE[task.status]}>
+      {STATUS_LABELS[task.status] ?? task.status}
+    </Badge>
   </div>
-  <div class="title">{task.title}</div>
-  <div class="bottom">
-    <button class="hold" title={task.hold ? 'Release hold' : 'Hold (agent skips)'} onclick={toggleHold}>
+
+  <div class="mt-2 text-sm leading-snug">{task.title}</div>
+
+  <div class="mt-2 flex items-center justify-between">
+    <Button variant="ghost" size="sm" class="h-6 px-2 text-xs text-muted-foreground" onclick={toggleHold}>
       {task.hold ? '⏸ held' : 'hold'}
-    </button>
+    </Button>
     {#if task.pr_url}
-      <a href={task.pr_url} target="_blank" rel="noreferrer" onclick={(event) => event.stopPropagation()}>PR</a>
+      <a
+        href={task.pr_url}
+        target="_blank"
+        rel="noreferrer"
+        onclick={(event) => event.stopPropagation()}
+        class="text-xs text-primary hover:underline"
+      >
+        PR ↗
+      </a>
     {/if}
   </div>
+
   {#if task.error}
-    <div class="error">{task.error}</div>
+    <div class="mt-2 border-t border-border pt-1.5 text-xs text-destructive">{task.error}</div>
   {/if}
 </div>
-
-<style>
-  .card {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.6rem 0.7rem;
-    margin-bottom: 0.6rem;
-    cursor: grab;
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-  }
-
-  .card:hover {
-    border-color: var(--accent);
-  }
-
-  .card.held {
-    opacity: 0.6;
-    border-style: dashed;
-  }
-
-  .top {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .num {
-    color: var(--muted);
-    font-size: 0.78rem;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .title {
-    font-size: 0.9rem;
-    line-height: 1.3;
-  }
-
-  .bottom {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .hold {
-    padding: 0.15rem 0.5rem;
-    font-size: 0.72rem;
-  }
-
-  .error {
-    font-size: 0.75rem;
-    color: var(--danger);
-    border-top: 1px solid var(--border);
-    padding-top: 0.35rem;
-  }
-</style>
