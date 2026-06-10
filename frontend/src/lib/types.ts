@@ -8,9 +8,39 @@ export type TaskStatus =
   | 'working'
   | 'opening_pr'
   | 'awaiting_review'
+  | 'ci_failing'
+  | 'ci_blocked'
   | 'merging'
   | 'done'
   | 'failed'
+
+// Friendly status labels for the card badge.
+export const STATUS_LABELS = {
+  queued: 'queued',
+  preparing: 'preparing',
+  working: 'working',
+  opening_pr: 'opening PR',
+  awaiting_review: 'awaiting review',
+  ci_failing: 'CI failing',
+  ci_blocked: 'CI blocked',
+  merging: 'merging',
+  done: 'done',
+  failed: 'failed'
+} as const satisfies Record<TaskStatus, string>
+
+// Tailwind classes coloring each status badge (used with Badge variant="outline").
+export const STATUS_BADGE = {
+  queued: 'border-border text-muted-foreground',
+  preparing: 'border-primary/40 text-primary',
+  working: 'border-primary/40 text-primary',
+  opening_pr: 'border-primary/40 text-primary',
+  awaiting_review: 'border-warning/40 text-warning',
+  ci_failing: 'border-warning/40 text-warning',
+  ci_blocked: 'border-destructive/40 text-destructive',
+  merging: 'border-primary/40 text-primary',
+  done: 'border-success/40 text-success',
+  failed: 'border-destructive/40 text-destructive'
+} as const satisfies Record<TaskStatus, string>
 
 export type ReviewPolicy = 'auto_squash_merge' | 'human_review' | 'none'
 
@@ -30,6 +60,7 @@ export type Task = {
   branch: string | null
   pr_url: string | null
   error: string | null
+  ci_fix_attempts: number
   hold: boolean
   session_id: string | null
   started_at: string | null

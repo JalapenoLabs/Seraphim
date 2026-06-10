@@ -37,6 +37,13 @@ RUN curl -fsSL https://github.com/earthly/earthly/releases/latest/download/earth
 # --- Claude Code CLI ---------------------------------------------------------
 RUN npm install -g @anthropic-ai/claude-code
 
+# --- pnpm via corepack -------------------------------------------------------
+# Enable the corepack pnpm shim here (as root) so repo setup scripts never need
+# `sudo corepack enable`, which fails for the non-root `node` user (it can't
+# symlink into the root-owned /usr/local/bin). Classic yarn ships in the base
+# image already; projects that pin a pnpm version get it on first use.
+RUN corepack enable pnpm
+
 # --- Passwordless sudo for the agent (trusted sandbox) -----------------------
 RUN echo "node ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/node && chmod 0440 /etc/sudoers.d/node
 

@@ -1,120 +1,97 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* shadcn-svelte design tokens, themed to Seraphim's dark palette. The app is
+   dark-only, so the values live directly on :root (no light/dark switch). */
 :root {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --panel-2: #1c2330;
+  --radius: 0.625rem;
+
+  --background: #0d1117;
+  --foreground: #e6edf3;
+  --card: #161b22;
+  --card-foreground: #e6edf3;
+  --popover: #161b22;
+  --popover-foreground: #e6edf3;
+  --primary: #6e8bff;
+  --primary-foreground: #0b1020;
+  --secondary: #1c2330;
+  --secondary-foreground: #e6edf3;
+  --muted: #1c2330;
+  --muted-foreground: #8b97a6;
+  --accent: #1c2330;
+  --accent-foreground: #e6edf3;
+  --destructive: #f85149;
+  --destructive-foreground: #ffffff;
   --border: #2a3441;
-  --text: #e6edf3;
-  --muted: #8b97a6;
-  --accent: #6e8bff;
-  --accent-2: #3fb950;
-  --warn: #d29922;
-  --danger: #f85149;
-  --radius: 10px;
-  font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --input: #2a3441;
+  --ring: #6e8bff;
+
+  /* Status accents for task badges and log markers. */
+  --success: #3fb950;
+  --success-foreground: #0b1020;
+  --warning: #d29922;
+  --warning-foreground: #0b1020;
+
+  /* Legacy variables kept so any not-yet-migrated style still resolves. */
+  --bg: var(--background);
+  --panel: var(--card);
+  --panel-2: var(--secondary);
+  --text: var(--foreground);
+  --muted-legacy: var(--muted-foreground);
+  --accent-2: var(--success);
+  --warn: var(--warning);
+  --danger: var(--destructive);
 }
 
-* {
-  box-sizing: border-box;
+/* Map the tokens to Tailwind v4 color/radius utilities (bg-background,
+   text-muted-foreground, border-border, rounded-lg, etc.). */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
-html,
-body {
-  margin: 0;
-  height: 100%;
-  background: var(--bg);
-  color: var(--text);
-}
+@layer base {
+  * {
+    border-color: var(--border);
+  }
 
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
+  html,
+  body {
+    height: 100%;
+  }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-  color: var(--text);
-}
-
-button {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.4rem 0.8rem;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-button:hover {
-  border-color: var(--accent);
-}
-
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #0b1020;
-  font-weight: 600;
-}
-
-input,
-textarea,
-select {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.5rem 0.6rem;
-  width: 100%;
-}
-
-textarea {
-  resize: vertical;
-  min-height: 5rem;
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  margin-bottom: 0.9rem;
-}
-
-.field label {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.badge {
-  display: inline-block;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: capitalize;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.badge.working,
-.badge.preparing,
-.badge.opening_pr,
-.badge.merging {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
-.badge.awaiting_review {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-
-.badge.done {
-  color: var(--accent-2);
-  border-color: var(--accent-2);
-}
-
-.badge.failed {
-  color: var(--danger);
-  border-color: var(--danger);
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+  }
 }

@@ -57,6 +57,13 @@ export function upsertRepo(body: UpsertRepoRequest) {
   return apiClient.post('repos', { json: body }).json<Repository>()
 }
 
+// Update an existing repo by id. Used for edits so renaming the full name
+// renames the row instead of creating a duplicate (which POST, keyed on
+// full_name, would do).
+export function updateRepo(repoId: string, body: UpsertRepoRequest) {
+  return apiClient.put(`repos/${repoId}`, { json: body }).json<Repository>()
+}
+
 export function deleteRepo(repoId: string) {
   return apiClient.delete(`repos/${repoId}`).json()
 }

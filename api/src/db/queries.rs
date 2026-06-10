@@ -208,6 +208,48 @@ pub async fn upsert_repository(
     .await
 }
 
+/// Updates a repository in place by `id`, allowing `full_name` to change.
+///
+/// This is the edit path. [`upsert_repository`] keys on `full_name`, so renaming
+/// a repo through it would insert a brand-new row (and leave the old one behind);
+/// editing by `id` renames the existing row instead.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_repository(
+    pool: &PgPool,
+    id: Uuid,
+    full_name: &str,
+    clone_url: &str,
+    default_branch: &str,
+    branch_template: &str,
+    setup_script: &str,
+    instructions: &str,
+    review_policy: Option<ReviewPolicy>,
+    enabled: bool,
+    sync_issues: bool,
+    issue_labels: &[String],
+) -> sqlx::Result<Repository> {
+    sqlx::query_as::<_, Repository>(
+        "UPDATE repositories SET \
+         full_name = $2, clone_url = $3, default_branch = $4, branch_template = $5, \
+         setup_script = $6, instructions = $7, review_policy = $8, enabled = $9, \
+         sync_issues = $10, issue_labels = $11, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(full_name)
+    .bind(clone_url)
+    .bind(default_branch)
+    .bind(branch_template)
+    .bind(setup_script)
+    .bind(instructions)
+    .bind(review_policy)
+    .bind(enabled)
+    .bind(sync_issues)
+    .bind(issue_labels)
+    .fetch_one(pool)
+    .await
+}
+
 /// Like [`upsert_repository`] but only creates a row when one doesn't already
 /// exist (used by org import so it never clobbers your manual edits). Returns the
 /// existing or newly-created repo.
@@ -313,14 +355,16 @@ pub async fn move_task(
     column: TaskColumn,
     position: f64,
 ) -> sqlx::Result<Task> {
-    // Re-queuing a card (into To Do or Available) clears any prior failure so it
-    // starts clean, including after a failed run.
+    // Re-queuing a card (into To Do or Available) clears any prior failure and
+    // resets the CI-fix counter so it starts clean, including after a failed run.
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET board_column = $2, position = $3, \
          status = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
                        THEN 'queued'::task_status ELSE status END, \
          error = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
                       THEN NULL ELSE error END, \
+         ci_fix_attempts = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
+                                THEN 0 ELSE ci_fix_attempts END, \
          updated_at = now() \
          WHERE id = $1 RETURNING *",
     )
@@ -362,13 +406,52 @@ pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
     .await
 }
 
-/// Tasks sitting in review awaiting an automated merge decision.
+/// Tasks sitting in review whose CI the review loop should (re-)evaluate.
+///
+/// Includes `merging`, so a merge interrupted by a restart or a transient error
+/// is reconsidered rather than left stuck in that state forever.
 pub async fn list_review_candidates(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
     sqlx::query_as::<_, Task>(
-        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'awaiting_review' \
-         ORDER BY position",
+        "SELECT * FROM tasks WHERE board_column = 'in_review' \
+         AND status IN ('awaiting_review', 'merging') ORDER BY position",
     )
     .fetch_all(pool)
+    .await
+}
+
+/// The next PR whose failing CI the agent should fix: top of `In Review` flagged
+/// `ci_failing`, not on hold.
+pub async fn pick_next_ci_fix(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'ci_failing' \
+         AND hold = FALSE ORDER BY position ASC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Increments a task's CI-fix attempt counter, returning the new count.
+pub async fn bump_ci_fix_attempt(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {
+    sqlx::query_scalar(
+        "UPDATE tasks SET ci_fix_attempts = ci_fix_attempts + 1, last_activity_at = now(), \
+         updated_at = now() WHERE id = $1 RETURNING ci_fix_attempts",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Leaves a PR in review for a human, recording why the agent stopped on CI. The
+/// card keeps its `in_review` lane; only the status and error note change.
+pub async fn block_task_ci(pool: &PgPool, id: Uuid, note: &str) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET status = $2, error = $3, finished_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(TaskStatus::CiBlocked)
+    .bind(note)
+    .fetch_one(pool)
     .await
 }
 

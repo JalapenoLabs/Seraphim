@@ -158,6 +158,35 @@ pub async fn prepare_branch(
     run(state, &script).await
 }
 
+/// Per-task prep for a CI fix: ensure the repo and AGENTS.md, then check out the
+/// PR's existing branch at its pushed tip (so the agent's earlier commits are
+/// present). Unlike [`prepare_branch`], this never re-cuts the branch from the
+/// default, which would discard the work the PR is built on.
+pub async fn prepare_existing_branch(
+    state: &AppState,
+    settings: &Settings,
+    repo: &Repository,
+    branch: &str,
+) -> Result<()> {
+    let dir = format!("/workspace/{}", repo_dir_name(&repo.full_name));
+
+    let mut script = String::from("set -e\n");
+    script.push_str(&prelude_agents(settings));
+    // Ensure the focus repo exists (clone on first sight), then sync to the
+    // remote branch tip CI actually tested.
+    script.push_str(&repo_block(repo, false));
+    script.push_str(&format!(
+        "cd \"{dir}\"\n\
+         git fetch origin\n\
+         git checkout -B \"{branch}\" \"origin/{branch}\"\n\
+         git reset --hard \"origin/{branch}\"\n",
+        dir = dir,
+        branch = branch,
+    ));
+
+    run(state, &script).await
+}
+
 /// Bash to clone-or-update a single repo, write its CLAUDE.md, and (on a fresh
 /// clone, or always during a full provision) run its setup script.
 fn repo_block(repo: &Repository, always_setup: bool) -> String {

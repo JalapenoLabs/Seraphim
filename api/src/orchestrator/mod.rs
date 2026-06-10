@@ -22,7 +22,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::claude::{run_turn, AgentEventKind, TurnArgs};
-use crate::db::models::{Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
+use crate::db::models::{ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
 use crate::db::queries;
 use crate::git;
 use crate::state::AppState;
@@ -33,6 +33,27 @@ const AGENT_IDLE_POLL: Duration = Duration::from_secs(5);
 const REVIEW_POLL: Duration = Duration::from_secs(30);
 /// Fallback issue-sync cadence when a source omits its own interval.
 const DEFAULT_SYNC_POLL: Duration = Duration::from_secs(120);
+
+/// How many times we re-check for the agent's freshly opened PR before giving
+/// up. GitHub's pull-request list lags a few seconds behind `gh pr create`
+/// (read-replica/index propagation), so a single check the instant the turn
+/// ends races GitHub's own indexing and spuriously reports "no PR".
+const PR_DETECT_ATTEMPTS: u32 = 6;
+/// Delay between PR-detection attempts (so detection waits up to ~15s total).
+const PR_DETECT_DELAY: Duration = Duration::from_secs(3);
+
+/// How many fix turns the agent spends on a PR's failing CI before leaving it
+/// for a human. Bounds thrash when a failure is unfixable or out of scope.
+const MAX_CI_FIX_ATTEMPTS: i32 = 3;
+
+/// What kind of work a pulled card needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkMode {
+    /// A fresh issue: cut a branch, implement, and open a PR.
+    Fresh,
+    /// An open PR with failing CI: re-engage on its branch to fix the checks.
+    FixCi,
+}
 
 /// Launches the background loops and an initial workspace provision. Returns
 /// immediately.
@@ -61,7 +82,11 @@ async fn provision_on_startup(state: AppState) {
     match provision::provision_workspace(&state).await {
         Ok(()) => info!("workspace provisioned"),
         Err(error) => {
-            error!(error = %error, "workspace provision failed (agent halted until resolved)");
+            // Only a config-repo failure halts the agent (tracked separately in
+            // settings.config_repo_error). A later step failing here (e.g. a
+            // repo's setup script) leaves the agent running on a partially
+            // provisioned workspace; per-task prep retries the focus repo.
+            error!(error = %error, "workspace provision failed");
         }
     }
 }
@@ -131,8 +156,8 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
 async fn agent_loop(state: AppState) {
     loop {
         match next_actionable_task(&state).await {
-            Ok(Some(task)) => {
-                if let Err(error) = work_task(&state, task).await {
+            Ok(Some((task, mode))) => {
+                if let Err(error) = work_task(&state, task, mode).await {
                     error!(error = %error, "task run failed");
                 }
                 // Immediately look for the next card; only sleep when idle.
@@ -146,8 +171,11 @@ async fn agent_loop(state: AppState) {
     }
 }
 
-/// The next card to work, or `None` if paused, halted, or the queue is empty.
-async fn next_actionable_task(state: &AppState) -> Result<Option<Task>> {
+/// The next card to work and how, or `None` if paused, halted, or idle.
+///
+/// Greening an already-open PR takes priority over starting fresh work, so PRs
+/// don't linger red while the agent moves on to new issues.
+async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode)>> {
     let settings = queries::get_settings(&state.db).await?;
     if settings.agent_paused {
         return Ok(None);
@@ -158,11 +186,25 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<Task>> {
     if !settings.config_repo_url.trim().is_empty() && settings.config_repo_error.is_some() {
         return Ok(None);
     }
-    queries::pick_next_todo(&state.db).await.map_err(Into::into)
+    if let Some(task) = queries::pick_next_ci_fix(&state.db).await? {
+        return Ok(Some((task, WorkMode::FixCi)));
+    }
+    if let Some(task) = queries::pick_next_todo(&state.db).await? {
+        return Ok(Some((task, WorkMode::Fresh)));
+    }
+    Ok(None)
 }
 
-/// Runs one task end to end: prepare repo, drive Claude, detect PR, apply policy.
-async fn work_task(state: &AppState, task: Task) -> Result<()> {
+/// Dispatches a pulled card to the right end-to-end flow.
+async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
+    match mode {
+        WorkMode::Fresh => work_fresh(state, task).await,
+        WorkMode::FixCi => work_ci_fix(state, task).await,
+    }
+}
+
+/// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR.
+async fn work_fresh(state: &AppState, task: Task) -> Result<()> {
     info!(task_id = %task.id, title = %task.title, "starting task");
 
     // Move the card into In Progress and mark it preparing.
@@ -194,23 +236,20 @@ async fn work_task(state: &AppState, task: Task) -> Result<()> {
     state.notify_board();
 
     // Drive the Claude turn and capture the (possibly new) session id.
-    let outcome = run_agent_turn(state, &settings, &repo, &task, &branch).await?;
-    if let Some(session_id) = &outcome.session_id {
-        if settings.current_session_id.as_deref() != Some(session_id.as_str()) {
-            queries::set_current_session_id(&state.db, Some(session_id)).await?;
-        }
-    }
+    let prompt = prompt::build(&settings, &repo, &task, &branch);
+    let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
+    persist_session(state, &settings, &outcome).await?;
     // Surface a turn failure (e.g. "Not logged in") on the task itself, instead
     // of letting it fall through to the generic "no pull request" message.
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
     }
 
-    // Deterministically detect the PR the agent opened for this branch.
+    // Deterministically detect the PR the agent opened for this branch. Retry to
+    // absorb GitHub's brief indexing lag after `gh pr create`.
     let github = state.github().await?;
     let (owner, repo_name) = split_full_name(&repo.full_name)?;
-    let pull = git::find_open_pr_for_branch(&github, owner, repo_name, &branch).await?;
-    let Some(pull) = pull else {
+    let Some(pull) = detect_pr(&github, owner, repo_name, &branch).await? else {
         return fail(
             state,
             &task,
@@ -228,6 +267,108 @@ async fn work_task(state: &AppState, task: Task) -> Result<()> {
     Ok(())
 }
 
+/// Re-engages the agent on an open PR whose CI is failing.
+///
+/// Checks out the PR's existing branch, runs one fix turn (with the failing
+/// check names in the prompt), and decides what happens next by whether the
+/// agent pushed: a new commit returns the task to review for a CI re-check; no
+/// new commit means the agent judged the failure out of scope, so the PR is left
+/// for a human and the agent moves on.
+async fn work_ci_fix(state: &AppState, task: Task) -> Result<()> {
+    info!(task_id = %task.id, attempts = task.ci_fix_attempts, "fixing failing CI");
+
+    let Some(repo_id) = task.repo_id else {
+        return block(state, &task, "no repository is configured for this issue").await;
+    };
+    let Some(repo) = queries::get_repository(&state.db, repo_id).await? else {
+        return block(state, &task, "the linked repository no longer exists").await;
+    };
+    let Some(branch) = task.branch.clone() else {
+        return block(state, &task, "the task has no branch to fix").await;
+    };
+
+    let settings = queries::get_settings(&state.db).await?;
+
+    // The card stays in In Review; only the status reflects the active fix.
+    queries::set_task_status(&state.db, task.id, TaskStatus::Working).await?;
+    state.notify_board();
+
+    if let Err(error) = provision::prepare_existing_branch(state, &settings, &repo, &branch).await {
+        return fail(
+            state,
+            &task,
+            &format!("could not check out the PR branch: {error}"),
+        )
+        .await;
+    }
+
+    let github = state.github().await?;
+    let (owner, repo_name) = split_full_name(&repo.full_name)?;
+
+    // Snapshot the branch tip so we can later tell whether the agent pushed.
+    let before_sha = git::branch_head_sha(&github, owner, repo_name, &branch)
+        .await
+        .ok();
+
+    // Enumerate the failing checks (best-effort) to focus the agent.
+    let failing = match git::find_open_pr_for_branch(&github, owner, repo_name, &branch).await? {
+        Some(pull) => match git::ci_status(&github, owner, repo_name, &pull.head_sha).await {
+            Ok(git::CiStatus::Failing(checks)) => checks,
+            _ => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+
+    let prompt = prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing);
+    let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
+    let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
+    persist_session(state, &settings, &outcome).await?;
+    if let Some(message) = outcome.error {
+        return fail(state, &task, &message).await;
+    }
+
+    // A pushed commit moves the tip; nothing pushed means the agent chose not to
+    // act (e.g. the failure is pre-existing or out of scope).
+    let after_sha = git::branch_head_sha(&github, owner, repo_name, &branch)
+        .await
+        .ok();
+    let pushed = match (&before_sha, &after_sha) {
+        (Some(before), Some(after)) => before != after,
+        // If a tip can't be read, assume progress and let the review loop judge.
+        _ => true,
+    };
+
+    if !pushed {
+        return block(
+            state,
+            &task,
+            "The agent made no changes for the failing CI (likely pre-existing or out of scope). \
+             Left for human review.",
+        )
+        .await;
+    }
+
+    // Fix pushed: back to review so the loop re-checks CI on the new commit.
+    queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
+    state.notify_board();
+    info!(task_id = %task.id, attempt, "pushed CI fix; awaiting re-check");
+    Ok(())
+}
+
+/// Persists a turn's session id when it differs from the stored one.
+async fn persist_session(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+    outcome: &TurnOutcome,
+) -> Result<()> {
+    if let Some(session_id) = &outcome.session_id {
+        if settings.current_session_id.as_deref() != Some(session_id.as_str()) {
+            queries::set_current_session_id(&state.db, Some(session_id)).await?;
+        }
+    }
+    Ok(())
+}
+
 /// The outcome of one Claude turn.
 struct TurnOutcome {
     /// Session id reported by the turn (the shared, resumable conversation).
@@ -236,15 +377,14 @@ struct TurnOutcome {
     error: Option<String>,
 }
 
-/// Streams one Claude turn, persisting every event and pushing it to the UI.
+/// Streams one Claude turn for `prompt`, persisting every event and pushing it
+/// to the UI. The caller composes the prompt (fresh work or a CI fix).
 async fn run_agent_turn(
     state: &AppState,
     settings: &crate::db::models::Settings,
-    repo: &Repository,
     task: &Task,
-    branch: &str,
+    prompt: String,
 ) -> Result<TurnOutcome> {
-    let prompt = prompt::build(settings, repo, task, branch);
     // Claude runs at the workspace root so it can work across all cloned repos.
     let working_dir = "/workspace".to_string();
 
@@ -363,30 +503,69 @@ async fn review_once(state: &AppState) -> Result<()> {
         let Some(repo) = queries::get_repository(&state.db, repo_id).await? else {
             continue;
         };
-
-        let policy = repo.review_policy.unwrap_or(settings.default_review_policy);
-        if policy != ReviewPolicy::AutoSquashMerge {
-            continue; // Human-reviewed repos wait for a person.
-        }
-
         let Some(branch) = &task.branch else { continue };
         let (owner, repo_name) = split_full_name(&repo.full_name)?;
         let Some(pull) = git::find_open_pr_for_branch(&github, owner, repo_name, branch).await?
         else {
-            continue;
+            continue; // PR closed or merged externally; nothing to do.
         };
 
-        if !git::checks_green(&github, owner, repo_name, &pull.head_sha).await? {
-            continue; // CI still running or red; try again next tick.
+        match git::ci_status(&github, owner, repo_name, &pull.head_sha).await? {
+            // Checks still running: re-check next tick.
+            git::CiStatus::Pending => {}
+
+            // Red CI: hand it to the agent to fix, or give up once the cap hits.
+            // This applies regardless of review policy, so PRs are greened before
+            // a human ever looks at them.
+            git::CiStatus::Failing(checks) => {
+                if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
+                    queries::set_task_status(&state.db, task.id, TaskStatus::CiFailing).await?;
+                } else {
+                    let note = format!(
+                        "CI still failing after {MAX_CI_FIX_ATTEMPTS} fix attempts ({checks}); \
+                         needs a human.",
+                        checks = checks.join(", "),
+                    );
+                    queries::block_task_ci(&state.db, task.id, &note).await?;
+                }
+                state.notify_board();
+            }
+
+            // Green CI: auto-merge repos merge now; others wait for a human.
+            git::CiStatus::Passing => {
+                let policy = repo.review_policy.unwrap_or(settings.default_review_policy);
+                if policy != ReviewPolicy::AutoSquashMerge {
+                    continue;
+                }
+                queries::set_task_status(&state.db, task.id, TaskStatus::Merging).await?;
+                state.notify_board();
+
+                match git::squash_merge(&github, owner, repo_name, pull.number).await {
+                    Ok(()) => {
+                        queries::finish_task(
+                            &state.db,
+                            task.id,
+                            TaskColumn::Done,
+                            TaskStatus::Done,
+                        )
+                        .await?;
+                        state.notify_board();
+                        info!(task_id = %task.id, "auto-merged and marked done");
+                    }
+                    // A merge can fail for reasons retrying won't fix (conflicts
+                    // with the base, restricted merge settings). Record it and
+                    // stop auto-retrying so the loop doesn't spin; a human takes
+                    // over from the In Review lane.
+                    Err(error) => {
+                        let note = format!(
+                            "Auto-merge failed: {error}. The PR likely conflicts with its base \
+                             branch or merging is restricted; resolve it manually.",
+                        );
+                        block(state, &task, &note).await?;
+                    }
+                }
+            }
         }
-
-        queries::set_task_status(&state.db, task.id, TaskStatus::Merging).await?;
-        state.notify_board();
-
-        git::squash_merge(&github, owner, repo_name, pull.number).await?;
-        queries::finish_task(&state.db, task.id, TaskColumn::Done, TaskStatus::Done).await?;
-        state.notify_board();
-        info!(task_id = %task.id, "auto-merged and marked done");
     }
 
     Ok(())
@@ -403,6 +582,39 @@ async fn fail(state: &AppState, task: &Task, message: &str) -> Result<()> {
     queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     state.notify_board();
     Ok(())
+}
+
+/// Leaves an open PR in review for a human, recording why the agent stopped on
+/// CI. Unlike [`fail`], the card keeps its `In Review` lane and PR; only the
+/// status and the note change.
+async fn block(state: &AppState, task: &Task, message: &str) -> Result<()> {
+    warn!(task_id = %task.id, message, "task CI-blocked");
+    let trimmed: String = message.trim().chars().take(800).collect();
+    queries::block_task_ci(&state.db, task.id, &trimmed).await?;
+    state.notify_board();
+    Ok(())
+}
+
+/// Detects the open PR for `branch`, retrying to absorb GitHub's indexing lag.
+///
+/// A freshly created PR can take a few seconds to surface in the head-filtered
+/// pulls list, so checking once the instant the turn ends races GitHub. Returns
+/// `None` only after [`PR_DETECT_ATTEMPTS`] checks all come back empty.
+async fn detect_pr(
+    github: &octocrab::Octocrab,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<Option<git::OpenPr>> {
+    for attempt in 1..=PR_DETECT_ATTEMPTS {
+        if let Some(pull) = git::find_open_pr_for_branch(github, owner, repo, branch).await? {
+            return Ok(Some(pull));
+        }
+        if attempt < PR_DETECT_ATTEMPTS {
+            sleep(PR_DETECT_DELAY).await;
+        }
+    }
+    Ok(None)
 }
 
 /// Splits `owner/repo` into its parts.
@@ -475,6 +687,7 @@ mod tests {
             branch: None,
             pr_url: None,
             error: None,
+            ci_fix_attempts: 0,
             hold: false,
             session_id: None,
             started_at: None,

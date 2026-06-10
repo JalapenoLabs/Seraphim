@@ -11,65 +11,31 @@
   ]
 </script>
 
-<div class="shell">
-  <header>
-    <a class="brand" href="/">Seraphim</a>
-    <nav>
+<div class="flex h-screen flex-col">
+  <header class="flex items-center gap-8 border-b border-border bg-card px-6 py-3">
+    <a href="/" class="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
+      <img
+        src="/favicon.png"
+        alt=""
+        class="h-6 w-6"
+        onerror={(event) => ((event.currentTarget as HTMLImageElement).style.display = 'none')}
+      />
+      Seraphim
+    </a>
+    <nav class="flex gap-1">
       {#each links as link}
-        <a class="nav-link" class:active={$page.url.pathname === link.href} href={link.href}>
+        <a
+          href={link.href}
+          class="rounded-md px-3 py-1.5 text-sm transition-colors {$page.url.pathname === link.href
+            ? 'bg-secondary text-foreground'
+            : 'text-muted-foreground hover:bg-secondary hover:text-foreground'}"
+        >
           {link.label}
         </a>
       {/each}
     </nav>
   </header>
-  <main>
+  <main class="min-h-0 flex-1 overflow-auto">
     {@render children()}
   </main>
 </div>
-
-<style>
-  .shell {
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 2rem;
-    padding: 0.8rem 1.4rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel);
-  }
-
-  .brand {
-    font-weight: 700;
-    font-size: 1.15rem;
-    color: var(--text);
-    letter-spacing: 0.02em;
-  }
-
-  nav {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .nav-link {
-    color: var(--muted);
-    padding: 0.35rem 0.7rem;
-    border-radius: 8px;
-  }
-
-  .nav-link.active,
-  .nav-link:hover {
-    color: var(--text);
-    background: var(--panel-2);
-  }
-
-  main {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-  }
-</style>

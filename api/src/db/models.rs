@@ -53,6 +53,11 @@ pub enum TaskStatus {
     Working,
     OpeningPr,
     AwaitingReview,
+    /// The PR's CI is red and the task is queued for an agent fix turn.
+    CiFailing,
+    /// The agent stopped fixing CI (out of scope, or the retry cap hit); the PR
+    /// is left in review for a human.
+    CiBlocked,
     Merging,
     Done,
     Failed,
@@ -118,6 +123,8 @@ pub struct Task {
     pub branch: Option<String>,
     pub pr_url: Option<String>,
     pub error: Option<String>,
+    /// Fix turns already spent on this task's failing CI (bounds retry thrash).
+    pub ci_fix_attempts: i32,
     pub hold: bool,
     pub session_id: Option<String>,
     pub started_at: Option<DateTime<Utc>>,

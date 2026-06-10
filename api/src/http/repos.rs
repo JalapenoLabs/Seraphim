@@ -73,6 +73,32 @@ pub async fn upsert(
     Ok(Json(repo))
 }
 
+/// `PUT /api/v1/repos/:id` - update a repository by id (rename-safe, so editing
+/// the full name renames the row instead of creating a duplicate).
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpsertRepoRequest>,
+) -> ApiResult<Json<Repository>> {
+    let repo = queries::update_repository(
+        &state.db,
+        id,
+        &body.full_name,
+        &body.clone_url,
+        &body.default_branch,
+        &body.branch_template,
+        &body.setup_script,
+        &body.instructions,
+        body.review_policy,
+        body.enabled,
+        body.sync_issues,
+        &body.issue_labels,
+    )
+    .await?;
+    state.notify_board();
+    Ok(Json(repo))
+}
+
 /// `DELETE /api/v1/repos/:id`
 pub async fn delete(
     State(state): State<AppState>,

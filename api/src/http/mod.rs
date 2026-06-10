@@ -59,7 +59,10 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/move", post(board::move_task))
         .route("/tasks/:id/hold", post(board::set_hold))
         .route("/repos", get(repos::list).post(repos::upsert))
-        .route("/repos/:id", axum::routing::delete(repos::delete))
+        .route(
+            "/repos/:id",
+            axum::routing::put(repos::update).delete(repos::delete),
+        )
         .route("/repos/import-org", post(repos::import_org))
         .route("/sync", post(repos::sync))
         .route("/settings", get(settings::get).patch(settings::update))

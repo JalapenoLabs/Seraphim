@@ -13,6 +13,13 @@
     setTokens,
     updateSettings
   } from '$lib/api'
+  import * as Card from '$lib/components/ui/card'
+  import * as Select from '$lib/components/ui/select'
+  import { Button, buttonVariants } from '$lib/components/ui/button'
+  import { Input } from '$lib/components/ui/input'
+  import { Label } from '$lib/components/ui/label'
+  import { Textarea } from '$lib/components/ui/textarea'
+  import { Badge } from '$lib/components/ui/badge'
 
   const CUSTOM_MODEL = '__custom__'
 
@@ -31,6 +38,12 @@
 
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
 
+  const modelLabel = $derived(
+    modelChoice === CUSTOM_MODEL
+      ? 'Custom…'
+      : (KNOWN_MODELS.find((model) => model.value === modelChoice)?.label ?? modelChoice)
+  )
+
   async function load() {
     const loaded = await getSettings()
     settings = loaded
@@ -39,9 +52,10 @@
       : CUSTOM_MODEL
   }
 
-  function onModelChange() {
-    if (settings && modelChoice !== CUSTOM_MODEL) {
-      settings.claude_model = modelChoice
+  function chooseModel(value: string) {
+    modelChoice = value
+    if (settings && value !== CUSTOM_MODEL) {
+      settings.claude_model = value
     }
   }
 
@@ -118,229 +132,197 @@
   onMount(load)
 </script>
 
-<div class="page">
-  <h1>Settings</h1>
+<div class="mx-auto max-w-3xl space-y-5 px-6 py-6">
+  <h1 class="text-2xl font-semibold">Settings</h1>
 
   {#if settings}
-    <section class="panel">
-      <h2>Environment profile</h2>
-      <div class="field">
-        <label for="org">Organization name</label>
-        <input id="org" bind:value={settings.org_name} />
-      </div>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Environment profile</Card.Title>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="org">Organization name</Label>
+          <Input id="org" bind:value={settings.org_name} />
+        </div>
 
-      <div class="field">
-        <label for="model">Claude model</label>
-        <select id="model" bind:value={modelChoice} onchange={onModelChange}>
-          {#each KNOWN_MODELS as model}
-            <option value={model.value}>{model.label}</option>
-          {/each}
-          <option value={CUSTOM_MODEL}>Custom…</option>
-        </select>
-        {#if modelChoice === CUSTOM_MODEL}
-          <input
-            class="custom-model"
-            placeholder="exact model id, e.g. claude-opus-4-8[1m]"
-            bind:value={settings.claude_model}
+        <div class="space-y-1.5">
+          <Label for="model">Claude model</Label>
+          <Select.Root type="single" value={modelChoice} onValueChange={chooseModel}>
+            <Select.Trigger id="model" class="w-full">{modelLabel}</Select.Trigger>
+            <Select.Content>
+              {#each KNOWN_MODELS as model}
+                <Select.Item value={model.value} label={model.label}>{model.label}</Select.Item>
+              {/each}
+              <Select.Item value={CUSTOM_MODEL} label="Custom…">Custom…</Select.Item>
+            </Select.Content>
+          </Select.Root>
+          {#if modelChoice === CUSTOM_MODEL}
+            <Input placeholder="exact model id, e.g. claude-opus-4-8[1m]" bind:value={settings.claude_model} />
+          {/if}
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Friendly names shown here; the coded model id is what's sent to the agent. Fable 5, Opus
+            4.x, and Sonnet 4.6 are 1M-context; Haiku 4.5 is 200K.
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="policy">Default review policy</Label>
+          <Select.Root
+            type="single"
+            value={settings.default_review_policy}
+            onValueChange={(value) => settings && (settings.default_review_policy = value as ReviewPolicy)}
+          >
+            <Select.Trigger id="policy" class="w-full">
+              {settings.default_review_policy.replace(/_/g, ' ')}
+            </Select.Trigger>
+            <Select.Content>
+              {#each policies as policy}
+                <Select.Item value={policy} label={policy.replace(/_/g, ' ')}>
+                  {policy.replace(/_/g, ' ')}
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="global">Global agent instructions</Label>
+          <Textarea id="global" rows={5} bind:value={settings.global_instructions} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Written to <code class="rounded bg-secondary px-1 py-0.5 text-xs">/workspace/AGENTS.md</code>,
+            which the agent reads automatically at the start of every session. Put org-wide
+            conventions here (how to branch, when to open vs. auto-merge PRs, coding standards).
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="setup">Environment setup script</Label>
+          <Textarea id="setup" rows={4} bind:value={settings.base_setup_script} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Runs once when the workspace container is built or recreated, as the non-root
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">node</code> user (passwordless
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">sudo</code> is available). The image is
+            Debian 12 (bookworm) with Node 22; <code class="rounded bg-secondary px-1 py-0.5 text-xs">pnpm</code>,
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn</code>, and
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">npm</code> are already installed, so you do
+            not need <code class="rounded bg-secondary px-1 py-0.5 text-xs">corepack enable</code>. Per-repo
+            commands like <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn install</code> belong in
+            each repository's own setup script.
+          </p>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <Button onclick={save}>Save</Button>
+          {#if savedAt}<span class="text-sm text-muted-foreground">Saved at {savedAt}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Secrets</Card.Title>
+        <Card.Description>
+          Stored in the database, never in <code class="rounded bg-secondary px-1 py-0.5 text-xs">.env</code>
+          and never returned by the API. Injected into the agent only at runtime. Leave a field blank
+          to keep the existing value.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="claude-token" class="flex items-center gap-2">
+            Claude OAuth token
+            <Badge variant="outline" class={settings.claude_token_set ? 'border-success/40 text-success' : 'text-muted-foreground'}>
+              {settings.claude_token_set ? 'configured' : 'not set'}
+            </Badge>
+          </Label>
+          <Input
+            id="claude-token"
+            type="password"
+            autocomplete="off"
+            placeholder="from `claude setup-token`"
+            bind:value={claudeTokenInput}
           />
-        {/if}
-        <p class="hint">
-          Friendly names shown here; the coded model id is what's sent to the agent. Fable 5, Opus
-          4.x, and Sonnet 4.6 are 1M-context; Haiku 4.5 is 200K.
-        </p>
-      </div>
+        </div>
+        <div class="space-y-1.5">
+          <Label for="gh-token" class="flex items-center gap-2">
+            GitHub token
+            <Badge variant="outline" class={settings.github_token_set ? 'border-success/40 text-success' : 'text-muted-foreground'}>
+              {settings.github_token_set ? 'configured' : 'not set'}
+            </Badge>
+          </Label>
+          <Input
+            id="gh-token"
+            type="password"
+            autocomplete="off"
+            placeholder="PAT with repo + issues scope"
+            bind:value={githubTokenInput}
+          />
+        </div>
+        <div class="flex items-center gap-3">
+          <Button onclick={saveTokens}>Save secrets</Button>
+          {#if tokensMessage}<span class="text-sm text-muted-foreground">{tokensMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
 
-      <div class="field">
-        <label for="policy">Default review policy</label>
-        <select id="policy" bind:value={settings.default_review_policy}>
-          {#each policies as policy}
-            <option value={policy}>{policy.replace(/_/g, ' ')}</option>
-          {/each}
-        </select>
-      </div>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Agent config repo (~/.claude)</Card.Title>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="configrepo">Config repo URL</Label>
+          <Input id="configrepo" placeholder="git@github.com:navarrotech/agents.git" bind:value={settings.config_repo_url} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            The workspace clones this into the agent's config dir, so your
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">AGENTS.md</code>, docs, manuals, and skills
+            travel with the deployment, no host mount required. Cloned over SSH using your mounted key.
+            Save, then Recreate to apply.
+          </p>
+        </div>
+        <Button onclick={save}>Save</Button>
+      </Card.Content>
+    </Card.Root>
 
-      <div class="field">
-        <label for="global">Global agent instructions</label>
-        <textarea id="global" rows="5" bind:value={settings.global_instructions}></textarea>
-        <p class="hint">
-          Written to <code>/workspace/AGENTS.md</code>, which the agent reads automatically at the
-          start of every session. Put org-wide conventions here (how to branch, when to open vs.
-          auto-merge PRs, coding standards).
-        </p>
-      </div>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Backup & transfer</Card.Title>
+        <Card.Description>
+          Export your settings and repositories as JSON to move a setup to another machine. Secrets
+          are never included. Import merges into the current config.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content>
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={downloadExport}>Export JSON</Button>
+          <label class={buttonVariants({ variant: 'outline' })}>
+            Import JSON
+            <input type="file" accept="application/json" onchange={onImportFile} hidden />
+          </label>
+          {#if importMessage}<span class="text-sm text-muted-foreground">{importMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
 
-      <div class="field">
-        <label for="setup">Environment setup script</label>
-        <textarea id="setup" rows="4" bind:value={settings.base_setup_script}></textarea>
-        <p class="hint">
-          Runs once when the workspace container is built or recreated. Use it to install CLIs and
-          toolchains shared across repos (e.g. <code>corepack enable</code>, global npm packages,
-          apt packages). Per-repo commands like <code>yarn install</code> belong in each
-          repository's own setup script.
-        </p>
-      </div>
-
-      <div class="actions">
-        <button class="primary" onclick={save}>Save</button>
-        {#if savedAt}<span class="muted">Saved at {savedAt}</span>{/if}
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Secrets</h2>
-      <p class="hint">
-        Stored in the database, never in <code>.env</code> and never returned by the API. Injected
-        into the agent only at runtime. Leave a field blank to keep the existing value.
-      </p>
-      <div class="field">
-        <label for="claude-token">
-          Claude OAuth token
-          <span class="badge {settings.claude_token_set ? 'done' : ''}">
-            {settings.claude_token_set ? 'configured' : 'not set'}
-          </span>
-        </label>
-        <input
-          id="claude-token"
-          type="password"
-          autocomplete="off"
-          placeholder="from `claude setup-token`"
-          bind:value={claudeTokenInput}
-        />
-      </div>
-      <div class="field">
-        <label for="gh-token">
-          GitHub token
-          <span class="badge {settings.github_token_set ? 'done' : ''}">
-            {settings.github_token_set ? 'configured' : 'not set'}
-          </span>
-        </label>
-        <input
-          id="gh-token"
-          type="password"
-          autocomplete="off"
-          placeholder="PAT with repo + issues scope"
-          bind:value={githubTokenInput}
-        />
-      </div>
-      <div class="actions">
-        <button class="primary" onclick={saveTokens}>Save secrets</button>
-        {#if tokensMessage}<span class="muted">{tokensMessage}</span>{/if}
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Agent config repo (~/.claude)</h2>
-      <div class="field">
-        <label for="configrepo">Config repo URL</label>
-        <input
-          id="configrepo"
-          placeholder="git@github.com:navarrotech/agents.git"
-          bind:value={settings.config_repo_url}
-        />
-        <p class="hint">
-          The workspace clones this into the agent's config dir, so your <code>AGENTS.md</code>,
-          docs, manuals, and skills travel with the deployment, no host mount required. Cloned over
-          SSH using your mounted key. Secrets (e.g. credentials) should stay out of the repo;
-          auth uses <code>CLAUDE_CODE_OAUTH_TOKEN</code>. Save, then Recreate to apply.
-        </p>
-      </div>
-      <div class="actions">
-        <button class="primary" onclick={save}>Save</button>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Backup & transfer</h2>
-      <p class="muted">
-        Export your settings, repositories, and sources as JSON to move a setup to another machine.
-        Secrets are never included. Import merges into the current config.
-      </p>
-      <div class="actions">
-        <button onclick={downloadExport}>Export JSON</button>
-        <label class="import-button">
-          Import JSON
-          <input type="file" accept="application/json" onchange={onImportFile} hidden />
-        </label>
-        {#if importMessage}<span class="muted">{importMessage}</span>{/if}
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Workspace</h2>
-      <p class="muted">
-        Restart re-runs the entrypoint; recreate rebuilds the container and reprovisions (config
-        repo + all repos + setup scripts). The persistent volume (repos + Claude conversation) is
-        preserved either way.
-      </p>
-      <div class="actions">
-        <button onclick={runRestart}>Restart</button>
-        <button onclick={runRecreate}>Recreate</button>
-        {#if workspaceMessage}<span class="muted">{workspaceMessage}</span>{/if}
-      </div>
-    </section>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Workspace</Card.Title>
+        <Card.Description>
+          Restart re-runs the entrypoint; recreate rebuilds the container and reprovisions (config
+          repo + all repos + setup scripts). The persistent volume (repos + Claude conversation) is
+          preserved either way.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content>
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={runRestart}>Restart</Button>
+          <Button variant="outline" onclick={runRecreate}>Recreate</Button>
+          {#if workspaceMessage}<span class="text-sm text-muted-foreground">{workspaceMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
   {:else}
-    <p class="muted">Loading…</p>
+    <p class="text-muted-foreground">Loading…</p>
   {/if}
 </div>
-
-<style>
-  .page {
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 1.2rem 1.4rem 3rem;
-  }
-
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1.1rem;
-    margin-bottom: 1.2rem;
-  }
-
-  .panel h2 {
-    margin-top: 0;
-    font-size: 1rem;
-  }
-
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 0.8rem;
-  }
-
-  .muted {
-    color: var(--muted);
-    font-size: 0.85rem;
-  }
-
-  .hint {
-    color: var(--muted);
-    font-size: 0.8rem;
-    line-height: 1.45;
-    margin: 0.4rem 0 0;
-  }
-
-  .hint code {
-    background: var(--panel-2);
-    padding: 0.05rem 0.3rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-  }
-
-  .custom-model {
-    margin-top: 0.4rem;
-  }
-
-  .import-button {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.4rem 0.8rem;
-    cursor: pointer;
-  }
-
-  .import-button:hover {
-    border-color: var(--accent);
-  }
-</style>
