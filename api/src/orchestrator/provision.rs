@@ -162,7 +162,8 @@ pub async fn prepare_branch(
     script.push_str(&format!(
         "git checkout \"{default}\"\n\
          git pull --ff-only origin \"{default}\" || true\n\
-         git checkout -B \"{branch}\" \"origin/{default}\"\n",
+         git checkout -B \"{branch}\" \"origin/{default}\"\n\
+         git submodule update --init --recursive || true\n",
         default = repo.default_branch,
         branch = branch,
     ));
@@ -192,7 +193,8 @@ pub async fn prepare_existing_branch(
     script.push_str(&format!(
         "git fetch origin\n\
          git checkout -B \"{branch}\" \"origin/{branch}\"\n\
-         git reset --hard \"origin/{branch}\"\n",
+         git reset --hard \"origin/{branch}\"\n\
+         git submodule update --init --recursive || true\n",
         branch = branch,
     ));
 
@@ -222,12 +224,14 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
         String::new()
     };
 
+    // Submodules are common across the user's orgs, so fetch them on update and
+    // pull them down on a fresh clone.
     format!(
         "if [ -d \"{dir}/.git\" ]; then\n\
-           git -C \"{dir}\" fetch origin || true\n\
+           git -C \"{dir}\" fetch origin --recurse-submodules || true\n\
            {update_setup}\
          else\n\
-           git clone \"{clone_url}\" \"{dir}\"\n\
+           git clone --recurse-submodules \"{clone_url}\" \"{dir}\"\n\
            {clone_setup}\
          fi\n\
          {claude_md}",

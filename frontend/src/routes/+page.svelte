@@ -197,8 +197,13 @@
         <span>{columns[column.key].length}</span>
       </header>
       <div
-        class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto p-3"
-        use:dndzone={{ items: columns[column.key], flipDurationMs: FLIP_MS }}
+        class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
+        use:dndzone={{
+          items: columns[column.key],
+          flipDurationMs: FLIP_MS,
+          dropTargetStyle: {},
+          dropTargetClasses: ['drop-active']
+        }}
         onconsider={(event) => handleConsider(column.key, event)}
         onfinalize={(event) => handleFinalize(column.key, event)}
       >

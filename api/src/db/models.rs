@@ -41,6 +41,8 @@ pub enum TaskColumn {
     InProgress,
     InReview,
     Done,
+    /// Parked: synced but deliberately set aside; the agent never pulls these.
+    Ignored,
 }
 
 /// Fine-grained operational state while a task is being worked.
