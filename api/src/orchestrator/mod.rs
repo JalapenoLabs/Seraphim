@@ -67,6 +67,7 @@ async fn sync_loop(state: AppState) {
 /// callable from the HTTP layer to power the "Check issues" button.
 pub async fn sync_once(state: &AppState) -> Result<()> {
     let repos = queries::list_repositories_to_sync(&state.db).await?;
+    let github = state.github().await?;
     let mut changed = false;
 
     for repo in &repos {
@@ -75,14 +76,13 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
             continue;
         };
 
-        let issues =
-            match git::list_open_issues(&state.github, owner, name, &repo.issue_labels).await {
-                Ok(issues) => issues,
-                Err(error) => {
-                    warn!(error = %error, repo = %repo.full_name, "failed to list issues");
-                    continue;
-                }
-            };
+        let issues = match git::list_open_issues(&github, owner, name, &repo.issue_labels).await {
+            Ok(issues) => issues,
+            Err(error) => {
+                warn!(error = %error, repo = %repo.full_name, "failed to list issues");
+                continue;
+            }
+        };
 
         for issue in issues {
             // New issues land at the end of Available; existing ones refresh.
@@ -187,8 +187,9 @@ async fn work_task(state: &AppState, task: Task) -> Result<()> {
     }
 
     // Deterministically detect the PR the agent opened for this branch.
+    let github = state.github().await?;
     let (owner, repo_name) = split_full_name(&repo.full_name)?;
-    let pull = git::find_open_pr_for_branch(&state.github, owner, repo_name, &branch).await?;
+    let pull = git::find_open_pr_for_branch(&github, owner, repo_name, &branch).await?;
     let Some(pull) = pull else {
         return fail(
             state,
@@ -243,6 +244,8 @@ async fn run_agent_turn(
         prompt,
         resume_session_id: settings.current_session_id.clone(),
         model: settings.claude_model.clone(),
+        oauth_token: queries::get_claude_token(&state.db).await?,
+        github_token: queries::get_github_token(&state.db).await?,
     };
 
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));
@@ -328,6 +331,10 @@ async fn review_loop(state: AppState) {
 async fn review_once(state: &AppState) -> Result<()> {
     let settings = queries::get_settings(&state.db).await?;
     let candidates = queries::list_review_candidates(&state.db).await?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let github = state.github().await?;
 
     for task in candidates {
         let Some(repo_id) = task.repo_id else {
@@ -344,20 +351,19 @@ async fn review_once(state: &AppState) -> Result<()> {
 
         let Some(branch) = &task.branch else { continue };
         let (owner, repo_name) = split_full_name(&repo.full_name)?;
-        let Some(pull) =
-            git::find_open_pr_for_branch(&state.github, owner, repo_name, branch).await?
+        let Some(pull) = git::find_open_pr_for_branch(&github, owner, repo_name, branch).await?
         else {
             continue;
         };
 
-        if !git::checks_green(&state.github, owner, repo_name, &pull.head_sha).await? {
+        if !git::checks_green(&github, owner, repo_name, &pull.head_sha).await? {
             continue; // CI still running or red; try again next tick.
         }
 
         queries::set_task_status(&state.db, task.id, TaskStatus::Merging).await?;
         state.notify_board();
 
-        git::squash_merge(&state.github, owner, repo_name, pull.number).await?;
+        git::squash_merge(&github, owner, repo_name, pull.number).await?;
         queries::finish_task(&state.db, task.id, TaskColumn::Done, TaskStatus::Done).await?;
         state.notify_board();
         info!(task_id = %task.id, "auto-merged and marked done");

@@ -97,7 +97,8 @@ pub async fn import_org(
     Json(body): Json<ImportOrgRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let settings = queries::get_settings(&state.db).await?;
-    let discovered = git::list_org_repos(&state.github, &body.owner).await?;
+    let github = state.github().await?;
+    let discovered = git::list_org_repos(&github, &body.owner).await?;
 
     let mut imported = 0_usize;
     for repo in &discovered {

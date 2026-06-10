@@ -46,6 +46,28 @@ pub async fn update(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TokensRequest {
+    pub claude_oauth_token: Option<String>,
+    pub github_token: Option<String>,
+}
+
+/// `POST /api/v1/settings/tokens` - store the app tokens (write-only). Empty
+/// values are ignored so you can set one without resending the other, and the
+/// raw tokens are never returned by the API.
+pub async fn set_tokens(
+    State(state): State<AppState>,
+    Json(body): Json<TokensRequest>,
+) -> ApiResult<Json<Settings>> {
+    queries::set_tokens(
+        &state.db,
+        body.claude_oauth_token.filter(|token| !token.is_empty()),
+        body.github_token.filter(|token| !token.is_empty()),
+    )
+    .await?;
+    Ok(Json(queries::get_settings(&state.db).await?))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PauseRequest {
     pub paused: bool,
 }

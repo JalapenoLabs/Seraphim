@@ -34,8 +34,8 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      GH_TOKEN: ${GH_TOKEN}
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      # Claude OAuth + GitHub tokens are stored in the database (Settings UI),
+      # not the environment, so a host .env scanner can't harvest them.
       CLAUDE_MODEL: ${CLAUDE_MODEL}
       ORG_NAME: ${ORG_NAME}
       API_BIND: 0.0.0.0:27182
@@ -82,9 +82,8 @@ services:
     image: seraphim-workspace:latest
     restart: unless-stopped
     environment:
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
-      GH_TOKEN: ${GH_TOKEN}
-      # Writable, persistent config dir seeded from the read-only host mount.
+      # Tokens are injected per-exec by the API from the database, not baked in.
+      # Writable, persistent config dir for the agent's Claude session/config.
       CLAUDE_CONFIG_DIR: /workspace/.claude
     volumes:
       # Persistent agent home: cloned repos + the single Claude conversation.

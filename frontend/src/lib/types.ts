@@ -51,6 +51,8 @@ export type Settings = {
   default_branch_template: string
   current_session_id: string | null
   updated_at: string
+  claude_token_set: boolean
+  github_token_set: boolean
 }
 
 export type Repository = {

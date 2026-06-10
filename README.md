@@ -43,31 +43,30 @@ streaming its JSON output back to the UI.
 
 ## Setup
 
-1. **Mint a Claude subscription token** on the host (no API key needed):
-   ```
-   claude setup-token
-   ```
-   Copy the token into `CLAUDE_CODE_OAUTH_TOKEN` in your `.env`.
-
-2. **Configure the environment**:
+1. **Configure the environment**:
    ```
    cp .env.example .env
    ```
-   Fill in `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `CLAUDE_HOME` (full path to your
-   `~/.claude`), and optionally `TS_AUTHKEY` for Tailscale.
+   Fill in `SSH_HOME` (full path to your host `~/.ssh`) and optionally
+   `TS_AUTHKEY` for Tailscale. The Claude and GitHub tokens do **not** go here.
 
-3. **Bring it up**:
+2. **Bring it up**:
    ```
    docker compose up -d --build
    ```
    (or `scripts/start.sh`)
 
-4. Open the UI on the host (`http://localhost:31415`) or over your tailnet
+3. Open the UI on the host (`http://localhost:31415`) or over your tailnet
    (`https://<TS_HOSTNAME>.<your-tailnet>.ts.net`).
+
+4. **Add your secrets in the UI** (Settings → Secrets), so they live in the
+   database, not on disk:
+   - Claude OAuth token: run `claude setup-token` on the host and paste the token.
+   - GitHub token: a PAT with repo + issues scope.
 
 ## Using it
 
-- Configure your repositories and a GitHub issue source in **Settings**.
+- Configure your repositories (and tick **Sync issues**) in **Settings** / **Repositories**.
 - Synced issues land in the **Available** column.
 - Drag the issues you want worked into **To Do** and order them top-to-bottom.
 - The agent auto-pulls the top card, works it, and opens a PR (card moves to

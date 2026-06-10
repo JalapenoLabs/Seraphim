@@ -74,6 +74,10 @@ pub struct Settings {
     pub default_branch_template: String,
     pub current_session_id: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// Whether a Claude OAuth token is stored (the token itself is never sent).
+    pub claude_token_set: bool,
+    /// Whether a GitHub token is stored (the token itself is never sent).
+    pub github_token_set: bool,
 }
 
 /// A repository the agent is allowed to clone and work in.

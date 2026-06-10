@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sync", post(repos::sync))
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
+        .route("/settings/tokens", post(settings::set_tokens))
         .route("/workspace/restart", post(workspace::restart))
         .route("/workspace/recreate", post(workspace::recreate))
         .route("/workspace/provision", post(workspace::provision))

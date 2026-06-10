@@ -27,7 +27,8 @@ the mounted SSH keys, never by code.
 - **Orchestration:** Docker Compose is the primary deployment method.
 - **Exposure:** Tailscale sidecar (`tailscale serve`); `scripts/{start,stop,restart}.sh` wrappers.
 - **Hosts:** Windows 11 + Linux only (all services are Linux containers). No macOS.
-- **Claude auth:** subscription only, **no API key**. Headless via `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Claude auth:** subscription only, **no API key**. Token from `claude setup-token`.
+- **Secrets (Claude OAuth + GitHub tokens):** stored in the **database** (Settings UI), never in `.env`; injected into the agent's execs at runtime.
 - **Agent trigger:** auto-pulls the top of **To Do** when idle (global pause switch exists).
 - **Workspace model:** all enabled repos cloned flat under `/workspace`; Claude spawned at `/workspace` for cross-repo work.
 - **`~/.claude` provisioning:** cloned from a **config repo** into the container (no host mount).
@@ -101,7 +102,9 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **`settings`** — single row (`id=1`): org profile, `global_instructions`,
   `default_review_policy`, `agent_paused`, `claude_model`, `base_setup_script`
   (= environment setup), `config_repo_url`, `default_branch_template`,
-  `current_session_id` (the one shared Claude session).
+  `current_session_id` (the one shared Claude session), and the secret columns
+  `claude_oauth_token` / `github_token` (the API only ever exposes
+  `*_token_set` booleans, never the raw values; write via `POST /settings/tokens`).
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
   `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this
@@ -170,11 +173,15 @@ docker compose logs api --tail 50
 docker compose down           # stop, keep volumes (scripts/stop.sh)
 ```
 
-`.env` (gitignored) holds secrets + `SSH_HOME` (full path to host `~/.ssh`).
-Migrations are **embedded at compile time** (`sqlx::migrate!`) and run on API
-boot. The `~/.claude` config repo is set in the UI (Settings → Config repo), not
-in `.env`. The workspace container is created by Compose; the API can
-`restart`/`recreate`/`provision` it via bollard.
+`.env` (gitignored) holds the Postgres creds (bootstrap), ports, `SSH_HOME`, and
+`TS_AUTHKEY`. The **Claude OAuth + GitHub tokens are NOT in `.env`** — set them in
+the Settings UI (stored in the DB; a worm scanning `.env` files can't harvest
+them). The Postgres password stays in `.env` because the API needs it to connect
+before it can read anything; for at-rest protection use host disk encryption
+(BitLocker / LUKS), which Postgres does not do itself. The `octocrab` client is
+built on demand from the DB token, and the agent's `claude`/`git` execs get the
+tokens injected as env at call time. Migrations are embedded at compile time
+(`sqlx::migrate!`) and run on API boot.
 
 ## Local dev / checks (must pass before committing)
 

@@ -14,11 +14,15 @@ use super::models::{
 
 // --- Settings ----------------------------------------------------------------
 
-/// Every settings column, for SELECT/RETURNING reuse.
+/// The settings fields exposed to the app, for SELECT/RETURNING reuse. The raw
+/// token columns are deliberately excluded; only "is it set" booleans are
+/// surfaced so secrets never leave the database via the API.
 const SETTINGS_COLUMNS: &str =
     "org_name, global_instructions, default_review_policy, agent_paused, \
      claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
-     default_branch_template, current_session_id, updated_at";
+     default_branch_template, current_session_id, updated_at, \
+     (claude_oauth_token <> '') AS claude_token_set, \
+     (github_token <> '') AS github_token_set";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -77,6 +81,40 @@ pub async fn set_current_session_id(pool: &PgPool, session_id: Option<&str>) -> 
         .bind(session_id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// The stored Claude OAuth token (empty string if unset). Internal use only.
+pub async fn get_claude_token(pool: &PgPool) -> sqlx::Result<String> {
+    sqlx::query_scalar("SELECT claude_oauth_token FROM settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+}
+
+/// The stored GitHub token (empty string if unset). Internal use only.
+pub async fn get_github_token(pool: &PgPool) -> sqlx::Result<String> {
+    sqlx::query_scalar("SELECT github_token FROM settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+}
+
+/// Writes the app tokens; `None` leaves the existing value untouched (so the UI
+/// can update one without resending the other).
+pub async fn set_tokens(
+    pool: &PgPool,
+    claude_oauth_token: Option<String>,
+    github_token: Option<String>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE settings SET \
+         claude_oauth_token = COALESCE($1, claude_oauth_token), \
+         github_token = COALESCE($2, github_token), \
+         updated_at = now() WHERE id = 1",
+    )
+    .bind(claude_oauth_token)
+    .bind(github_token)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

@@ -10,6 +10,7 @@
     importConfig,
     recreateWorkspace,
     restartWorkspace,
+    setTokens,
     updateSettings
   } from '$lib/api'
 
@@ -19,6 +20,11 @@
   let savedAt = $state<string | null>(null)
   let workspaceMessage = $state<string | null>(null)
   let importMessage = $state<string | null>(null)
+
+  // Write-only secret inputs; never populated from the server.
+  let claudeTokenInput = $state('')
+  let githubTokenInput = $state('')
+  let tokensMessage = $state<string | null>(null)
 
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
   let modelChoice = $state<string>(KNOWN_MODELS[0])
@@ -52,6 +58,19 @@
       default_branch_template: settings.default_branch_template
     })
     savedAt = new Date().toLocaleTimeString()
+  }
+
+  async function saveTokens() {
+    if (!claudeTokenInput.trim() && !githubTokenInput.trim()) {
+      return
+    }
+    settings = await setTokens({
+      claude_oauth_token: claudeTokenInput.trim() || undefined,
+      github_token: githubTokenInput.trim() || undefined
+    })
+    claudeTokenInput = ''
+    githubTokenInput = ''
+    tokensMessage = 'Saved to the database.'
   }
 
   async function runRestart() {
@@ -159,6 +178,48 @@
       <div class="actions">
         <button class="primary" onclick={save}>Save</button>
         {#if savedAt}<span class="muted">Saved at {savedAt}</span>{/if}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Secrets</h2>
+      <p class="hint">
+        Stored in the database, never in <code>.env</code> and never returned by the API. Injected
+        into the agent only at runtime. Leave a field blank to keep the existing value.
+      </p>
+      <div class="field">
+        <label for="claude-token">
+          Claude OAuth token
+          <span class="badge {settings.claude_token_set ? 'done' : ''}">
+            {settings.claude_token_set ? 'configured' : 'not set'}
+          </span>
+        </label>
+        <input
+          id="claude-token"
+          type="password"
+          autocomplete="off"
+          placeholder="from `claude setup-token`"
+          bind:value={claudeTokenInput}
+        />
+      </div>
+      <div class="field">
+        <label for="gh-token">
+          GitHub token
+          <span class="badge {settings.github_token_set ? 'done' : ''}">
+            {settings.github_token_set ? 'configured' : 'not set'}
+          </span>
+        </label>
+        <input
+          id="gh-token"
+          type="password"
+          autocomplete="off"
+          placeholder="PAT with repo + issues scope"
+          bind:value={githubTokenInput}
+        />
+      </div>
+      <div class="actions">
+        <button class="primary" onclick={saveTokens}>Save secrets</button>
+        {#if tokensMessage}<span class="muted">{tokensMessage}</span>{/if}
       </div>
     </section>
 

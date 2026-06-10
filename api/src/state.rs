@@ -1,14 +1,13 @@
 //! Shared application state and the server-sent-event broadcast bus.
 
-use std::sync::Arc;
-
+use eyre::Result;
 use octocrab::Octocrab;
 use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::db::queries;
 use crate::docker::Workspace;
 
 /// How many pending server events a slow SSE client may lag before it is
@@ -32,22 +31,31 @@ pub enum ServerEvent {
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
-    pub config: Arc<Config>,
     pub workspace: Workspace,
-    pub github: Octocrab,
     pub events: broadcast::Sender<ServerEvent>,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, config: Config, workspace: Workspace, github: Octocrab) -> Self {
+    pub fn new(db: PgPool, workspace: Workspace) -> Self {
         let (events, _receiver) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             db,
-            config: Arc::new(config),
             workspace,
-            github,
             events,
         }
+    }
+
+    /// Builds a GitHub client from the token stored in the database. Built on
+    /// demand so a token added in the UI takes effect without a restart.
+    pub async fn github(&self) -> Result<Octocrab> {
+        let token = queries::get_github_token(&self.db).await?;
+        let builder = Octocrab::builder();
+        let builder = if token.is_empty() {
+            builder
+        } else {
+            builder.personal_token(token)
+        };
+        builder.build().map_err(Into::into)
     }
 
     /// Signals that the board changed; ignores the error when no clients listen.

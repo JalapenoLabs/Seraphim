@@ -159,12 +159,16 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
 
 /// Runs a prep script in the workspace, surfacing a non-zero exit as an error.
 async fn run(state: &AppState, script: &str) -> Result<()> {
-    let env = vec![format!("GH_TOKEN={}", state.config.gh_token)];
+    let github_token = queries::get_github_token(&state.db).await?;
+    // Wire git's credential helper for HTTPS remotes (GH_TOKEN is in this exec's
+    // env); SSH remotes use the mounted key instead.
+    let full_script = format!("gh auth setup-git >/dev/null 2>&1 || true\n{script}");
+    let env = vec![format!("GH_TOKEN={github_token}")];
     let output = state
         .workspace
         .exec_capture(
             "/workspace",
-            vec!["bash".to_string(), "-lc".to_string(), script.to_string()],
+            vec!["bash".to_string(), "-lc".to_string(), full_script],
             env,
         )
         .await?;

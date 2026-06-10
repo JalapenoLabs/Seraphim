@@ -96,6 +96,15 @@ export function setPaused(paused: boolean) {
   return apiClient.post('settings/pause', { json: { paused } }).json<Settings>()
 }
 
+export type TokensRequest = {
+  claude_oauth_token?: string
+  github_token?: string
+}
+
+export function setTokens(body: TokensRequest) {
+  return apiClient.post('settings/tokens', { json: body }).json<Settings>()
+}
+
 export function restartWorkspace() {
   return apiClient.post('workspace/restart').json()
 }

@@ -26,6 +26,10 @@ pub struct TurnArgs {
     pub resume_session_id: Option<String>,
     /// Model id, e.g. `claude-opus-4-8[1m]`.
     pub model: String,
+    /// Subscription OAuth token, injected into the exec env (not the container).
+    pub oauth_token: String,
+    /// GitHub token, so the agent's `gh`/`git` are authed for this turn.
+    pub github_token: String,
 }
 
 /// Builds the `claude` argv for a headless, fully-autonomous turn.
@@ -65,6 +69,12 @@ pub fn run_turn(docker: &Docker, args: TurnArgs) -> impl Stream<Item = Result<Ag
                 CreateExecOptions {
                     cmd: Some(build_command(&args)),
                     working_dir: Some(args.working_dir.clone()),
+                    // Secrets are injected per-exec from the database, never baked
+                    // into the container's environment.
+                    env: Some(vec![
+                        format!("CLAUDE_CODE_OAUTH_TOKEN={}", args.oauth_token),
+                        format!("GH_TOKEN={}", args.github_token),
+                    ]),
                     // Claude must not run as root with bypassPermissions.
                     user: Some("node".to_string()),
                     attach_stdout: Some(true),
@@ -124,6 +134,8 @@ mod tests {
             prompt: "do the thing".to_string(),
             resume_session_id: Some("sess-1".to_string()),
             model: "claude-opus-4-8[1m]".to_string(),
+            oauth_token: "tok".to_string(),
+            github_token: "gh".to_string(),
         };
         let command = build_command(&args);
         assert!(command.contains(&"--resume".to_string()));
@@ -140,6 +152,8 @@ mod tests {
             prompt: "start".to_string(),
             resume_session_id: None,
             model: "claude-opus-4-8[1m]".to_string(),
+            oauth_token: "tok".to_string(),
+            github_token: "gh".to_string(),
         };
         let command = build_command(&args);
         assert!(!command.contains(&"--resume".to_string()));

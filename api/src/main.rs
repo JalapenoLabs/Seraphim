@@ -46,9 +46,7 @@ async fn main() -> Result<()> {
         settings.workspace_image_tag.clone(),
     )?;
 
-    let github = build_github_client(&config)?;
-
-    let state = AppState::new(db, config.clone(), workspace, github);
+    let state = AppState::new(db, workspace);
     orchestrator::spawn(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&config.api_bind)
@@ -61,17 +59,6 @@ async fn main() -> Result<()> {
         .wrap_err("server error")?;
 
     Ok(())
-}
-
-/// Builds the GitHub client, authenticated when a token is configured.
-fn build_github_client(config: &Config) -> Result<octocrab::Octocrab> {
-    let builder = octocrab::Octocrab::builder();
-    let builder = if config.gh_token.is_empty() {
-        builder
-    } else {
-        builder.personal_token(config.gh_token.clone())
-    };
-    builder.build().wrap_err("failed to build GitHub client")
 }
 
 /// Seeds the org name and default model from the environment on first run, while
