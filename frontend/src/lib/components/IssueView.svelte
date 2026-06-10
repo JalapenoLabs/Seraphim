@@ -17,6 +17,7 @@
 
   import { addIssueComment, getIssueThread, setIssueState } from '../api'
   import Markdown from './Markdown.svelte'
+  import SourceIcon from './SourceIcon.svelte'
   import { Button, buttonVariants } from './ui/button'
   import { Textarea } from './ui/textarea'
   import * as DropdownMenu from './ui/dropdown-menu'
@@ -159,9 +160,12 @@
   <!-- Issue header -->
   <header class="flex-none border-b border-border pb-4">
     <div class="flex items-start justify-between gap-4">
-      <h1 class="min-w-0 text-2xl font-semibold leading-tight">
-        {(thread?.issue.title ?? task.title)}
-        <span class="font-normal text-muted-foreground">#{task.external_id}</span>
+      <h1 class="flex min-w-0 items-center gap-2 text-2xl font-semibold leading-tight">
+        <SourceIcon source={task.source_kind} class="size-5 flex-none text-muted-foreground" />
+        <span class="min-w-0">
+          {(thread?.issue.title ?? task.title)}
+          <span class="font-normal text-muted-foreground">#{task.external_id}</span>
+        </span>
       </h1>
       <div class="flex flex-none items-center gap-2">
         {#if task.url}

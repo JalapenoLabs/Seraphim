@@ -6,6 +6,7 @@
 
   import { STATUS_BADGE, STATUS_LABELS } from '../types'
   import { Badge } from './ui/badge'
+  import SourceIcon from './SourceIcon.svelte'
 
   let {
     task,
@@ -33,6 +34,7 @@
   <div class="flex items-center justify-between gap-2">
     <span class="flex min-w-0 items-center gap-1 truncate text-xs tabular-nums text-muted-foreground">
       {#if task.hold}<Pause class="size-3 flex-none" aria-label="On hold" />{/if}
+      <SourceIcon source={task.source_kind} class="size-3.5 flex-none" />
       {#if repoShort}<span class="font-semibold text-primary" title={repoName}>{repoShort}</span> · {/if}#{task.external_id}
     </span>
     <Badge variant="outline" class={STATUS_BADGE[task.status]}>
