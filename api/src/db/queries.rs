@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use super::models::{
     AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, PendingQuestion, Question,
-    QuestionOption, QuestionStatus, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn,
-    TaskStatus, Turn,
+    QuestionOption, QuestionStatus, Repository, ReviewPolicy, Settings, SourceKind, Task,
+    TaskColumn, TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
