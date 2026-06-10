@@ -104,7 +104,13 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (= environment setup), `config_repo_url`, `default_branch_template`,
   `current_session_id` (the one shared Claude session), and the secret columns
   `claude_oauth_token` / `github_token` (the API only ever exposes
-  `*_token_set` booleans, never the raw values; write via `POST /settings/tokens`).
+  `*_token_set` booleans plus a masked `*_token_preview`, never the raw values;
+  write via `POST /settings/tokens`).
+- **`environment_variables`** — user-defined `key` / `value` / `is_secret` rows,
+  injected into the agent's turn and setup execs at runtime. A secret value is
+  scrubbed out of Claude's output before anything is persisted or streamed
+  (`secrets::Scrubber`), and the API only ever returns it masked. CRUD via
+  `GET`/`PUT /settings/env`.
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
   `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this

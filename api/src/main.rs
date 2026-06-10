@@ -11,6 +11,7 @@ mod docker;
 mod git;
 mod http;
 mod orchestrator;
+mod secrets;
 mod state;
 
 use eyre::{Context, Result};
