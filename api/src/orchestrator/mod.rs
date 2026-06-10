@@ -504,6 +504,23 @@ async fn run_agent_turn(
         env,
     };
 
+    // Clear any claude process leaked by a previously aborted turn. The agent is
+    // single-threaded, so none should legitimately be running; a leftover would
+    // otherwise contend on the same shared session. The `[c]` keeps pkill from
+    // matching its own command line. Best-effort.
+    let _ = state
+        .workspace
+        .exec_capture(
+            "/workspace",
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "pkill -9 -f '[c]laude -p' || true".to_string(),
+            ],
+            vec![],
+        )
+        .await;
+
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));
     let mut seq = 0_i32;
     let mut session_id = settings.current_session_id.clone();

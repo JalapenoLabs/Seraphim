@@ -688,13 +688,15 @@ pub async fn finish_turn(
     total_cost_usd: Option<f64>,
     session_id: Option<&str>,
 ) -> sqlx::Result<()> {
+    // Strip NUL bytes; Postgres TEXT can't store them either.
+    let result_text = result_text.map(|text| text.replace('\0', ""));
     sqlx::query(
         "UPDATE turns SET status = $2, result_text = $3, total_cost_usd = $4, \
          session_id = COALESCE($5, session_id), finished_at = now() WHERE id = $1",
     )
     .bind(id)
     .bind(status)
-    .bind(result_text)
+    .bind(result_text.as_deref())
     .bind(total_cost_usd)
     .bind(session_id)
     .execute(pool)
@@ -709,8 +711,12 @@ pub async fn append_event(
     turn_id: Uuid,
     seq: i32,
     event_type: &str,
-    payload: Value,
+    mut payload: Value,
 ) -> sqlx::Result<()> {
+    // Postgres JSONB rejects the NUL escape ( ), so a tool result carrying a
+    // null byte (e.g. binary output) would otherwise fail the insert and abort
+    // the whole turn. Strip NULs from every string first.
+    strip_nul(&mut payload);
     sqlx::query("INSERT INTO events (turn_id, seq, type, payload) VALUES ($1, $2, $3, $4)")
         .bind(turn_id)
         .bind(seq)
@@ -719,6 +725,24 @@ pub async fn append_event(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Removes NUL (` `) characters from every string in a JSON value.
+///
+/// Postgres JSONB (and TEXT) cannot store NUL, and Claude's tool output can
+/// carry one (binary reads, odd command output). Dropping them keeps the event
+/// persistable without otherwise altering the content.
+fn strip_nul(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            if text.contains('\0') {
+                text.retain(|character| character != '\0');
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_nul),
+        Value::Object(map) => map.values_mut().for_each(strip_nul),
+        _ => {}
+    }
 }
 
 /// All events for a task in order, joined across its turns. Powers the task
