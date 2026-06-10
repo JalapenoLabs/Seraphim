@@ -318,7 +318,9 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
         queries::reset_ci_fix_attempts(&state.db, task.id).await?;
     }
 
-    // The card stays in In Review; only the status reflects the active fix.
+    // While the turn runs the card sits in In Progress, like any actively-worked
+    // task, then returns to In Review when it settles below.
+    queries::move_task(&state.db, task.id, TaskColumn::InProgress, task.position).await?;
     queries::set_task_status(&state.db, task.id, TaskStatus::Working).await?;
     state.notify_board();
 
@@ -388,6 +390,7 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
     }
 
     // Fix pushed: back to review so the loop re-checks CI on the new commit.
+    queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
     state.notify_board();
     info!(task_id = %task.id, attempt, "pushed CI fix; awaiting re-check");
@@ -643,6 +646,9 @@ async fn fail(state: &AppState, task: &Task, message: &str) -> Result<()> {
 async fn block(state: &AppState, task: &Task, message: &str) -> Result<()> {
     warn!(task_id = %task.id, message, "task CI-blocked");
     let trimmed: String = message.trim().chars().take(800).collect();
+    // The card may have been in In Progress while the turn ran; settle it back to
+    // In Review for a human.
+    queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     queries::block_task_ci(&state.db, task.id, &trimmed).await?;
     state.notify_board();
     Ok(())
