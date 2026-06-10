@@ -13,6 +13,7 @@ mod availability;
 mod network;
 mod prompt;
 mod provision;
+mod usage;
 
 pub use provision::provision_workspace;
 
@@ -201,6 +202,15 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
     let settings = queries::get_settings(&state.db).await?;
     if settings.agent_paused {
         return Ok(None);
+    }
+    // Automatic usage-limit pause: hold all new work until the subscription
+    // window resets, then clear the pause and resume pulling.
+    if let Some(until) = settings.usage_paused_until {
+        if Utc::now() < until {
+            return Ok(None);
+        }
+        queries::set_usage_paused_until(&state.db, None).await?;
+        state.notify_board();
     }
     // Hard halt: a configured config repo that failed to set up means the agent
     // is missing its instructions/skills. Refuse to pull work until it's fixed.
@@ -535,6 +545,9 @@ async fn run_agent_turn(
     let mut result_text: Option<String> = None;
     let mut total_cost: Option<f64> = None;
     let mut error_message: Option<String> = None;
+    // The reset time of the last usage pause we applied this turn, so repeated
+    // rate-limit notices don't re-write the same value.
+    let mut usage_pause_reset: Option<i64> = None;
 
     while let Some(item) = stream.next().await {
         let event = match item {
@@ -562,6 +575,30 @@ async fn run_agent_turn(
                     .clone()
                     .unwrap_or_else(|| "the agent reported an error".to_string());
                 error_message = Some(scrubber.scrub_text(&message));
+            }
+        }
+
+        // Watch the periodic `rate_limit_event` notices: once a usage window is
+        // (nearly) exhausted, park new work until it resets. This never aborts the
+        // current task - the agent loop only consults the pause before the *next*
+        // pull - so the running task always finishes first.
+        if settings.usage_limit_pause_enabled
+            && event.raw.get("type").and_then(serde_json::Value::as_str) == Some("rate_limit_event")
+        {
+            if let Some(info) = event.raw.get("rate_limit_info") {
+                if let Some(reset) = usage::pause_until(info, settings.usage_limit_threshold) {
+                    if usage_pause_reset != Some(reset) {
+                        if let Some(until) = chrono::DateTime::from_timestamp(reset, 0) {
+                            queries::set_usage_paused_until(&state.db, Some(until)).await?;
+                            state.notify_board();
+                            usage_pause_reset = Some(reset);
+                            warn!(
+                                resets_at = %until,
+                                "subscription usage limit reached; pausing new work until reset"
+                            );
+                        }
+                    }
+                }
             }
         }
 

@@ -153,6 +153,16 @@
   </Alert.Root>
 {/if}
 
+{#if settings?.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
+  <Alert.Root class="mx-6 mt-4 border-warning/40">
+    <Alert.Title>Paused: subscription usage limit reached.</Alert.Title>
+    <Alert.Description>
+      New work is on hold until the usage window resets at
+      {new Date(settings.usage_paused_until).toLocaleString()}. The agent resumes automatically.
+    </Alert.Description>
+  </Alert.Root>
+{/if}
+
 <div class="flex items-center justify-between px-6 pb-1 pt-4">
   <div class="flex items-baseline gap-2">
     {#if settings}

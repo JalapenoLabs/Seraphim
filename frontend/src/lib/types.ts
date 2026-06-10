@@ -112,6 +112,12 @@ export type Settings = {
   network_access_domains: string[]
   // For "custom": also allow the built-in package-manager/registry domains.
   network_access_include_defaults: boolean
+  // Auto-pause new work when the subscription usage limit is (nearly) hit.
+  usage_limit_pause_enabled: boolean
+  // Utilization percent (0-100) at which to auto-pause.
+  usage_limit_threshold: number
+  // While set and in the future, the agent is auto-paused for usage (ISO string).
+  usage_paused_until: string | null
   // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null
