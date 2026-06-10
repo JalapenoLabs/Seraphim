@@ -2,15 +2,19 @@
   import type { AgentEvent, Task } from '$lib/types'
 
   import { onMount, onDestroy, tick } from 'svelte'
+  import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
+  import { Pause, Play } from '@lucide/svelte'
 
-  import { getTask } from '$lib/api'
+  import { getTask, setTaskHold } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
   import { Badge } from '$lib/components/ui/badge'
   import * as Alert from '$lib/components/ui/alert'
+  import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import * as Resizable from '$lib/components/ui/resizable'
+  import { buttonVariants } from '$lib/components/ui/button'
   import IssueView from '$lib/components/IssueView.svelte'
 
   const taskId = $page.params.id ?? ''
@@ -118,6 +122,17 @@
     events = detail.events.map((event) => ({ type: event.type, payload: event.payload }))
   }
 
+  // Hold toggle, behind a confirmation so it's a deliberate action.
+  async function confirmHold() {
+    if (!task) {
+      return
+    }
+    const held = !task.hold
+    await setTaskHold(task.id, held)
+    await load()
+    toast.success(held ? 'Task held — the agent will skip it' : 'Hold released')
+  }
+
   // The most telling argument of a tool call, so `Bash(cargo build)` reads at a
   // glance instead of a wall of JSON. Falls back to the whole input object.
   function toolSummary(payload: Record<string, unknown>): string {
@@ -194,9 +209,44 @@
         <div class="ml-3 flex h-full min-w-0 flex-col rounded-lg border border-border bg-card">
           <header class="flex items-center gap-2 border-b border-border px-4 py-2.5">
             <span class="text-xs uppercase tracking-wide text-muted-foreground">Agent activity</span>
-            <Badge variant="outline" class="ml-auto {STATUS_BADGE[task.status]}">
-              {STATUS_LABELS[task.status] ?? task.status}
-            </Badge>
+            <div class="ml-auto flex items-center gap-2">
+              <Badge variant="outline" class={STATUS_BADGE[task.status]}>
+                {STATUS_LABELS[task.status] ?? task.status}
+              </Badge>
+              <AlertDialog.Root>
+                <AlertDialog.Trigger class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                  {#if task.hold}
+                    <Play class="size-3.5" /> Release
+                  {:else}
+                    <Pause class="size-3.5" /> Hold
+                  {/if}
+                </AlertDialog.Trigger>
+                <AlertDialog.Content>
+                  <AlertDialog.Header>
+                    <AlertDialog.Title>
+                      {task.hold ? 'Release this hold?' : 'Hold this task?'}
+                    </AlertDialog.Title>
+                    <AlertDialog.Description>
+                      {#if task.hold}
+                        The agent will be able to pick this card up again from its current position
+                        in the queue.
+                      {:else}
+                        Holding parks this card in place. The agent will skip it when pulling work
+                        (the To Do queue, CI fixes, and idle revisits) and move on to the next
+                        eligible card. A task already in progress isn't interrupted, and you can
+                        release the hold anytime.
+                      {/if}
+                    </AlertDialog.Description>
+                  </AlertDialog.Header>
+                  <AlertDialog.Footer>
+                    <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+                    <AlertDialog.Action onclick={confirmHold}>
+                      {task.hold ? 'Release hold' : 'Hold task'}
+                    </AlertDialog.Action>
+                  </AlertDialog.Footer>
+                </AlertDialog.Content>
+              </AlertDialog.Root>
+            </div>
           </header>
           {#if task.error}
             <Alert.Root variant="destructive" class="m-3 mb-0">
