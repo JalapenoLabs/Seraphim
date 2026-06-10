@@ -158,11 +158,17 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    them into **Available** (never clobbers human-set column/position). Tasks are
    unique per `(repo_id, source_kind, external_id)`. Callable via `POST /sync`.
 2. **agent** — single-threaded: when not paused, inside the availability schedule,
-   and idle, pulls top of **To Do**, prepares the branch, drives one Claude turn,
-   detects the PR, moves to **In Review**. One task awaited to completion before
-   the next (no overlap).
-3. **review** — for `auto_squash_merge` repos, polls CI and squash-merges when
-   green → **Done**.
+   and idle, picks work by priority — (a) a PR with failing CI to fix
+   (`ci_failing`), (b) top of **To Do** (fresh issue → branch → Claude turn →
+   detect PR → **In Review**), then (c) when nothing else is queued, *revisit* a
+   PR it gave up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min),
+   trying once more to clear a merge conflict (merge the base in) or fix CI. One
+   task awaited to completion before the next (no overlap).
+3. **review** — watches every open PR's CI: green → squash-merge
+   (`auto_squash_merge` repos) → **Done**, else wait; red → hand back to the
+   agent, bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for
+   a human. A failed merge (e.g. base conflict) also parks it `ci_blocked` rather
+   than retrying forever.
 
 ## Ports & URLs
 

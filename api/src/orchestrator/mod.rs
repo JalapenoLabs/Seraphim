@@ -49,6 +49,10 @@ const PR_DETECT_DELAY: Duration = Duration::from_secs(3);
 /// for a human. Bounds thrash when a failure is unfixable or out of scope.
 const MAX_CI_FIX_ATTEMPTS: i32 = 3;
 
+/// How long a blocked PR rests before the idle agent circles back to retry it,
+/// so a genuinely stuck PR is revisited periodically rather than in a tight loop.
+const REVISIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+
 /// What kind of work a pulled card needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkMode {
@@ -56,6 +60,8 @@ enum WorkMode {
     Fresh,
     /// An open PR with failing CI: re-engage on its branch to fix the checks.
     FixCi,
+    /// A PR the agent gave up on (CI or merge conflict), retried while idle.
+    Revisit,
 }
 
 /// Launches the background loops and an initial workspace provision. Returns
@@ -200,6 +206,12 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
     if let Some(task) = queries::pick_next_todo(&state.db).await? {
         return Ok(Some((task, WorkMode::Fresh)));
     }
+    // Idle: circle back to a PR we gave up on and try once more (cooldown-gated).
+    if let Some(task) =
+        queries::pick_next_revisit(&state.db, REVISIT_COOLDOWN.as_secs() as i64).await?
+    {
+        return Ok(Some((task, WorkMode::Revisit)));
+    }
     Ok(None)
 }
 
@@ -207,7 +219,8 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
 async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
     match mode {
         WorkMode::Fresh => work_fresh(state, task).await,
-        WorkMode::FixCi => work_ci_fix(state, task).await,
+        WorkMode::FixCi => work_ci_fix(state, task, false).await,
+        WorkMode::Revisit => work_ci_fix(state, task, true).await,
     }
 }
 
@@ -275,15 +288,17 @@ async fn work_fresh(state: &AppState, task: Task) -> Result<()> {
     Ok(())
 }
 
-/// Re-engages the agent on an open PR whose CI is failing.
+/// Re-engages the agent on an open PR that's failing CI (`revisit = false`) or
+/// one it had given up on and is being retried while idle (`revisit = true`).
 ///
-/// Checks out the PR's existing branch, runs one fix turn (with the failing
-/// check names in the prompt), and decides what happens next by whether the
-/// agent pushed: a new commit returns the task to review for a CI re-check; no
-/// new commit means the agent judged the failure out of scope, so the PR is left
-/// for a human and the agent moves on.
-async fn work_ci_fix(state: &AppState, task: Task) -> Result<()> {
-    info!(task_id = %task.id, attempts = task.ci_fix_attempts, "fixing failing CI");
+/// Checks out the PR's existing branch, runs one turn, and decides what happens
+/// next by whether the agent pushed: a new commit returns the task to review for
+/// a re-check; no new commit means the agent judged it out of scope, so the PR
+/// is left for a human and the agent moves on. A revisit also resets the CI-fix
+/// counter so the renewed effort gets the full retry budget, and its prompt
+/// names merge conflicts (the usual reason auto-merge blocked) as a likely cause.
+async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> {
+    info!(task_id = %task.id, attempts = task.ci_fix_attempts, revisit, "fixing pull request");
 
     let Some(repo_id) = task.repo_id else {
         return block(state, &task, "no repository is configured for this issue").await;
@@ -296,6 +311,12 @@ async fn work_ci_fix(state: &AppState, task: Task) -> Result<()> {
     };
 
     let settings = queries::get_settings(&state.db).await?;
+
+    // A revisit is a fresh effort: clear the exhausted counter so the renewed
+    // fix cycle gets the full retry budget again.
+    if revisit {
+        queries::reset_ci_fix_attempts(&state.db, task.id).await?;
+    }
 
     // The card stays in In Review; only the status reflects the active fix.
     queries::set_task_status(&state.db, task.id, TaskStatus::Working).await?;
@@ -327,7 +348,17 @@ async fn work_ci_fix(state: &AppState, task: Task) -> Result<()> {
         None => Vec::new(),
     };
 
-    let prompt = prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing);
+    let prompt = if revisit {
+        prompt::build_revisit(
+            &settings,
+            &repo,
+            &task,
+            &branch,
+            task.error.as_deref().unwrap_or_default(),
+        )
+    } else {
+        prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing)
+    };
     let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;

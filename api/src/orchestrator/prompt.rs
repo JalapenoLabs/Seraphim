@@ -78,6 +78,52 @@ pub fn build_ci_fix(
     prompt
 }
 
+/// Builds the instruction text to revisit a PR the agent had given up on.
+///
+/// Unlike [`build_ci_fix`], this names merge conflicts as a likely cause (the
+/// usual reason auto-merge blocks) and tells the agent to merge the base branch
+/// in to clear them, in addition to fixing any failing checks. `reason` is the
+/// note recorded when the PR was set aside.
+pub fn build_revisit(
+    settings: &Settings,
+    repo: &Repository,
+    task: &Task,
+    branch: &str,
+    reason: &str,
+) -> String {
+    let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
+    let blocker = if reason.trim().is_empty() {
+        "(no reason was recorded)".to_string()
+    } else {
+        reason.trim().to_string()
+    };
+    let mut prompt = context_header(settings, repo, task);
+
+    prompt.push_str(&format!(
+        "# Revisiting a stuck pull request\n\
+         - The pull request for this issue was set aside as stuck. Reason recorded: {blocker}\n\
+         - It may have a merge conflict with `{default}`, failing CI, or both.\n\
+         - Your cwd is `/workspace`. The focus repo `{repo}` is at `{repo_path}`, already checked \
+         out on branch `{branch}` with your earlier commits.\n\
+         - If it conflicts with the base, bring the latest base in and resolve it: \
+         `git fetch origin && git merge origin/{default}` (or rebase), fix the conflicts, and \
+         continue.\n\
+         - Investigate any failing checks with `gh pr checks` and `gh run view --log-failed`, then \
+         fix them.\n\
+         - Run the project's build/tests/linters, commit, and push. Do not open a new pull \
+         request; the existing one updates automatically.\n\
+         - If the conflict or failures are genuinely out of scope or unresolvable, leave a brief \
+         comment on the PR explaining why, and stop without committing.\n",
+        blocker = blocker,
+        default = repo.default_branch,
+        repo = repo.full_name,
+        repo_path = repo_path,
+        branch = branch,
+    ));
+
+    prompt
+}
+
 /// The shared prompt header: who the agent is, the org/global/repo instructions,
 /// and the issue under work.
 fn context_header(settings: &Settings, repo: &Repository, task: &Task) -> String {

@@ -542,6 +542,31 @@ pub async fn bump_ci_fix_attempt(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {
     .await
 }
 
+/// Resets a task's CI-fix counter (used when the agent circles back to a blocked
+/// PR, so the fresh attempt gets the full retry budget again).
+pub async fn reset_ci_fix_attempts(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE tasks SET ci_fix_attempts = 0, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The oldest blocked PR worth revisiting while the agent is otherwise idle: in
+/// review, `ci_blocked`, not on hold, and untouched for at least `cooldown_secs`
+/// (so a genuinely stuck PR is retried periodically, not in a tight loop).
+pub async fn pick_next_revisit(pool: &PgPool, cooldown_secs: i64) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'ci_blocked' \
+         AND hold = FALSE \
+         AND (last_activity_at IS NULL OR last_activity_at < now() - ($1 * interval '1 second')) \
+         ORDER BY last_activity_at ASC NULLS FIRST LIMIT 1",
+    )
+    .bind(cooldown_secs)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Leaves a PR in review for a human, recording why the agent stopped on CI. The
 /// card keeps its `in_review` lane; only the status and error note change.
 pub async fn block_task_ci(pool: &PgPool, id: Uuid, note: &str) -> sqlx::Result<Task> {
