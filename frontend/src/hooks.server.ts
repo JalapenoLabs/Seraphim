@@ -5,7 +5,7 @@ import { env } from '$env/dynamic/private'
 // In production the SvelteKit node server fronts everything, so it proxies
 // `/api/*` to the Rust backend. (Over Tailscale, `tailscale serve` routes `/api`
 // straight to the API and this never fires; for direct host-port access it does.)
-const API_ORIGIN = env.API_ORIGIN ?? 'http://localhost:8080'
+const API_ORIGIN = env.API_ORIGIN ?? 'http://localhost:27182'
 
 export const handle: Handle = async ({ event, resolve }) => {
   if (!event.url.pathname.startsWith('/api')) {

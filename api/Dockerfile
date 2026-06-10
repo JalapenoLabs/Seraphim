@@ -28,5 +28,5 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/seraphim-api /usr/local/bin/seraphim-api
 
-EXPOSE 8080
+EXPOSE 27182
 CMD ["seraphim-api"]

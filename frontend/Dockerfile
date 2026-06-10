@@ -21,6 +21,6 @@ RUN npm install --omit=dev
 
 COPY --from=build /app/build ./build
 
-ENV PORT=3000
-EXPOSE 3000
+ENV PORT=31415
+EXPOSE 31415
 CMD ["node", "build"]

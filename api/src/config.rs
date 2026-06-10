@@ -25,7 +25,7 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             database_url: env::var("DATABASE_URL").wrap_err("DATABASE_URL must be set")?,
-            api_bind: env::var("API_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            api_bind: env::var("API_BIND").unwrap_or_else(|_| "0.0.0.0:27182".to_string()),
             gh_token: env::var("GH_TOKEN").unwrap_or_default(),
             claude_model: env::var("CLAUDE_MODEL")
                 .unwrap_or_else(|_| "claude-opus-4-8[1m]".to_string()),

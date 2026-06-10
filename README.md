@@ -62,7 +62,7 @@ streaming its JSON output back to the UI.
    ```
    (or `scripts/start.sh`)
 
-4. Open the UI on the host (`http://localhost:3000`) or over your tailnet
+4. Open the UI on the host (`http://localhost:31415`) or over your tailnet
    (`https://<TS_HOSTNAME>.<your-tailnet>.ts.net`).
 
 ## Using it

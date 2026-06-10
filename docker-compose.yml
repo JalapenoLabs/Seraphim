@@ -38,12 +38,12 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       CLAUDE_MODEL: ${CLAUDE_MODEL}
       ORG_NAME: ${ORG_NAME}
-      API_BIND: 0.0.0.0:8080
+      API_BIND: 0.0.0.0:27182
       # Name of the workspace container the API drives via `docker exec`.
       WORKSPACE_CONTAINER: seraphim-workspace
       RUST_LOG: info,seraphim_api=debug
     ports:
-      - "${API_PORT}:8080"
+      - "${API_PORT}:27182"
     volumes:
       # The API controls the workspace container through the host Docker daemon.
       - ${DOCKER_SOCKET}:/var/run/docker.sock
@@ -53,7 +53,7 @@ services:
     networks:
       - seraphim
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/ping || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:27182/api/v1/ping || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -65,10 +65,10 @@ services:
     restart: unless-stopped
     environment:
       # Server-side base URL the SvelteKit proxy uses to reach the API.
-      API_ORIGIN: http://api:8080
-      PORT: "3000"
+      API_ORIGIN: http://api:27182
+      PORT: "31415"
     ports:
-      - "${FRONTEND_PORT}:3000"
+      - "${FRONTEND_PORT}:31415"
     depends_on:
       - api
     networks:

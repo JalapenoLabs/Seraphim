@@ -8,10 +8,10 @@
     "${TS_CERT_DOMAIN}:443": {
       "Handlers": {
         "/api": {
-          "Proxy": "http://api:8080"
+          "Proxy": "http://api:27182"
         },
         "/": {
-          "Proxy": "http://frontend:3000"
+          "Proxy": "http://frontend:31415"
         }
       }
     }
