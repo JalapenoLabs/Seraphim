@@ -60,5 +60,18 @@ pub fn build(settings: &Settings, repo: &Repository, task: &Task, branch: &str) 
         number = task.external_id,
     ));
 
+    prompt.push_str(ENVIRONMENT_SUGGESTIONS);
     prompt
 }
+
+/// Guidance, appended to every task prompt, on recommending setup improvements.
+const ENVIRONMENT_SUGGESTIONS: &str = "\n\
+    # Recommend environment improvements\n\
+    If during the task you noticed tooling or setup that was missing or would \
+    make future runs on a fresh workstation go smoother (a toolchain you had to \
+    install, a CLI that was absent, a slow step that a cached tool would fix), \
+    record it before you finish so it is not buried in your output. Run:\n\n\
+    \x20 seraphim-suggest '{\"suggestions\":[{\"title\":\"<short recommendation>\",\
+    \"detail\":\"<why it helps and how to apply it, e.g. a setup-script snippet>\"}]}'\n\n\
+    Only suggest things that genuinely help; if nothing comes to mind, skip it. \
+    This does not replace opening the pull request.\n";

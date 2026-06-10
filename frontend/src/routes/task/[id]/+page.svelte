@@ -1,16 +1,30 @@
 <script lang="ts">
-  import type { AgentEvent, Task } from '$lib/types'
+  import type { AgentEvent, EnvSuggestion, Task } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { page } from '$app/stores'
 
-  import { getTask } from '$lib/api'
+  import { acknowledgeSuggestion, getTask } from '$lib/api'
 
   const taskId = $page.params.id ?? ''
 
   let task = $state<Task | null>(null)
   let events = $state<Pick<AgentEvent, 'type' | 'payload'>[]>([])
+  let suggestions = $state<EnvSuggestion[]>([])
   let eventSource: EventSource | null = null
+
+  async function toggleSuggestion(suggestion: EnvSuggestion) {
+    // Optimistically flip so the checkbox feels instant, then persist; revert if
+    // the request fails so the UI never lies about what was saved.
+    const next = !suggestion.acknowledged
+    suggestion.acknowledged = next
+    try {
+      await acknowledgeSuggestion(suggestion.id, next)
+    } catch (error) {
+      console.debug('failed to update suggestion, reverting', error)
+      suggestion.acknowledged = !next
+    }
+  }
 
   // Which events are expanded. Tool use/results start collapsed; multiple can be
   // open at once.
@@ -28,6 +42,7 @@
     const detail = await getTask(taskId)
     task = detail.task
     events = detail.events.map((event) => ({ type: event.type, payload: event.payload }))
+    suggestions = detail.suggestions
   }
 
   // Render an event's payload into a readable line based on its type.
@@ -89,6 +104,31 @@
 
     {#if task.body_snapshot}
       <section class="body">{task.body_snapshot}</section>
+    {/if}
+
+    {#if suggestions.length}
+      <section class="suggestions">
+        <h2>💡 Environment recommendations</h2>
+        <p class="muted">
+          Things the agent thinks would make future runs smoother. Check one off once you have
+          handled it; unchecked ones stay loud on the board.
+        </p>
+        {#each suggestions as suggestion (suggestion.id)}
+          <label class="suggestion" class:done={suggestion.acknowledged}>
+            <input
+              type="checkbox"
+              checked={suggestion.acknowledged}
+              onchange={() => toggleSuggestion(suggestion)}
+            />
+            <span class="suggestion-text">
+              <span class="suggestion-title">{suggestion.title}</span>
+              {#if suggestion.detail}
+                <span class="suggestion-detail">{suggestion.detail}</span>
+              {/if}
+            </span>
+          </label>
+        {/each}
+      </section>
     {/if}
 
     <section class="stream">
@@ -170,6 +210,54 @@
 
   .stream h2 {
     font-size: 1rem;
+    color: var(--muted);
+  }
+
+  .suggestions {
+    background: var(--panel);
+    border: 1px solid var(--warn);
+    border-radius: var(--radius);
+    padding: 1rem;
+    margin: 1.2rem 0;
+  }
+
+  .suggestions h2 {
+    font-size: 1rem;
+    margin: 0 0 0.3rem;
+  }
+
+  .suggestion {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--border);
+    cursor: pointer;
+  }
+
+  .suggestion input {
+    margin-top: 0.2rem;
+    width: auto;
+  }
+
+  .suggestion-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .suggestion-title {
+    font-weight: 600;
+  }
+
+  .suggestion-detail {
+    font-size: 0.85rem;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+
+  .suggestion.done .suggestion-title {
+    text-decoration: line-through;
     color: var(--muted);
   }
 

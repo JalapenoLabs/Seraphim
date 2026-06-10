@@ -153,3 +153,24 @@ pub struct Event {
     pub payload: Json<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
+
+/// A setup recommendation the agent made after finishing a task.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct EnvSuggestion {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub title: String,
+    pub detail: String,
+    /// Checked off by the user; the board badge counts the unacknowledged ones.
+    pub acknowledged: bool,
+    pub created_at: DateTime<Utc>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+}
+
+/// One environment suggestion as posted by the agent's `seraphim-suggest`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvSuggestionWrite {
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+}

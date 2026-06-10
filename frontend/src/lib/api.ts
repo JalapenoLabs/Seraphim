@@ -6,6 +6,7 @@ import ky from 'ky'
 import type {
   BoardResponse,
   ConfigBundle,
+  EnvSuggestion,
   Repository,
   ReviewPolicy,
   Settings,
@@ -32,6 +33,14 @@ export function moveTask(taskId: string, column: TaskColumn, position: number) {
 
 export function setTaskHold(taskId: string, hold: boolean) {
   return apiClient.post(`tasks/${taskId}/hold`, { json: { hold } }).json<Task>()
+}
+
+// --- Environment suggestions -------------------------------------------------
+
+export function acknowledgeSuggestion(suggestionId: string, acknowledged: boolean) {
+  return apiClient
+    .post(`suggestions/${suggestionId}/ack`, { json: { acknowledged } })
+    .json<EnvSuggestion>()
 }
 
 // --- Repositories ------------------------------------------------------------

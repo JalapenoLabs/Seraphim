@@ -12,6 +12,7 @@
   const FLIP_MS = 150
 
   let settings = $state<Settings | null>(null)
+  let suggestionCounts = $state<Record<string, number>>({})
   // One array per lane; svelte-dnd-action mutates these during a drag.
   let columns = $state<Record<TaskColumn, Task[]>>({
     available: [],
@@ -27,6 +28,7 @@
   async function load() {
     const board = await getBoard()
     settings = board.settings
+    suggestionCounts = board.suggestion_counts
     const grouped: Record<TaskColumn, Task[]> = {
       available: [],
       todo: [],
@@ -141,7 +143,7 @@
       >
         {#each columns[column.key] as task (task.id)}
           <div>
-            <Card {task} onchange={load} />
+            <Card {task} onchange={load} suggestionCount={suggestionCounts[task.id] ?? 0} />
           </div>
         {/each}
       </div>

@@ -1,5 +1,7 @@
 //! Board read + card movement endpoints.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -14,13 +16,25 @@ use crate::state::AppState;
 pub struct BoardResponse {
     pub tasks: Vec<Task>,
     pub settings: Settings,
+    /// Unacknowledged setup-suggestion counts, keyed by task id, so a card can
+    /// shout when the agent left recommendations. Tasks with none are omitted.
+    pub suggestion_counts: HashMap<Uuid, i64>,
 }
 
-/// `GET /api/v1/board` - every card plus the org/pause settings.
+/// `GET /api/v1/board` - every card, the org/pause settings, and per-card
+/// counts of open environment suggestions.
 pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardResponse>> {
     let tasks = queries::list_tasks(&state.db).await?;
     let settings = queries::get_settings(&state.db).await?;
-    Ok(Json(BoardResponse { tasks, settings }))
+    let suggestion_counts = queries::unacknowledged_suggestion_counts(&state.db)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(Json(BoardResponse {
+        tasks,
+        settings,
+        suggestion_counts,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

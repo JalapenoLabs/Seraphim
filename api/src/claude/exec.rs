@@ -30,6 +30,21 @@ pub struct TurnArgs {
     pub oauth_token: String,
     /// GitHub token, so the agent's `gh`/`git` are authed for this turn.
     pub github_token: String,
+    /// The task being worked, so the agent's helpers can attribute their output
+    /// (exported as `SERAPHIM_TASK_ID`).
+    pub task_id: String,
+    /// URL the workspace uses to reach the API (exported as `SERAPHIM_API_URL`).
+    pub internal_api_url: String,
+}
+
+/// Builds the exec environment: auth tokens plus the agent-helper wiring.
+fn build_env(args: &TurnArgs) -> Vec<String> {
+    vec![
+        format!("CLAUDE_CODE_OAUTH_TOKEN={}", args.oauth_token),
+        format!("GH_TOKEN={}", args.github_token),
+        format!("SERAPHIM_TASK_ID={}", args.task_id),
+        format!("SERAPHIM_API_URL={}", args.internal_api_url),
+    ]
 }
 
 /// Builds the `claude` argv for a headless, fully-autonomous turn.
@@ -71,10 +86,7 @@ pub fn run_turn(docker: &Docker, args: TurnArgs) -> impl Stream<Item = Result<Ag
                     working_dir: Some(args.working_dir.clone()),
                     // Secrets are injected per-exec from the database, never baked
                     // into the container's environment.
-                    env: Some(vec![
-                        format!("CLAUDE_CODE_OAUTH_TOKEN={}", args.oauth_token),
-                        format!("GH_TOKEN={}", args.github_token),
-                    ]),
+                    env: Some(build_env(&args)),
                     // Claude must not run as root with bypassPermissions.
                     user: Some("node".to_string()),
                     attach_stdout: Some(true),
@@ -136,6 +148,8 @@ mod tests {
             model: "claude-opus-4-8[1m]".to_string(),
             oauth_token: "tok".to_string(),
             github_token: "gh".to_string(),
+            task_id: "task-1".to_string(),
+            internal_api_url: "http://api:27182".to_string(),
         };
         let command = build_command(&args);
         assert!(command.contains(&"--resume".to_string()));
@@ -154,6 +168,8 @@ mod tests {
             model: "claude-opus-4-8[1m]".to_string(),
             oauth_token: "tok".to_string(),
             github_token: "gh".to_string(),
+            task_id: "task-1".to_string(),
+            internal_api_url: "http://api:27182".to_string(),
         };
         let command = build_command(&args);
         assert!(!command.contains(&"--resume".to_string()));

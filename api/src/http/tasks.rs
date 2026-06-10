@@ -9,7 +9,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
-use crate::db::models::{Event, Task};
+use crate::db::models::{EnvSuggestion, Event, Task};
 use crate::db::queries;
 use crate::state::AppState;
 
@@ -17,9 +17,12 @@ use crate::state::AppState;
 pub struct TaskDetail {
     pub task: Task,
     pub events: Vec<Event>,
+    /// Setup recommendations the agent made on this task.
+    pub suggestions: Vec<EnvSuggestion>,
 }
 
-/// `GET /api/v1/tasks/:id` - the card and its persisted conversation events.
+/// `GET /api/v1/tasks/:id` - the card, its conversation events, and its
+/// environment suggestions.
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -32,5 +35,11 @@ pub async fn get_task(
             .into_response());
     };
     let events = queries::list_events_for_task(&state.db, id).await?;
-    Ok(Json(TaskDetail { task, events }).into_response())
+    let suggestions = queries::list_suggestions_for_task(&state.db, id).await?;
+    Ok(Json(TaskDetail {
+        task,
+        events,
+        suggestions,
+    })
+    .into_response())
 }

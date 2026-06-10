@@ -246,6 +246,8 @@ async fn run_agent_turn(
         model: settings.claude_model.clone(),
         oauth_token: queries::get_claude_token(&state.db).await?,
         github_token: queries::get_github_token(&state.db).await?,
+        task_id: task.id.to_string(),
+        internal_api_url: state.internal_api_url.clone(),
     };
 
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));

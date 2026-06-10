@@ -33,15 +33,18 @@ pub struct AppState {
     pub db: PgPool,
     pub workspace: Workspace,
     pub events: broadcast::Sender<ServerEvent>,
+    /// URL the workspace uses to reach this API (for the agent's helpers).
+    pub internal_api_url: String,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, workspace: Workspace) -> Self {
+    pub fn new(db: PgPool, workspace: Workspace, internal_api_url: String) -> Self {
         let (events, _receiver) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             db,
             workspace,
             events,
+            internal_api_url,
         }
     }
 

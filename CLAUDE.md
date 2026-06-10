@@ -116,6 +116,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `error`, `hold`, `session_id`.
 - **`turns`** / **`events`** — per-task Claude invocations and the append-only
   parsed stream-json (live feed + chat history).
+- **`environment_suggestions`** — setup recommendations the agent makes after a
+  task (`title`, `detail`, `acknowledged`). Posted by the agent's
+  `seraphim-suggest` helper; shown loudly on the board and as checkboxes on the
+  task until the user acknowledges them.
 
 ## How the agent runtime works (the workspace)
 
@@ -144,6 +148,9 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 2. **agent** — single-threaded: when not paused and idle, pulls top of **To Do**,
    prepares the branch, drives one Claude turn, detects the PR, moves to
    **In Review**. One task awaited to completion before the next (no overlap).
+   The turn's exec injects `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL` so the agent
+   can run `seraphim-suggest` (baked into the workspace image) to record
+   environment recommendations via `POST /agent/suggestions`.
 3. **review** — for `auto_squash_merge` repos, polls CI and squash-merges when
    green → **Done**.
 

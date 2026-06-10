@@ -9,7 +9,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
+    EnvSuggestion, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus,
+    Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -500,6 +501,67 @@ pub async fn list_events_for_task(
          WHERE t.task_id = $1 ORDER BY t.idx, e.seq",
     )
     .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+// --- Environment suggestions -------------------------------------------------
+
+/// Records one setup recommendation the agent made for a task.
+pub async fn create_suggestion(
+    pool: &PgPool,
+    task_id: Uuid,
+    title: &str,
+    detail: &str,
+) -> sqlx::Result<EnvSuggestion> {
+    sqlx::query_as::<_, EnvSuggestion>(
+        "INSERT INTO environment_suggestions (task_id, title, detail) \
+         VALUES ($1, $2, $3) RETURNING *",
+    )
+    .bind(task_id)
+    .bind(title)
+    .bind(detail)
+    .fetch_one(pool)
+    .await
+}
+
+/// Every suggestion on a task, oldest first, for the task detail view.
+pub async fn list_suggestions_for_task(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Vec<EnvSuggestion>> {
+    sqlx::query_as::<_, EnvSuggestion>(
+        "SELECT * FROM environment_suggestions WHERE task_id = $1 ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Checks or unchecks a suggestion, stamping the time when it is acknowledged.
+pub async fn set_suggestion_acknowledged(
+    pool: &PgPool,
+    id: Uuid,
+    acknowledged: bool,
+) -> sqlx::Result<EnvSuggestion> {
+    sqlx::query_as::<_, EnvSuggestion>(
+        "UPDATE environment_suggestions \
+         SET acknowledged = $2, acknowledged_at = CASE WHEN $2 THEN now() ELSE NULL END \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(acknowledged)
+    .fetch_one(pool)
+    .await
+}
+
+/// Unacknowledged-suggestion counts per task, for the loud board badges. Tasks
+/// with no open suggestions are omitted.
+pub async fn unacknowledged_suggestion_counts(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
+    sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT task_id, COUNT(*) FROM environment_suggestions \
+         WHERE acknowledged = FALSE GROUP BY task_id",
+    )
     .fetch_all(pool)
     .await
 }
