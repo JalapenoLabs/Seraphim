@@ -35,16 +35,24 @@ pub struct TurnArgs {
     pub task_id: String,
     /// URL the workspace uses to reach the API (exported as `SERAPHIM_API_URL`).
     pub internal_api_url: String,
+    /// User-defined environment variables (`key`, `value`) for this exec.
+    pub env: Vec<(String, String)>,
 }
 
-/// Builds the exec environment: auth tokens plus the agent-helper wiring.
+/// Builds the exec environment: the auth tokens, the agent-helper wiring, and
+/// any user-defined variables. User variables come last so they cannot shadow
+/// the tokens and wiring we control.
 fn build_env(args: &TurnArgs) -> Vec<String> {
-    vec![
+    let mut env = vec![
         format!("CLAUDE_CODE_OAUTH_TOKEN={}", args.oauth_token),
         format!("GH_TOKEN={}", args.github_token),
         format!("SERAPHIM_TASK_ID={}", args.task_id),
         format!("SERAPHIM_API_URL={}", args.internal_api_url),
-    ]
+    ];
+    for (key, value) in &args.env {
+        env.push(format!("{key}={value}"));
+    }
+    env
 }
 
 /// Builds the `claude` argv for a headless, fully-autonomous turn.
@@ -150,6 +158,7 @@ mod tests {
             github_token: "gh".to_string(),
             task_id: "task-1".to_string(),
             internal_api_url: "http://api:27182".to_string(),
+            env: vec![],
         };
         let command = build_command(&args);
         assert!(command.contains(&"--resume".to_string()));
@@ -170,6 +179,7 @@ mod tests {
             github_token: "gh".to_string(),
             task_id: "task-1".to_string(),
             internal_api_url: "http://api:27182".to_string(),
+            env: vec![],
         };
         let command = build_command(&args);
         assert!(!command.contains(&"--resume".to_string()));

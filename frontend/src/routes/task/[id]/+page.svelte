@@ -1,21 +1,34 @@
 <script lang="ts">
   import type { AgentEvent, EnvSuggestion, Task } from '$lib/types'
 
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount, onDestroy, tick } from 'svelte'
+  import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
+  import { Pause, Play } from '@lucide/svelte'
 
-  import { acknowledgeSuggestion, getTask } from '$lib/api'
+  import { acknowledgeSuggestion, getTask, setTaskHold } from '$lib/api'
+  import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
+  import { PaneGroup, type PaneGroupAPI } from 'paneforge'
+
+  import { Badge } from '$lib/components/ui/badge'
+  import * as Alert from '$lib/components/ui/alert'
+  import * as AlertDialog from '$lib/components/ui/alert-dialog'
+  import * as Resizable from '$lib/components/ui/resizable'
+  import { buttonVariants } from '$lib/components/ui/button'
+  import IssueView from '$lib/components/IssueView.svelte'
 
   const taskId = $page.params.id ?? ''
 
+  type StreamEvent = Pick<AgentEvent, 'type' | 'payload'>
+
   let task = $state<Task | null>(null)
-  let events = $state<Pick<AgentEvent, 'type' | 'payload'>[]>([])
+  let events = $state<StreamEvent[]>([])
   let suggestions = $state<EnvSuggestion[]>([])
   let eventSource: EventSource | null = null
 
   async function toggleSuggestion(suggestion: EnvSuggestion) {
-    // Optimistically flip so the checkbox feels instant, then persist; revert if
-    // the request fails so the UI never lies about what was saved.
+    // Optimistically flip so the checkbox feels instant, then persist; revert on
+    // failure so the UI never lies about what was actually saved.
     const next = !suggestion.acknowledged
     suggestion.acknowledged = next
     try {
@@ -26,12 +39,91 @@
     }
   }
 
-  // Which events are expanded. Tool use/results start collapsed; multiple can be
-  // open at once.
+  // Tool use/results/thinking start collapsed; any number can be open at once.
   let expanded = $state<Record<number, boolean>>({})
 
-  function isCollapsible(type: string) {
+  // The resizable split's imperative handle, so double-clicking the divider can
+  // snap the panes back to an even 50/50.
+  let paneGroup = $state<PaneGroupAPI>()
+
+  function resetSplit() {
+    paneGroup?.setLayout([50, 50])
+  }
+
+  // Activity log autoscroll: follow new events only while the user is parked at
+  // the bottom. Scrolling up pauses it; returning to the bottom re-engages it.
+  const STICK_THRESHOLD_PX = 48
+  let logEl = $state<HTMLDivElement>()
+  let stickToBottom = $state(true)
+
+  function onLogScroll() {
+    if (!logEl) {
+      return
+    }
+    const distanceFromBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight
+    stickToBottom = distanceFromBottom < STICK_THRESHOLD_PX
+  }
+
+  $effect(() => {
+    // Re-run whenever an event arrives; scroll only if we're still following.
+    events.length
+    if (stickToBottom && logEl) {
+      tick().then(() => {
+        if (logEl) {
+          logEl.scrollTop = logEl.scrollHeight
+        }
+      })
+    }
+  })
+
+  // Leading glyph per event type, modeled on Claude Code's transcript: a filled
+  // dot for the agent's own actions, a corner connector for their output.
+  const MARKERS = {
+    assistant_text: '●',
+    tool_use: '●',
+    result: '●',
+    thinking: '✻',
+    tool_result: '⎿',
+    system: '⎿'
+  } as const satisfies Record<string, string>
+
+  const MARKER_COLORS = {
+    assistant_text: 'text-foreground',
+    tool_use: 'text-primary',
+    result: 'text-success',
+    thinking: 'text-warning',
+    tool_result: 'text-muted-foreground',
+    system: 'text-muted-foreground'
+  } as const satisfies Record<string, string>
+
+  function marker(type: string): string {
+    return MARKERS[type as keyof typeof MARKERS] ?? '●'
+  }
+
+  function markerColor(type: string): string {
+    return MARKER_COLORS[type as keyof typeof MARKER_COLORS] ?? 'text-foreground'
+  }
+
+  function isCollapsible(type: string): boolean {
     return type === 'tool_use' || type === 'tool_result' || type === 'thinking'
+  }
+
+  // The classes for an event's text line: its color, plus how it clamps when
+  // collapsed (tool calls to one line, output/thinking to a few).
+  function lineClasses(type: string, open: boolean): string {
+    let color = 'text-foreground'
+    if (type === 'tool_result' || type === 'system') {
+      color = 'text-muted-foreground'
+    } else if (type === 'thinking') {
+      color = 'italic text-warning'
+    }
+    if (!open && type === 'tool_use') {
+      return `min-w-0 flex-1 truncate ${color}`
+    }
+    if (!open && (type === 'tool_result' || type === 'thinking')) {
+      return `min-w-0 flex-1 whitespace-pre-wrap break-words line-clamp-4 ${color}`
+    }
+    return `min-w-0 flex-1 whitespace-pre-wrap break-words ${color}`
   }
 
   function toggle(index: number) {
@@ -45,8 +137,29 @@
     suggestions = detail.suggestions
   }
 
-  // Render an event's payload into a readable line based on its type.
-  function describe(event: { type: string; payload: unknown }): string {
+  // Hold toggle, behind a confirmation so it's a deliberate action.
+  async function confirmHold() {
+    if (!task) {
+      return
+    }
+    const held = !task.hold
+    await setTaskHold(task.id, held)
+    await load()
+    toast.success(held ? 'Task held — the agent will skip it' : 'Hold released')
+  }
+
+  // The most telling argument of a tool call, so `Bash(cargo build)` reads at a
+  // glance instead of a wall of JSON. Falls back to the whole input object.
+  function toolSummary(payload: Record<string, unknown>): string {
+    const name = String(payload?.name ?? 'tool')
+    const input = (payload?.input ?? {}) as Record<string, unknown>
+    const headline =
+      input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.description
+    const argument = headline === undefined ? JSON.stringify(input) : String(headline)
+    return `${name}(${argument})`
+  }
+
+  function describe(event: StreamEvent): string {
     const payload = event.payload as Record<string, unknown>
     if (event.type === 'thinking') {
       return String(payload?.thinking ?? '')
@@ -55,7 +168,7 @@
       return String(payload?.text ?? '')
     }
     if (event.type === 'tool_use') {
-      return `${payload?.name ?? 'tool'} ${JSON.stringify(payload?.input ?? {})}`
+      return toolSummary(payload)
     }
     if (event.type === 'tool_result') {
       const content = payload?.content
@@ -75,9 +188,8 @@
     load()
     eventSource = new EventSource(`/api/v1/tasks/${taskId}/stream`)
     eventSource.addEventListener('task', (message) => {
-      const envelope = JSON.parse(message.data) as { type: string; payload: unknown }
+      const envelope = JSON.parse(message.data) as StreamEvent
       events = [...events, envelope]
-      // Keep the card header roughly current as the turn progresses.
       load()
     })
   })
@@ -85,254 +197,150 @@
   onDestroy(() => eventSource?.close())
 </script>
 
-<div class="detail">
-  <a class="back" href="/">← Board</a>
+<div class="flex h-full flex-col gap-3 p-4">
+  <a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Board</a>
 
   {#if task}
-    <header class="head">
-      <div>
-        <h1>#{task.external_id} {task.title}</h1>
-        <div class="meta">
-          <span class="badge {task.status}">{task.status.replace('_', ' ')}</span>
-          {#if task.branch}<span class="mono">{task.branch}</span>{/if}
-          {#if task.pr_url}<a href={task.pr_url} target="_blank" rel="noreferrer">pull request ↗</a>{/if}
-          {#if task.url}<a href={task.url} target="_blank" rel="noreferrer">issue ↗</a>{/if}
-        </div>
-        {#if task.error}<div class="error">{task.error}</div>{/if}
-      </div>
-    </header>
-
-    {#if task.body_snapshot}
-      <section class="body">{task.body_snapshot}</section>
-    {/if}
-
     {#if suggestions.length}
-      <section class="suggestions">
-        <h2>💡 Environment recommendations</h2>
-        <p class="muted">
+      <!-- Loud on the task too: the checkboxes here are what clear the board badge. -->
+      <section class="rounded-lg border border-warning/50 bg-card p-3">
+        <h2 class="text-sm font-semibold">💡 Environment recommendations</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground">
           Things the agent thinks would make future runs smoother. Check one off once you have
           handled it; unchecked ones stay loud on the board.
         </p>
-        {#each suggestions as suggestion (suggestion.id)}
-          <label class="suggestion" class:done={suggestion.acknowledged}>
-            <input
-              type="checkbox"
-              checked={suggestion.acknowledged}
-              onchange={() => toggleSuggestion(suggestion)}
-            />
-            <span class="suggestion-text">
-              <span class="suggestion-title">{suggestion.title}</span>
-              {#if suggestion.detail}
-                <span class="suggestion-detail">{suggestion.detail}</span>
-              {/if}
-            </span>
-          </label>
-        {/each}
+        <ul class="mt-2 divide-y divide-border">
+          {#each suggestions as suggestion (suggestion.id)}
+            <li>
+              <label class="flex cursor-pointer items-start gap-2 py-2">
+                <input
+                  type="checkbox"
+                  checked={suggestion.acknowledged}
+                  onchange={() => toggleSuggestion(suggestion)}
+                  class="mt-0.5"
+                />
+                <span class="flex min-w-0 flex-col gap-0.5">
+                  <span
+                    class="text-sm font-medium {suggestion.acknowledged
+                      ? 'text-muted-foreground line-through'
+                      : ''}"
+                  >
+                    {suggestion.title}
+                  </span>
+                  {#if suggestion.detail}
+                    <span class="whitespace-pre-wrap text-xs text-muted-foreground"
+                      >{suggestion.detail}</span
+                    >
+                  {/if}
+                </span>
+              </label>
+            </li>
+          {/each}
+        </ul>
       </section>
     {/if}
 
-    <section class="stream">
-      <h2>Activity</h2>
-      {#if events.length === 0}
-        <p class="muted">No activity yet.</p>
-      {/if}
-      {#each events as event, index (index)}
-        {@const collapsible = isCollapsible(event.type)}
-        {@const open = expanded[index] ?? false}
-        <div class="event {event.type}">
-          <button
-            type="button"
-            class="event-head"
-            class:clickable={collapsible}
-            onclick={() => collapsible && toggle(index)}
-          >
-            {#if collapsible}<span class="arrow">{open ? '▾' : '▸'}</span>{/if}
-            <span class="kind">{event.type.replace('_', ' ')}</span>
-          </button>
-          <pre
-            class="event-body"
-            class:clamp3={collapsible &&
-              (event.type === 'tool_result' || event.type === 'thinking') &&
-              !open}
-            class:clamp1={collapsible && event.type === 'tool_use' && !open}
-          >{describe(event)}</pre>
+    <PaneGroup
+      bind:this={paneGroup}
+      direction="horizontal"
+      autoSaveId="seraphim-task-split-v2"
+      class="flex min-h-0 w-full flex-1 overflow-hidden"
+    >
+      <Resizable.Pane defaultSize={55} minSize={30} class="min-w-0">
+        <div class="h-full min-w-0 pr-3">
+          <IssueView {task} />
         </div>
-      {/each}
-    </section>
+      </Resizable.Pane>
+
+      <Resizable.Handle
+        withHandle
+        ondblclick={resetSplit}
+        title="Drag to resize · double-click to reset to 50/50"
+        class="w-1.5 bg-border transition-colors hover:bg-primary data-[active]:bg-primary"
+      />
+
+      <Resizable.Pane defaultSize={45} minSize={25} class="min-w-0">
+        <div class="ml-3 flex h-full min-w-0 flex-col rounded-lg border border-border bg-card">
+          <header class="flex items-center gap-2 border-b border-border px-4 py-2.5">
+            <span class="text-xs uppercase tracking-wide text-muted-foreground">Agent activity</span>
+            <div class="ml-auto flex items-center gap-2">
+              <Badge variant="outline" class={STATUS_BADGE[task.status]}>
+                {STATUS_LABELS[task.status] ?? task.status}
+              </Badge>
+              <AlertDialog.Root>
+                <AlertDialog.Trigger class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                  {#if task.hold}
+                    <Play class="size-3.5" /> Release
+                  {:else}
+                    <Pause class="size-3.5" /> Hold
+                  {/if}
+                </AlertDialog.Trigger>
+                <AlertDialog.Content>
+                  <AlertDialog.Header>
+                    <AlertDialog.Title>
+                      {task.hold ? 'Release this hold?' : 'Hold this task?'}
+                    </AlertDialog.Title>
+                    <AlertDialog.Description>
+                      {#if task.hold}
+                        The agent will be able to pick this card up again from its current position
+                        in the queue.
+                      {:else}
+                        Holding parks this card in place. The agent will skip it when pulling work
+                        (the To Do queue, CI fixes, and idle revisits) and move on to the next
+                        eligible card. A task already in progress isn't interrupted, and you can
+                        release the hold anytime.
+                      {/if}
+                    </AlertDialog.Description>
+                  </AlertDialog.Header>
+                  <AlertDialog.Footer>
+                    <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+                    <AlertDialog.Action onclick={confirmHold}>
+                      {task.hold ? 'Release hold' : 'Hold task'}
+                    </AlertDialog.Action>
+                  </AlertDialog.Footer>
+                </AlertDialog.Content>
+              </AlertDialog.Root>
+            </div>
+          </header>
+          {#if task.error}
+            <Alert.Root variant="destructive" class="m-3 mb-0">
+              <Alert.Description class="break-words text-xs">{task.error}</Alert.Description>
+            </Alert.Root>
+          {/if}
+          <div
+            bind:this={logEl}
+            onscroll={onLogScroll}
+            class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 pb-[25vh] font-mono text-sm leading-relaxed"
+          >
+            {#if events.length === 0}
+              <p class="text-muted-foreground">No activity yet.</p>
+            {/if}
+            {#each events as event, index (index)}
+              {@const collapsible = isCollapsible(event.type)}
+              {@const open = expanded[index] ?? false}
+              {@const indent = event.type === 'tool_result' || event.type === 'system' ? 'pl-4' : ''}
+              {#if collapsible}
+                <button
+                  type="button"
+                  onclick={() => toggle(index)}
+                  title={open ? 'Click to collapse' : 'Click to expand'}
+                  class="flex w-full gap-2 py-0.5 text-left hover:opacity-80 {indent}"
+                >
+                  <span class="w-[1ch] flex-none {markerColor(event.type)}">{marker(event.type)}</span>
+                  <span class={lineClasses(event.type, open)}>{describe(event)}</span>
+                </button>
+              {:else}
+                <div class="flex gap-2 py-0.5 {indent}">
+                  <span class="w-[1ch] flex-none {markerColor(event.type)}">{marker(event.type)}</span>
+                  <span class={lineClasses(event.type, open)}>{describe(event)}</span>
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      </Resizable.Pane>
+    </PaneGroup>
   {:else}
-    <p class="muted">Loading…</p>
+    <p class="text-muted-foreground">Loading…</p>
   {/if}
 </div>
-
-<style>
-  .detail {
-    max-width: 960px;
-    margin: 0 auto;
-    padding: 1.2rem 1.4rem 3rem;
-  }
-
-  .back {
-    color: var(--muted);
-  }
-
-  .head h1 {
-    font-size: 1.3rem;
-    margin: 0.6rem 0 0.4rem;
-  }
-
-  .meta {
-    display: flex;
-    gap: 0.8rem;
-    align-items: center;
-    flex-wrap: wrap;
-    font-size: 0.85rem;
-  }
-
-  .mono {
-    font-family: ui-monospace, monospace;
-    color: var(--muted);
-  }
-
-  .error {
-    margin-top: 0.6rem;
-    color: var(--danger);
-  }
-
-  .body {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.9rem;
-    margin: 1rem 0;
-    white-space: pre-wrap;
-    color: var(--muted);
-  }
-
-  .stream h2 {
-    font-size: 1rem;
-    color: var(--muted);
-  }
-
-  .suggestions {
-    background: var(--panel);
-    border: 1px solid var(--warn);
-    border-radius: var(--radius);
-    padding: 1rem;
-    margin: 1.2rem 0;
-  }
-
-  .suggestions h2 {
-    font-size: 1rem;
-    margin: 0 0 0.3rem;
-  }
-
-  .suggestion {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.6rem;
-    padding: 0.6rem 0;
-    border-top: 1px solid var(--border);
-    cursor: pointer;
-  }
-
-  .suggestion input {
-    margin-top: 0.2rem;
-    width: auto;
-  }
-
-  .suggestion-text {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-
-  .suggestion-title {
-    font-weight: 600;
-  }
-
-  .suggestion-detail {
-    font-size: 0.85rem;
-    color: var(--muted);
-    white-space: pre-wrap;
-  }
-
-  .suggestion.done .suggestion-title {
-    text-decoration: line-through;
-    color: var(--muted);
-  }
-
-  .event {
-    border-left: 2px solid var(--border);
-    padding: 0.2rem 0 0.2rem 0.8rem;
-    margin: 0.5rem 0;
-  }
-
-  .event.tool_use {
-    border-color: var(--accent);
-  }
-
-  .event.result {
-    border-color: var(--accent-2);
-  }
-
-  .event.thinking {
-    border-color: var(--warn);
-  }
-
-  .event.thinking .event-body {
-    font-style: italic;
-    opacity: 0.85;
-  }
-
-  .event-head {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    width: 100%;
-    background: none;
-    border: none;
-    padding: 0;
-    text-align: left;
-  }
-
-  .event-head.clickable {
-    cursor: pointer;
-  }
-
-  .arrow {
-    width: 0.8rem;
-    font-size: 0.7rem;
-    color: var(--muted);
-    flex: none;
-  }
-
-  .kind {
-    font-size: 0.72rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  pre {
-    margin: 0.2rem 0 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: ui-monospace, monospace;
-    font-size: 0.82rem;
-  }
-
-  /* Collapsed tool results: first 3 lines; tool uses: a single ellipsized line. */
-  .event-body.clamp3 {
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .event-body.clamp1 {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-</style>

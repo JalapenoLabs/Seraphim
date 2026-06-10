@@ -9,7 +9,8 @@ use eyre::{Context, Result};
 use octocrab::params::pulls::MergeMethod;
 use octocrab::params::State;
 use octocrab::Octocrab;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// How many issues we pull per repo per sync, and repos per org per discovery.
 const PER_PAGE: u8 = 100;
@@ -104,7 +105,14 @@ pub struct OpenPr {
     pub head_sha: String,
 }
 
-/// Finds the open PR whose head is `branch` in `owner/repo`, if any.
+/// Finds the open PR whose head branch is `branch` in `owner/repo`, if any.
+///
+/// Lists open PRs and matches on the head branch ref rather than GitHub's
+/// `head=owner:branch` filter. That filter keys on the head repo's *current*
+/// owner login, so it silently returns nothing when the repo's org was renamed
+/// (the configured `owner` no longer matches the PR's head owner) or the PR
+/// comes from a fork. Matching the ref is robust to both, and to the brief
+/// indexing lag the filtered endpoint also suffers.
 pub async fn find_open_pr_for_branch(
     octo: &Octocrab,
     owner: &str,
@@ -115,14 +123,16 @@ pub async fn find_open_pr_for_branch(
         .pulls(owner, repo)
         .list()
         .state(State::Open)
-        // GitHub expects the head filter as "owner:branch".
-        .head(format!("{owner}:{branch}"))
-        .per_page(5)
+        .per_page(PER_PAGE)
         .send()
         .await
         .wrap_err("failed to list pull requests")?;
 
-    let Some(pull) = page.items.into_iter().next() else {
+    let Some(pull) = page
+        .items
+        .into_iter()
+        .find(|pull| pull.head.ref_field == branch)
+    else {
         return Ok(None);
     };
 
@@ -141,6 +151,7 @@ struct CheckRunsResponse {
 
 #[derive(Debug, Deserialize)]
 struct CheckRun {
+    name: String,
     status: String,
     conclusion: Option<String>,
 }
@@ -148,11 +159,27 @@ struct CheckRun {
 #[derive(Debug, Deserialize)]
 struct CombinedStatus {
     state: String,
+    total_count: u64,
 }
 
-/// Whether CI is green for a commit: every check run completed successfully and
-/// the legacy combined status is not failing. No checks at all counts as green.
-pub async fn checks_green(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -> Result<bool> {
+/// The aggregate CI verdict for a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CiStatus {
+    /// At least one check is still queued or running; no verdict yet.
+    Pending,
+    /// Every check completed successfully, or there are no checks at all.
+    Passing,
+    /// At least one check completed unsuccessfully; carries the failing names.
+    Failing(Vec<String>),
+}
+
+/// The aggregate CI verdict for a commit, combining Actions check runs and the
+/// legacy combined commit status.
+///
+/// Waits for every check to finish before reporting [`CiStatus::Failing`], so a
+/// downstream fix sees the complete set of failures rather than a partial one.
+/// A commit with no checks at all is [`CiStatus::Passing`].
+pub async fn ci_status(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -> Result<CiStatus> {
     let check_runs: CheckRunsResponse = octo
         .get(
             format!("/repos/{owner}/{repo}/commits/{sha}/check-runs"),
@@ -161,19 +188,21 @@ pub async fn checks_green(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -
         .await
         .wrap_err("failed to fetch check runs")?;
 
-    let all_check_runs_passing = check_runs.check_runs.iter().all(|run| {
-        run.status == "completed"
-            && matches!(
-                run.conclusion.as_deref(),
-                Some("success" | "neutral" | "skipped")
-            )
-    });
-    if !all_check_runs_passing {
-        return Ok(false);
+    let mut pending = false;
+    let mut failures: Vec<String> = Vec::new();
+    for run in &check_runs.check_runs {
+        if run.status != "completed" {
+            pending = true;
+        } else if !matches!(
+            run.conclusion.as_deref(),
+            Some("success" | "neutral" | "skipped")
+        ) {
+            failures.push(run.name.clone());
+        }
     }
 
-    // Legacy commit statuses (non-Actions CI). "pending" with no checks blocks;
-    // "success" or an empty status set passes.
+    // Legacy commit statuses (non-Actions CI). A "pending" here only matters when
+    // there are legacy contexts and no check runs supersede them.
     let combined: CombinedStatus = octo
         .get(
             format!("/repos/{owner}/{repo}/commits/{sha}/status"),
@@ -181,11 +210,49 @@ pub async fn checks_green(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -
         )
         .await
         .wrap_err("failed to fetch combined commit status")?;
+    match combined.state.as_str() {
+        "failure" | "error" => failures.push("commit status".to_string()),
+        "pending" if combined.total_count > 0 && check_runs.total_count == 0 => pending = true,
+        _ => {}
+    }
 
-    let no_legacy_failures =
-        combined.state == "success" || (combined.state == "pending" && check_runs.total_count > 0);
+    if pending {
+        Ok(CiStatus::Pending)
+    } else if failures.is_empty() {
+        Ok(CiStatus::Passing)
+    } else {
+        Ok(CiStatus::Failing(failures))
+    }
+}
 
-    Ok(no_legacy_failures)
+#[derive(Debug, Deserialize)]
+struct GitRef {
+    object: GitRefObject,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitRefObject {
+    sha: String,
+}
+
+/// The commit SHA at the tip of `branch`.
+///
+/// Uses the git-ref API, which is strongly consistent, so it reflects a
+/// just-pushed commit immediately (unlike the pulls list, which can lag).
+pub async fn branch_head_sha(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<String> {
+    let git_ref: GitRef = octo
+        .get(
+            format!("/repos/{owner}/{repo}/git/ref/heads/{branch}"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to read branch ref")?;
+    Ok(git_ref.object.sha)
 }
 
 /// Squash-merges a pull request.
@@ -197,4 +264,137 @@ pub async fn squash_merge(octo: &Octocrab, owner: &str, repo: &str, number: u64)
         .await
         .wrap_err("failed to squash-merge pull request")?;
     Ok(())
+}
+
+// --- Issue thread (GitHub-style detail view) ---------------------------------
+//
+// These structs deserialize straight from the GitHub REST shapes and serialize
+// to the frontend unchanged (GitHub already uses the snake_case the UI expects),
+// so the issue view renders the real conversation: author, avatars, labels,
+// assignees, and comments.
+
+/// A GitHub account as it appears on an issue or comment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueUser {
+    pub login: String,
+    pub avatar_url: String,
+    #[serde(default)]
+    pub html_url: String,
+}
+
+/// An issue label with its hex color (no leading `#`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueLabel {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueMilestone {
+    pub title: String,
+}
+
+/// One comment in the conversation (the issue body is rendered separately).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueComment {
+    pub user: IssueUser,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub author_association: String,
+}
+
+/// The issue itself: header, opener, body, and sidebar metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDetail {
+    pub number: u64,
+    pub title: String,
+    /// `"open"` or `"closed"`.
+    pub state: String,
+    pub user: IssueUser,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub author_association: String,
+    #[serde(default)]
+    pub labels: Vec<IssueLabel>,
+    #[serde(default)]
+    pub assignees: Vec<IssueUser>,
+    pub milestone: Option<IssueMilestone>,
+}
+
+/// An issue plus its comments, powering the GitHub-style conversation view.
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueThread {
+    pub issue: IssueDetail,
+    pub comments: Vec<IssueComment>,
+}
+
+/// Fetches an issue and its comments for the conversation view.
+pub async fn get_issue_thread(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+) -> Result<IssueThread> {
+    let issue: IssueDetail = octo
+        .get(
+            format!("/repos/{owner}/{repo}/issues/{number}"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to fetch issue")?;
+    let comments: Vec<IssueComment> = octo
+        .get(
+            format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page=100"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to fetch issue comments")?;
+    Ok(IssueThread { issue, comments })
+}
+
+/// Opens or closes an issue (with an optional close reason) and returns the
+/// updated issue. `state` is `"open"` or `"closed"`; `state_reason` is GitHub's
+/// `"completed"` / `"not_planned"` when closing.
+pub async fn set_issue_state(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+    state: &str,
+    state_reason: Option<&str>,
+) -> Result<IssueDetail> {
+    let mut body = json!({ "state": state });
+    if let Some(reason) = state_reason {
+        body["state_reason"] = json!(reason);
+    }
+    let issue: IssueDetail = octo
+        .patch(
+            format!("/repos/{owner}/{repo}/issues/{number}"),
+            Some(&body),
+        )
+        .await
+        .wrap_err("failed to update issue state")?;
+    Ok(issue)
+}
+
+/// Posts a comment to an issue and returns the created comment.
+pub async fn add_issue_comment(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+    body: &str,
+) -> Result<IssueComment> {
+    let comment: IssueComment = octo
+        .post(
+            format!("/repos/{owner}/{repo}/issues/{number}/comments"),
+            Some(&json!({ "body": body })),
+        )
+        .await
+        .wrap_err("failed to post issue comment")?;
+    Ok(comment)
 }

@@ -56,18 +56,28 @@ pub fn router(state: AppState) -> Router {
         .route("/board", get(board::get_board))
         .route("/board/stream", get(sse::board_stream))
         .route("/tasks/:id", get(tasks::get_task))
+        .route("/tasks/:id/issue", get(tasks::get_issue))
+        .route("/tasks/:id/issue/state", post(tasks::set_issue_state))
+        .route("/tasks/:id/comment", post(tasks::add_comment))
         .route("/tasks/:id/stream", get(sse::task_stream))
         .route("/tasks/:id/move", post(board::move_task))
         .route("/tasks/:id/hold", post(board::set_hold))
         .route("/agent/suggestions", post(suggestions::create))
         .route("/suggestions/:id/ack", post(suggestions::acknowledge))
         .route("/repos", get(repos::list).post(repos::upsert))
-        .route("/repos/:id", axum::routing::delete(repos::delete))
+        .route(
+            "/repos/:id",
+            axum::routing::put(repos::update).delete(repos::delete),
+        )
         .route("/repos/import-org", post(repos::import_org))
         .route("/sync", post(repos::sync))
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
         .route("/settings/tokens", post(settings::set_tokens))
+        .route(
+            "/settings/env",
+            get(settings::list_env).put(settings::set_env),
+        )
         .route("/workspace/restart", post(workspace::restart))
         .route("/workspace/recreate", post(workspace::recreate))
         .route("/workspace/provision", post(workspace::provision))

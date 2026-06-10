@@ -1,20 +1,48 @@
 <script lang="ts">
-  import type { ReviewPolicy, Settings } from '$lib/types'
+  import type { AvailabilityWindow, EnvVar, ReviewPolicy, Settings } from '$lib/types'
+  import type { EnvVarWrite } from '$lib/api'
 
   import { onMount } from 'svelte'
 
   import { KNOWN_MODELS } from '$lib/types'
+  import { WEEKDAYS, minutesToTime, timeToMinutes } from '$lib/schedule'
+  import { usFederalHolidays } from '$lib/holidays'
   import {
     exportConfig,
     getSettings,
     importConfig,
+    listEnvVars,
     recreateWorkspace,
     restartWorkspace,
+    setEnvVars,
     setTokens,
     updateSettings
   } from '$lib/api'
+  import * as Card from '$lib/components/ui/card'
+  import * as Select from '$lib/components/ui/select'
+  import { Button, buttonVariants } from '$lib/components/ui/button'
+  import { Input } from '$lib/components/ui/input'
+  import { Label } from '$lib/components/ui/label'
+  import { Textarea } from '$lib/components/ui/textarea'
+  import { Badge } from '$lib/components/ui/badge'
+  import { Switch } from '$lib/components/ui/switch'
 
   const CUSTOM_MODEL = '__custom__'
+
+  // One editable row per weekday for the working-hours grid. The data model
+  // allows several windows per day, but a single contiguous shift covers the
+  // common "9 to 5" case and keeps the UI legible.
+  type DayRow = { active: boolean; start: string; end: string }
+
+  // One editable row in the environment-variables table. For a secret loaded from
+  // the server, `value` starts blank and `preview` holds the masked stored value;
+  // leaving it blank on save keeps the stored secret unchanged.
+  type EnvRow = {
+    key: string
+    value: string
+    is_secret: boolean
+    preview: string | null
+  }
 
   let settings = $state<Settings | null>(null)
   let savedAt = $state<string | null>(null)
@@ -29,7 +57,61 @@
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
   let modelChoice = $state<string>(KNOWN_MODELS[0].value)
 
+  // Availability schedule editing state, kept separate from `settings` because
+  // the per-weekday grid and skip-date chips are derived shapes.
+  let days = $state<DayRow[]>([])
+  let skipDates = $state<string[]>([])
+  let newSkipDate = $state('')
+  let scheduleSavedAt = $state<string | null>(null)
+  // The browser's full IANA zone list, when the engine exposes it.
+  const timezones =
+    typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []
+
+  // Environment variables (DigitalOcean-style rows).
+  let envRows = $state<EnvRow[]>([])
+  let envMessage = $state<string | null>(null)
+
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
+
+  const modelLabel = $derived(
+    modelChoice === CUSTOM_MODEL
+      ? 'Custom…'
+      : (KNOWN_MODELS.find((model) => model.value === modelChoice)?.label ?? modelChoice)
+  )
+
+  // Upcoming US federal holidays (this year and next) not already skipped.
+  const holidaySuggestions = $derived.by(() => {
+    const today = new Date().toISOString().slice(0, 10)
+    const year = new Date().getFullYear()
+    return [...usFederalHolidays(year), ...usFederalHolidays(year + 1)]
+      .filter((holiday) => holiday.date >= today && !skipDates.includes(holiday.date))
+      .slice(0, 8)
+  })
+
+  function buildDays(windows: AvailabilityWindow[]): DayRow[] {
+    return WEEKDAYS.map((_, weekday) => {
+      const window = windows.find((existing) => existing.weekday === weekday)
+      if (!window) {
+        return { active: false, start: '09:00', end: '17:00' }
+      }
+      return {
+        active: true,
+        start: minutesToTime(window.start_minute),
+        end: minutesToTime(window.end_minute)
+      }
+    })
+  }
+
+  function toEnvRow(variable: EnvVar): EnvRow {
+    return {
+      key: variable.key,
+      // Secrets arrive masked; show that as a placeholder and keep the input
+      // blank so an unedited secret is preserved on save.
+      value: variable.is_secret ? '' : variable.value,
+      is_secret: variable.is_secret,
+      preview: variable.is_secret ? variable.value : null
+    }
+  }
 
   async function load() {
     const loaded = await getSettings()
@@ -37,11 +119,78 @@
     modelChoice = KNOWN_MODELS.some((model) => model.value === loaded.claude_model)
       ? loaded.claude_model
       : CUSTOM_MODEL
+    days = buildDays(loaded.availability_windows)
+    skipDates = [...loaded.availability_skip_dates]
+    const env = await listEnvVars()
+    envRows = env.variables.map(toEnvRow)
   }
 
-  function onModelChange() {
-    if (settings && modelChoice !== CUSTOM_MODEL) {
-      settings.claude_model = modelChoice
+  function addSkipDate(date: string) {
+    const trimmed = date.trim()
+    if (!trimmed || skipDates.includes(trimmed)) {
+      return
+    }
+    skipDates = [...skipDates, trimmed].sort()
+    newSkipDate = ''
+  }
+
+  function removeSkipDate(date: string) {
+    skipDates = skipDates.filter((existing) => existing !== date)
+  }
+
+  async function saveSchedule() {
+    if (!settings) {
+      return
+    }
+    const windows: AvailabilityWindow[] = days
+      .map((day, weekday) => ({ day, weekday }))
+      .filter(({ day }) => day.active)
+      .map(({ day, weekday }) => ({
+        weekday,
+        start_minute: timeToMinutes(day.start),
+        end_minute: timeToMinutes(day.end)
+      }))
+    settings = await updateSettings({
+      availability_enabled: settings.availability_enabled,
+      availability_timezone: settings.availability_timezone,
+      availability_windows: windows,
+      availability_skip_dates: skipDates
+    })
+    scheduleSavedAt = new Date().toLocaleTimeString()
+  }
+
+  function addEnvRow() {
+    envRows = [...envRows, { key: '', value: '', is_secret: false, preview: null }]
+  }
+
+  function removeEnvRow(index: number) {
+    envRows = envRows.filter((_, position) => position !== index)
+  }
+
+  async function saveEnv() {
+    const variables: EnvVarWrite[] = envRows
+      .filter((row) => row.key.trim())
+      .map((row) => {
+        const key = row.key.trim()
+        if (!row.is_secret) {
+          return { key, value: row.value, is_secret: false }
+        }
+        // A blank secret input keeps the stored value, so omit it; otherwise the
+        // typed value becomes the new secret.
+        if (row.value) {
+          return { key, value: row.value, is_secret: true }
+        }
+        return { key, is_secret: true }
+      })
+    const saved = await setEnvVars(variables)
+    envRows = saved.variables.map(toEnvRow)
+    envMessage = 'Saved.'
+  }
+
+  function chooseModel(value: string) {
+    modelChoice = value
+    if (settings && value !== CUSTOM_MODEL) {
+      settings.claude_model = value
     }
   }
 
@@ -118,229 +267,338 @@
   onMount(load)
 </script>
 
-<div class="page">
-  <h1>Settings</h1>
+<div class="mx-auto max-w-3xl space-y-5 px-6 py-6">
+  <h1 class="text-2xl font-semibold">Settings</h1>
 
   {#if settings}
-    <section class="panel">
-      <h2>Environment profile</h2>
-      <div class="field">
-        <label for="org">Organization name</label>
-        <input id="org" bind:value={settings.org_name} />
-      </div>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Environment profile</Card.Title>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="org">Organization name</Label>
+          <Input id="org" bind:value={settings.org_name} />
+        </div>
 
-      <div class="field">
-        <label for="model">Claude model</label>
-        <select id="model" bind:value={modelChoice} onchange={onModelChange}>
-          {#each KNOWN_MODELS as model}
-            <option value={model.value}>{model.label}</option>
-          {/each}
-          <option value={CUSTOM_MODEL}>Custom…</option>
-        </select>
-        {#if modelChoice === CUSTOM_MODEL}
-          <input
-            class="custom-model"
-            placeholder="exact model id, e.g. claude-opus-4-8[1m]"
-            bind:value={settings.claude_model}
+        <div class="space-y-1.5">
+          <Label for="model">Claude model</Label>
+          <Select.Root type="single" value={modelChoice} onValueChange={chooseModel}>
+            <Select.Trigger id="model" class="w-full">{modelLabel}</Select.Trigger>
+            <Select.Content>
+              {#each KNOWN_MODELS as model}
+                <Select.Item value={model.value} label={model.label}>{model.label}</Select.Item>
+              {/each}
+              <Select.Item value={CUSTOM_MODEL} label="Custom…">Custom…</Select.Item>
+            </Select.Content>
+          </Select.Root>
+          {#if modelChoice === CUSTOM_MODEL}
+            <Input placeholder="exact model id, e.g. claude-opus-4-8[1m]" bind:value={settings.claude_model} />
+          {/if}
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Friendly names shown here; the coded model id is what's sent to the agent. Fable 5, Opus
+            4.x, and Sonnet 4.6 are 1M-context; Haiku 4.5 is 200K.
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="policy">Default review policy</Label>
+          <Select.Root
+            type="single"
+            value={settings.default_review_policy}
+            onValueChange={(value) => settings && (settings.default_review_policy = value as ReviewPolicy)}
+          >
+            <Select.Trigger id="policy" class="w-full">
+              {settings.default_review_policy.replace(/_/g, ' ')}
+            </Select.Trigger>
+            <Select.Content>
+              {#each policies as policy}
+                <Select.Item value={policy} label={policy.replace(/_/g, ' ')}>
+                  {policy.replace(/_/g, ' ')}
+                </Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="global">Global agent instructions</Label>
+          <Textarea id="global" rows={5} bind:value={settings.global_instructions} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Written to <code class="rounded bg-secondary px-1 py-0.5 text-xs">/workspace/AGENTS.md</code>,
+            which the agent reads automatically at the start of every session. Put org-wide
+            conventions here (how to branch, when to open vs. auto-merge PRs, coding standards).
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="setup">Environment setup script</Label>
+          <Textarea id="setup" rows={4} bind:value={settings.base_setup_script} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            Runs once when the workspace container is built or recreated, as the non-root
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">node</code> user (passwordless
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">sudo</code> is available). The image is
+            Debian 12 (bookworm) with Node 22; <code class="rounded bg-secondary px-1 py-0.5 text-xs">pnpm</code>,
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn</code>, and
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">npm</code> are already installed, so you do
+            not need <code class="rounded bg-secondary px-1 py-0.5 text-xs">corepack enable</code>. Per-repo
+            commands like <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn install</code> belong in
+            each repository's own setup script.
+          </p>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <Button onclick={save}>Save</Button>
+          {#if savedAt}<span class="text-sm text-muted-foreground">Saved at {savedAt}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Secrets</Card.Title>
+        <Card.Description>
+          Stored in the database, never in <code class="rounded bg-secondary px-1 py-0.5 text-xs">.env</code>
+          and never returned by the API. Injected into the agent only at runtime. Leave a field blank
+          to keep the existing value.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="claude-token" class="flex items-center gap-2">
+            Claude OAuth token
+            <Badge variant="outline" class={settings.claude_token_set ? 'border-success/40 text-success' : 'text-muted-foreground'}>
+              {settings.claude_token_set ? 'configured' : 'not set'}
+            </Badge>
+          </Label>
+          <Input
+            id="claude-token"
+            type="password"
+            autocomplete="off"
+            placeholder="from `claude setup-token`"
+            bind:value={claudeTokenInput}
           />
+        </div>
+        <div class="space-y-1.5">
+          <Label for="gh-token" class="flex items-center gap-2">
+            GitHub token
+            <Badge variant="outline" class={settings.github_token_set ? 'border-success/40 text-success' : 'text-muted-foreground'}>
+              {settings.github_token_set ? 'configured' : 'not set'}
+            </Badge>
+          </Label>
+          <Input
+            id="gh-token"
+            type="password"
+            autocomplete="off"
+            placeholder="PAT with repo + issues scope"
+            bind:value={githubTokenInput}
+          />
+        </div>
+        <div class="flex items-center gap-3">
+          <Button onclick={saveTokens}>Save secrets</Button>
+          {#if tokensMessage}<span class="text-sm text-muted-foreground">{tokensMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Agent config repo (~/.claude)</Card.Title>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="space-y-1.5">
+          <Label for="configrepo">Config repo URL</Label>
+          <Input id="configrepo" placeholder="git@github.com:navarrotech/agents.git" bind:value={settings.config_repo_url} />
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            The workspace clones this into the agent's config dir, so your
+            <code class="rounded bg-secondary px-1 py-0.5 text-xs">AGENTS.md</code>, docs, manuals, and skills
+            travel with the deployment, no host mount required. Cloned over SSH using your mounted key.
+            Save, then Recreate to apply.
+          </p>
+        </div>
+        <Button onclick={save}>Save</Button>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Backup & transfer</Card.Title>
+        <Card.Description>
+          Export your settings and repositories as JSON to move a setup to another machine. Secrets
+          are never included. Import merges into the current config.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content>
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={downloadExport}>Export JSON</Button>
+          <label class={buttonVariants({ variant: 'outline' })}>
+            Import JSON
+            <input type="file" accept="application/json" onchange={onImportFile} hidden />
+          </label>
+          {#if importMessage}<span class="text-sm text-muted-foreground">{importMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Availability schedule</Card.Title>
+        <Card.Description>
+          Optional. When on, the agent only picks up new work during the hours and days you set
+          here, in your time zone, and never on a skipped date. The database always stores UTC; this
+          is just your local view. A task already in progress always runs to completion.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="flex items-center gap-2">
+          <Switch id="availability-enabled" bind:checked={settings.availability_enabled} />
+          <Label for="availability-enabled">Restrict the agent to a schedule</Label>
+        </div>
+
+        {#if settings.availability_enabled}
+          <div class="space-y-1.5">
+            <Label for="timezone">Time zone</Label>
+            <select
+              id="timezone"
+              bind:value={settings.availability_timezone}
+              class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              {#if !timezones.includes(settings.availability_timezone)}
+                <option value={settings.availability_timezone}>{settings.availability_timezone}</option>
+              {/if}
+              {#each timezones as timezone}
+                <option value={timezone}>{timezone}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="space-y-2">
+            <Label>Working hours</Label>
+            <p class="text-xs text-muted-foreground">
+              Leave every day unchecked to allow any time of day (handy when you only want to skip
+              specific dates).
+            </p>
+            <div class="space-y-2">
+              {#each days as day, weekday}
+                <div class="flex items-center gap-3 {day.active ? '' : 'opacity-60'}">
+                  <label class="flex w-28 items-center gap-2">
+                    <Switch bind:checked={day.active} />
+                    <span class="text-sm">{WEEKDAYS[weekday]}</span>
+                  </label>
+                  <Input type="time" class="w-32" bind:value={day.start} disabled={!day.active} />
+                  <span class="text-sm text-muted-foreground">to</span>
+                  <Input type="time" class="w-32" bind:value={day.end} disabled={!day.active} />
+                </div>
+              {/each}
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <Label>Skip dates</Label>
+            <p class="text-xs text-muted-foreground">
+              Vacations, holidays, any single day the agent should stay idle.
+            </p>
+            <div class="flex items-center gap-2">
+              <Input type="date" class="w-44" bind:value={newSkipDate} />
+              <Button variant="outline" size="sm" onclick={() => addSkipDate(newSkipDate)}>Add date</Button>
+            </div>
+            {#if skipDates.length}
+              <div class="flex flex-wrap gap-2">
+                {#each skipDates as date}
+                  <Button variant="outline" size="sm" class="h-7" title="Remove" onclick={() => removeSkipDate(date)}>
+                    {date} ✕
+                  </Button>
+                {/each}
+              </div>
+            {:else}
+              <p class="text-sm text-muted-foreground">No skipped dates.</p>
+            {/if}
+
+            {#if holidaySuggestions.length}
+              <p class="text-xs text-muted-foreground">Suggested US holidays (click to add):</p>
+              <div class="flex flex-wrap gap-2">
+                {#each holidaySuggestions as holiday}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-7 border border-dashed border-border text-muted-foreground"
+                    onclick={() => addSkipDate(holiday.date)}
+                  >
+                    + {holiday.name} ({holiday.date})
+                  </Button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <div class="flex items-center gap-3">
+            <Button onclick={saveSchedule}>Save schedule</Button>
+            {#if scheduleSavedAt}<span class="text-sm text-muted-foreground">Saved at {scheduleSavedAt}</span>{/if}
+          </div>
         {/if}
-        <p class="hint">
-          Friendly names shown here; the coded model id is what's sent to the agent. Fable 5, Opus
-          4.x, and Sonnet 4.6 are 1M-context; Haiku 4.5 is 200K.
-        </p>
-      </div>
+      </Card.Content>
+    </Card.Root>
 
-      <div class="field">
-        <label for="policy">Default review policy</label>
-        <select id="policy" bind:value={settings.default_review_policy}>
-          {#each policies as policy}
-            <option value={policy}>{policy.replace(/_/g, ' ')}</option>
-          {/each}
-        </select>
-      </div>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Environment variables</Card.Title>
+        <Card.Description>
+          Injected into the agent's environment at runtime (alongside its tokens) and available to
+          setup scripts. Mark a row <strong>secret</strong> to have its value scrubbed from the
+          agent's output before it reaches the logs or database, and only ever shown here masked.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-4">
+        {#if envRows.length}
+          <div class="space-y-2">
+            {#each envRows as row, index}
+              <div class="flex items-center gap-2">
+                <Input class="w-1/3 font-mono" placeholder="KEY" bind:value={row.key} />
+                <Input
+                  class="flex-1 font-mono"
+                  type={row.is_secret ? 'password' : 'text'}
+                  placeholder={row.is_secret && row.preview ? `${row.preview} (leave blank to keep)` : 'value'}
+                  autocomplete="off"
+                  bind:value={row.value}
+                />
+                <label class="flex items-center gap-1.5 text-sm text-muted-foreground" title="Scrub this value from all output">
+                  <Switch bind:checked={row.is_secret} />
+                  secret
+                </label>
+                <Button variant="ghost" size="icon" title="Remove" onclick={() => removeEnvRow(index)}>✕</Button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-sm text-muted-foreground">No environment variables yet.</p>
+        {/if}
 
-      <div class="field">
-        <label for="global">Global agent instructions</label>
-        <textarea id="global" rows="5" bind:value={settings.global_instructions}></textarea>
-        <p class="hint">
-          Written to <code>/workspace/AGENTS.md</code>, which the agent reads automatically at the
-          start of every session. Put org-wide conventions here (how to branch, when to open vs.
-          auto-merge PRs, coding standards).
-        </p>
-      </div>
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={addEnvRow}>+ Add another</Button>
+          <Button onclick={saveEnv}>Save variables</Button>
+          {#if envMessage}<span class="text-sm text-muted-foreground">{envMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
 
-      <div class="field">
-        <label for="setup">Environment setup script</label>
-        <textarea id="setup" rows="4" bind:value={settings.base_setup_script}></textarea>
-        <p class="hint">
-          Runs once when the workspace container is built or recreated. Use it to install CLIs and
-          toolchains shared across repos (e.g. <code>corepack enable</code>, global npm packages,
-          apt packages). Per-repo commands like <code>yarn install</code> belong in each
-          repository's own setup script.
-        </p>
-      </div>
-
-      <div class="actions">
-        <button class="primary" onclick={save}>Save</button>
-        {#if savedAt}<span class="muted">Saved at {savedAt}</span>{/if}
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Secrets</h2>
-      <p class="hint">
-        Stored in the database, never in <code>.env</code> and never returned by the API. Injected
-        into the agent only at runtime. Leave a field blank to keep the existing value.
-      </p>
-      <div class="field">
-        <label for="claude-token">
-          Claude OAuth token
-          <span class="badge {settings.claude_token_set ? 'done' : ''}">
-            {settings.claude_token_set ? 'configured' : 'not set'}
-          </span>
-        </label>
-        <input
-          id="claude-token"
-          type="password"
-          autocomplete="off"
-          placeholder="from `claude setup-token`"
-          bind:value={claudeTokenInput}
-        />
-      </div>
-      <div class="field">
-        <label for="gh-token">
-          GitHub token
-          <span class="badge {settings.github_token_set ? 'done' : ''}">
-            {settings.github_token_set ? 'configured' : 'not set'}
-          </span>
-        </label>
-        <input
-          id="gh-token"
-          type="password"
-          autocomplete="off"
-          placeholder="PAT with repo + issues scope"
-          bind:value={githubTokenInput}
-        />
-      </div>
-      <div class="actions">
-        <button class="primary" onclick={saveTokens}>Save secrets</button>
-        {#if tokensMessage}<span class="muted">{tokensMessage}</span>{/if}
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Agent config repo (~/.claude)</h2>
-      <div class="field">
-        <label for="configrepo">Config repo URL</label>
-        <input
-          id="configrepo"
-          placeholder="git@github.com:navarrotech/agents.git"
-          bind:value={settings.config_repo_url}
-        />
-        <p class="hint">
-          The workspace clones this into the agent's config dir, so your <code>AGENTS.md</code>,
-          docs, manuals, and skills travel with the deployment, no host mount required. Cloned over
-          SSH using your mounted key. Secrets (e.g. credentials) should stay out of the repo;
-          auth uses <code>CLAUDE_CODE_OAUTH_TOKEN</code>. Save, then Recreate to apply.
-        </p>
-      </div>
-      <div class="actions">
-        <button class="primary" onclick={save}>Save</button>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Backup & transfer</h2>
-      <p class="muted">
-        Export your settings, repositories, and sources as JSON to move a setup to another machine.
-        Secrets are never included. Import merges into the current config.
-      </p>
-      <div class="actions">
-        <button onclick={downloadExport}>Export JSON</button>
-        <label class="import-button">
-          Import JSON
-          <input type="file" accept="application/json" onchange={onImportFile} hidden />
-        </label>
-        {#if importMessage}<span class="muted">{importMessage}</span>{/if}
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Workspace</h2>
-      <p class="muted">
-        Restart re-runs the entrypoint; recreate rebuilds the container and reprovisions (config
-        repo + all repos + setup scripts). The persistent volume (repos + Claude conversation) is
-        preserved either way.
-      </p>
-      <div class="actions">
-        <button onclick={runRestart}>Restart</button>
-        <button onclick={runRecreate}>Recreate</button>
-        {#if workspaceMessage}<span class="muted">{workspaceMessage}</span>{/if}
-      </div>
-    </section>
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Workspace</Card.Title>
+        <Card.Description>
+          Restart re-runs the entrypoint; recreate rebuilds the container and reprovisions (config
+          repo + all repos + setup scripts). The persistent volume (repos + Claude conversation) is
+          preserved either way.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content>
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={runRestart}>Restart</Button>
+          <Button variant="outline" onclick={runRecreate}>Recreate</Button>
+          {#if workspaceMessage}<span class="text-sm text-muted-foreground">{workspaceMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
   {:else}
-    <p class="muted">Loading…</p>
+    <p class="text-muted-foreground">Loading…</p>
   {/if}
 </div>
-
-<style>
-  .page {
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 1.2rem 1.4rem 3rem;
-  }
-
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1.1rem;
-    margin-bottom: 1.2rem;
-  }
-
-  .panel h2 {
-    margin-top: 0;
-    font-size: 1rem;
-  }
-
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 0.8rem;
-  }
-
-  .muted {
-    color: var(--muted);
-    font-size: 0.85rem;
-  }
-
-  .hint {
-    color: var(--muted);
-    font-size: 0.8rem;
-    line-height: 1.45;
-    margin: 0.4rem 0 0;
-  }
-
-  .hint code {
-    background: var(--panel-2);
-    padding: 0.05rem 0.3rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-  }
-
-  .custom-model {
-    margin-top: 0.4rem;
-  }
-
-  .import-button {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.4rem 0.8rem;
-    cursor: pointer;
-  }
-
-  .import-button:hover {
-    border-color: var(--accent);
-  }
-</style>

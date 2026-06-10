@@ -8,9 +8,39 @@ export type TaskStatus =
   | 'working'
   | 'opening_pr'
   | 'awaiting_review'
+  | 'ci_failing'
+  | 'ci_blocked'
   | 'merging'
   | 'done'
   | 'failed'
+
+// Friendly status labels for the card badge.
+export const STATUS_LABELS = {
+  queued: 'queued',
+  preparing: 'preparing',
+  working: 'working',
+  opening_pr: 'opening PR',
+  awaiting_review: 'awaiting review',
+  ci_failing: 'CI failing',
+  ci_blocked: 'CI blocked',
+  merging: 'merging',
+  done: 'done',
+  failed: 'failed'
+} as const satisfies Record<TaskStatus, string>
+
+// Tailwind classes coloring each status badge (used with Badge variant="outline").
+export const STATUS_BADGE = {
+  queued: 'border-border text-muted-foreground',
+  preparing: 'border-primary/40 text-primary',
+  working: 'border-primary/40 text-primary',
+  opening_pr: 'border-primary/40 text-primary',
+  awaiting_review: 'border-warning/40 text-warning',
+  ci_failing: 'border-warning/40 text-warning',
+  ci_blocked: 'border-destructive/40 text-destructive',
+  merging: 'border-primary/40 text-primary',
+  done: 'border-success/40 text-success',
+  failed: 'border-destructive/40 text-destructive'
+} as const satisfies Record<TaskStatus, string>
 
 export type ReviewPolicy = 'auto_squash_merge' | 'human_review' | 'none'
 
@@ -30,6 +60,7 @@ export type Task = {
   branch: string | null
   pr_url: string | null
   error: string | null
+  ci_fix_attempts: number
   hold: boolean
   session_id: string | null
   started_at: string | null
@@ -37,6 +68,15 @@ export type Task = {
   last_activity_at: string | null
   created_at: string
   updated_at: string
+}
+
+// A recurring weekly window the agent is allowed to work in. Minutes are counted
+// from local midnight in the operator's configured time zone; weekday is 0 =
+// Monday through 6 = Sunday (matching the Rust side).
+export type AvailabilityWindow = {
+  weekday: number
+  start_minute: number
+  end_minute: number
 }
 
 export type Settings = {
@@ -54,6 +94,23 @@ export type Settings = {
   updated_at: string
   claude_token_set: boolean
   github_token_set: boolean
+  availability_enabled: boolean
+  availability_timezone: string
+  availability_windows: AvailabilityWindow[]
+  // ISO calendar dates ("YYYY-MM-DD") to skip entirely.
+  availability_skip_dates: string[]
+  // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
+  // unset. The raw tokens are never sent.
+  claude_token_preview: string | null
+  github_token_preview: string | null
+}
+
+// A user-defined environment variable as the UI sees it. For a secret, `value`
+// is the masked preview returned by the API, never the raw secret.
+export type EnvVar = {
+  key: string
+  value: string
+  is_secret: boolean
 }
 
 export type Repository = {
@@ -127,6 +184,44 @@ export const KNOWN_MODELS: { value: string; label: string }[] = [
   { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (1M)' },
   { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (200K)' }
 ]
+
+// --- GitHub issue thread (conversation view) ---------------------------------
+
+export type IssueUser = {
+  login: string
+  avatar_url: string
+  html_url: string
+}
+
+export type IssueLabel = {
+  name: string
+  color: string
+}
+
+export type IssueComment = {
+  user: IssueUser
+  body: string | null
+  created_at: string
+  author_association: string
+}
+
+export type IssueDetail = {
+  number: number
+  title: string
+  state: 'open' | 'closed'
+  user: IssueUser
+  body: string | null
+  created_at: string
+  author_association: string
+  labels: IssueLabel[]
+  assignees: IssueUser[]
+  milestone: { title: string } | null
+}
+
+export type IssueThread = {
+  issue: IssueDetail
+  comments: IssueComment[]
+}
 
 export type ConfigBundle = {
   settings: Record<string, unknown>

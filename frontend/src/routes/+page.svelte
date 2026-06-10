@@ -4,10 +4,14 @@
 
   import { onMount, onDestroy } from 'svelte'
   import { dndzone } from 'svelte-dnd-action'
+  import { RefreshCw, Pause, Play } from '@lucide/svelte'
 
   import { COLUMNS } from '$lib/types'
-  import { getBoard, moveTask, provisionWorkspace, setPaused, syncNow } from '$lib/api'
+  import { getBoard, listRepos, moveTask, provisionWorkspace, setPaused, syncNow } from '$lib/api'
+  import { isWithinSchedule } from '$lib/schedule'
   import Card from '$lib/components/Card.svelte'
+  import { Button } from '$lib/components/ui/button'
+  import * as Alert from '$lib/components/ui/alert'
 
   const FLIP_MS = 150
 
@@ -24,11 +28,14 @@
   })
 
   let eventSource: EventSource | null = null
+  // Maps a task's repo_id to its full name, so each card can show its source repo.
+  let repoNames = $state<Record<string, string>>({})
 
   async function load() {
-    const board = await getBoard()
+    const [board, repos] = await Promise.all([getBoard(), listRepos()])
     settings = board.settings
     suggestionCounts = board.suggestion_counts
+    repoNames = Object.fromEntries(repos.map((repo) => [repo.id, repo.full_name]))
     const grouped: Record<TaskColumn, Task[]> = {
       available: [],
       todo: [],
@@ -88,6 +95,16 @@
     settings = await setPaused(!settings.agent_paused)
   }
 
+  // True when the agent is enabled but the schedule currently holds it idle, so
+  // the board can explain why nothing is being picked up. Recomputed on every
+  // board reload (the SSE stream keeps that frequent enough).
+  const outsideSchedule = $derived(
+    !!settings &&
+      !settings.agent_paused &&
+      settings.availability_enabled &&
+      !isWithinSchedule(settings, new Date())
+  )
+
   let checking = $state(false)
   async function checkIssues() {
     checking = true
@@ -123,140 +140,85 @@
 </script>
 
 {#if settings?.config_repo_error}
-  <div class="banner">
+  <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-center justify-between gap-4">
     <div>
-      <strong>Config repo (~/.claude) failed to set up — the agent is halted.</strong>
-      <div class="banner-detail">{settings.config_repo_error}</div>
+      <Alert.Title>Config repo (~/.claude) failed to set up — the agent is halted.</Alert.Title>
+      <Alert.Description class="font-mono text-xs break-words">
+        {settings.config_repo_error}
+      </Alert.Description>
     </div>
-    <button onclick={retryProvision} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry'}</button>
-  </div>
+    <Button variant="outline" size="sm" disabled={retrying} onclick={retryProvision}>
+      {retrying ? 'Retrying…' : 'Retry'}
+    </Button>
+  </Alert.Root>
 {/if}
 
-<div class="board-header">
-  <div class="org">
+<div class="flex items-center justify-between px-6 pb-1 pt-4">
+  <div class="flex items-baseline gap-2">
     {#if settings}
-      <strong>{settings.org_name}</strong>
-      <span class="muted">· {settings.claude_model}</span>
+      <strong class="text-base">{settings.org_name}</strong>
+      {#if outsideSchedule}
+        <span
+          class="rounded-full border border-warning/40 px-2 py-0.5 text-xs text-warning"
+          title="Outside the availability schedule"
+        >
+          ⏰ Outside scheduled hours
+        </span>
+      {/if}
     {/if}
   </div>
-  <div class="header-actions">
-    <button onclick={checkIssues} disabled={checking}>
-      {checking ? 'Checking…' : '⟳ Check issues'}
-    </button>
+  <div class="flex gap-2">
+    <Button variant="outline" size="sm" disabled={checking} onclick={checkIssues}>
+      <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" />
+      {checking ? 'Checking…' : 'Check issues'}
+    </Button>
     {#if settings}
-      <button class:primary={settings.agent_paused} onclick={togglePause}>
-        {settings.agent_paused ? '▶ Resume agent' : '⏸ Pause agent'}
-      </button>
+      <Button
+        variant={settings.agent_paused ? 'default' : 'outline'}
+        size="sm"
+        onclick={togglePause}
+      >
+        {#if settings.agent_paused}
+          <Play class="size-4" /> Resume agent
+        {:else}
+          <Pause class="size-4" /> Pause agent
+        {/if}
+      </Button>
     {/if}
   </div>
 </div>
 
-<div class="board">
+<div class="grid grid-cols-1 items-start gap-3 p-4 lg:h-full lg:grid-cols-6 lg:px-6 lg:pb-6">
   {#each COLUMNS as column}
-    <section class="lane">
-      <header>
+    <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
+      <header
+        class="flex items-center justify-between border-b border-border px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+      >
         <span>{column.label}</span>
-        <span class="count">{columns[column.key].length}</span>
+        <span>{columns[column.key].length}</span>
       </header>
       <div
-        class="cards"
-        use:dndzone={{ items: columns[column.key], flipDurationMs: FLIP_MS }}
+        class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
+        use:dndzone={{
+          items: columns[column.key],
+          flipDurationMs: FLIP_MS,
+          dropTargetStyle: {},
+          dropTargetClasses: ['drop-active']
+        }}
         onconsider={(event) => handleConsider(column.key, event)}
         onfinalize={(event) => handleFinalize(column.key, event)}
       >
         {#each columns[column.key] as task (task.id)}
           <div>
-            <Card {task} onchange={load} suggestionCount={suggestionCounts[task.id] ?? 0} />
+            <Card
+              {task}
+              onchange={load}
+              repoName={task.repo_id ? repoNames[task.repo_id] : undefined}
+              suggestionCount={suggestionCounts[task.id] ?? 0}
+            />
           </div>
         {/each}
       </div>
     </section>
   {/each}
 </div>
-
-<style>
-  .board-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 1rem 1.4rem 0.4rem;
-  }
-
-  .muted {
-    color: var(--muted);
-    font-size: 0.85rem;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 0.6rem;
-  }
-
-  .banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin: 0.8rem 1.4rem 0;
-    padding: 0.7rem 1rem;
-    background: rgba(248, 81, 73, 0.12);
-    border: 1px solid var(--danger);
-    border-radius: var(--radius);
-  }
-
-  .banner-detail {
-    font-family: ui-monospace, monospace;
-    font-size: 0.78rem;
-    color: var(--danger);
-    margin-top: 0.3rem;
-    word-break: break-word;
-  }
-
-  .board {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(200px, 1fr));
-    gap: 0.9rem;
-    padding: 0.6rem 1.4rem 1.4rem;
-    height: 100%;
-    align-items: start;
-  }
-
-  .lane {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    display: flex;
-    flex-direction: column;
-    max-height: 100%;
-  }
-
-  .lane > header {
-    display: flex;
-    justify-content: space-between;
-    padding: 0.7rem 0.8rem;
-    border-bottom: 1px solid var(--border);
-    font-weight: 600;
-    font-size: 0.85rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .count {
-    color: var(--muted);
-  }
-
-  .cards {
-    padding: 0.7rem;
-    overflow-y: auto;
-    min-height: 120px;
-    flex: 1;
-  }
-
-  @media (max-width: 1100px) {
-    .board {
-      grid-template-columns: 1fr;
-      height: auto;
-    }
-  }
-</style>
