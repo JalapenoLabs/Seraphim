@@ -38,6 +38,11 @@ pub struct SettingsExport {
     pub network_access_domains: Vec<String>,
     #[serde(default = "default_true")]
     pub network_access_include_defaults: bool,
+    // Default so bundles exported before the usage-limit feature still import.
+    #[serde(default = "default_true")]
+    pub usage_limit_pause_enabled: bool,
+    #[serde(default = "default_usage_threshold")]
+    pub usage_limit_threshold: i32,
 }
 
 /// Matches the database default so an older bundle imports as plain UTC.
@@ -52,6 +57,11 @@ fn default_network_level() -> NetworkAccessLevel {
 
 fn default_true() -> bool {
     true
+}
+
+/// Matches the database default usage-limit threshold (80%).
+fn default_usage_threshold() -> i32 {
+    80
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,6 +107,8 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             network_access_level: settings.network_access_level,
             network_access_domains: settings.network_access_domains.0,
             network_access_include_defaults: settings.network_access_include_defaults,
+            usage_limit_pause_enabled: settings.usage_limit_pause_enabled,
+            usage_limit_threshold: settings.usage_limit_threshold,
         },
         repositories: repositories
             .into_iter()
@@ -141,6 +153,8 @@ pub async fn import(
         Some(settings.network_access_level),
         Some(SqlxJson(settings.network_access_domains)),
         Some(settings.network_access_include_defaults),
+        Some(settings.usage_limit_pause_enabled),
+        Some(settings.usage_limit_threshold),
     )
     .await?;
 

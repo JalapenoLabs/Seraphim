@@ -106,6 +106,9 @@ mod tests {
             network_access_level: NetworkAccessLevel::Full,
             network_access_domains: Json(Vec::new()),
             network_access_include_defaults: true,
+            usage_limit_pause_enabled: true,
+            usage_limit_threshold: 80,
+            usage_paused_until: None,
             claude_token_preview: None,
             github_token_preview: None,
         }

@@ -47,6 +47,8 @@ pub struct UpdateSettingsRequest {
     pub network_access_level: Option<NetworkAccessLevel>,
     pub network_access_domains: Option<Vec<String>>,
     pub network_access_include_defaults: Option<bool>,
+    pub usage_limit_pause_enabled: Option<bool>,
+    pub usage_limit_threshold: Option<i32>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -70,6 +72,8 @@ pub async fn update(
         body.network_access_level,
         body.network_access_domains.map(SqlxJson),
         body.network_access_include_defaults,
+        body.usage_limit_pause_enabled,
+        body.usage_limit_threshold,
     )
     .await?;
     state.notify_board();

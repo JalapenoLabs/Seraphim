@@ -249,6 +249,9 @@ mod tests {
             network_access_level: level,
             network_access_domains: Json(domains.iter().map(|d| (*d).to_string()).collect()),
             network_access_include_defaults: include_defaults,
+            usage_limit_pause_enabled: true,
+            usage_limit_threshold: 80,
+            usage_paused_until: None,
             claude_token_preview: None,
             github_token_preview: None,
         }

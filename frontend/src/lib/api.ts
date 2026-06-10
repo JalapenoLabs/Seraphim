@@ -148,6 +148,8 @@ export type UpdateSettingsRequest = {
   network_access_level?: NetworkAccessLevel
   network_access_domains?: string[]
   network_access_include_defaults?: boolean
+  usage_limit_pause_enabled?: boolean
+  usage_limit_threshold?: number
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {

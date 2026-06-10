@@ -30,7 +30,8 @@ const SETTINGS_COLUMNS: &str =
      (github_token <> '') AS github_token_set, \
      availability_enabled, availability_timezone, availability_windows, \
      availability_skip_dates, network_access_level, network_access_domains, \
-     network_access_include_defaults";
+     network_access_include_defaults, usage_limit_pause_enabled, \
+     usage_limit_threshold, usage_paused_until";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -62,6 +63,8 @@ pub async fn update_settings(
     network_access_level: Option<NetworkAccessLevel>,
     network_access_domains: Option<Json<Vec<String>>>,
     network_access_include_defaults: Option<bool>,
+    usage_limit_pause_enabled: Option<bool>,
+    usage_limit_threshold: Option<i32>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -80,6 +83,9 @@ pub async fn update_settings(
          network_access_domains = COALESCE($13, network_access_domains), \
          network_access_include_defaults = \
              COALESCE($14, network_access_include_defaults), \
+         usage_limit_pause_enabled = \
+             COALESCE($15, usage_limit_pause_enabled), \
+         usage_limit_threshold = COALESCE($16, usage_limit_threshold), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -98,6 +104,8 @@ pub async fn update_settings(
     .bind(network_access_level)
     .bind(network_access_domains)
     .bind(network_access_include_defaults)
+    .bind(usage_limit_pause_enabled)
+    .bind(usage_limit_threshold)
     .fetch_one(pool)
     .await
 }
@@ -105,6 +113,19 @@ pub async fn update_settings(
 pub async fn set_paused(pool: &PgPool, paused: bool) -> sqlx::Result<()> {
     sqlx::query("UPDATE settings SET agent_paused = $1, updated_at = now() WHERE id = 1")
         .bind(paused)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Sets (or clears with `None`) the automatic usage-limit pause: the moment the
+/// agent may resume pulling work once the subscription window resets.
+pub async fn set_usage_paused_until(
+    pool: &PgPool,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET usage_paused_until = $1, updated_at = now() WHERE id = 1")
+        .bind(until)
         .execute(pool)
         .await?;
     Ok(())
