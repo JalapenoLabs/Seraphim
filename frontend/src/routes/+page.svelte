@@ -6,7 +6,7 @@
   import { dndzone } from 'svelte-dnd-action'
 
   import { COLUMNS } from '$lib/types'
-  import { getBoard, moveTask, setPaused, syncNow } from '$lib/api'
+  import { getBoard, moveTask, provisionWorkspace, setPaused, syncNow } from '$lib/api'
   import Card from '$lib/components/Card.svelte'
 
   const FLIP_MS = 150
@@ -97,6 +97,19 @@
     }
   }
 
+  let retrying = $state(false)
+  async function retryProvision() {
+    retrying = true
+    try {
+      await provisionWorkspace()
+    } catch {
+      // The error is reflected back via settings.config_repo_error on reload.
+    } finally {
+      await load()
+      retrying = false
+    }
+  }
+
   onMount(() => {
     load()
     // Live board: the API ticks this stream whenever anything changes.
@@ -106,6 +119,16 @@
 
   onDestroy(() => eventSource?.close())
 </script>
+
+{#if settings?.config_repo_error}
+  <div class="banner">
+    <div>
+      <strong>Config repo (~/.claude) failed to set up — the agent is halted.</strong>
+      <div class="banner-detail">{settings.config_repo_error}</div>
+    </div>
+    <button onclick={retryProvision} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry'}</button>
+  </div>
+{/if}
 
 <div class="board-header">
   <div class="org">
@@ -165,6 +188,26 @@
   .header-actions {
     display: flex;
     gap: 0.6rem;
+  }
+
+  .banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 0.8rem 1.4rem 0;
+    padding: 0.7rem 1rem;
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+  }
+
+  .banner-detail {
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--danger);
+    margin-top: 0.3rem;
+    word-break: break-word;
   }
 
   .board {

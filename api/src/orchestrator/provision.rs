@@ -44,7 +44,7 @@ fn config_repo_snippet(config_repo_url: &str) -> String {
     }
     format!(
         "if [ -d \"$CLAUDE_CONFIG_DIR/.git\" ]; then\n\
-           git -C \"$CLAUDE_CONFIG_DIR\" pull --ff-only || true\n\
+           git -C \"$CLAUDE_CONFIG_DIR\" pull --ff-only\n\
          else\n\
            mkdir -p \"$CLAUDE_CONFIG_DIR\"\n\
            git init -q \"$CLAUDE_CONFIG_DIR\"\n\
@@ -58,26 +58,65 @@ fn config_repo_snippet(config_repo_url: &str) -> String {
     )
 }
 
-/// Common script prelude: config dir default, config repo, global AGENTS.md.
-fn prelude(settings: &Settings) -> String {
+/// Common script prelude: config dir default + global AGENTS.md. The config repo
+/// is handled separately by [`provision_config_repo`] so its failures are
+/// isolated and reported.
+fn prelude_agents(settings: &Settings) -> String {
     format!(
         ": \"${{CLAUDE_CONFIG_DIR:=/workspace/.claude}}\"\n\
-         {config}\
          mkdir -p \"$CLAUDE_CONFIG_DIR/projects\"\n\
          {agents}",
-        config = config_repo_snippet(&settings.config_repo_url),
         agents = write_file_snippet("/workspace/AGENTS.md", &settings.global_instructions),
     )
 }
 
-/// Full provision: config + env setup + every enabled repo (clone/update,
-/// per-repo CLAUDE.md, per-repo setup).
+/// Clones/refreshes the `~/.claude` config repo as its own hard-failing step and
+/// records the outcome in `settings.config_repo_error`. A blank `config_repo_url`
+/// is a no-op that clears any prior error (the agent runs unconfigured).
+///
+/// On failure the error is persisted (so the UI banners it and the agent halts)
+/// and returned.
+pub async fn provision_config_repo(state: &AppState) -> Result<()> {
+    let settings = queries::get_settings(&state.db).await?;
+    if settings.config_repo_url.trim().is_empty() {
+        queries::set_config_repo_error(&state.db, None).await?;
+        return Ok(());
+    }
+
+    let script = format!(
+        "set -e\n\
+         : \"${{CLAUDE_CONFIG_DIR:=/workspace/.claude}}\"\n\
+         {config}\
+         mkdir -p \"$CLAUDE_CONFIG_DIR/projects\"\n",
+        config = config_repo_snippet(&settings.config_repo_url),
+    );
+
+    match run(state, &script).await {
+        Ok(()) => {
+            queries::set_config_repo_error(&state.db, None).await?;
+            Ok(())
+        }
+        Err(error) => {
+            // Recording the failure is the priority; surface it even if the write
+            // itself somehow fails.
+            let _ = queries::set_config_repo_error(&state.db, Some(&format!("{error}"))).await;
+            Err(error)
+        }
+    }
+}
+
+/// Full provision: config repo (hard fail) + env setup + every enabled repo
+/// (clone/update, per-repo CLAUDE.md, per-repo setup).
 pub async fn provision_workspace(state: &AppState) -> Result<()> {
+    // The config repo is the agent's brain (AGENTS.md, skills, docs); set it up
+    // first and stop if it fails.
+    provision_config_repo(state).await?;
+
     let settings = queries::get_settings(&state.db).await?;
     let repos = queries::list_repositories(&state.db).await?;
 
     let mut script = String::from("set -e\n");
-    script.push_str(&prelude(&settings));
+    script.push_str(&prelude_agents(&settings));
 
     // Environment setup runs once here (installs CLIs/toolchains), not per task.
     if !settings.base_setup_script.trim().is_empty() {
@@ -103,7 +142,7 @@ pub async fn prepare_branch(
     let dir = format!("/workspace/{}", repo_dir_name(&repo.full_name));
 
     let mut script = String::from("set -e\n");
-    script.push_str(&prelude(settings));
+    script.push_str(&prelude_agents(settings));
     // Ensure the focus repo exists (clone + setup on first sight), then branch.
     script.push_str(&repo_block(repo, false));
     script.push_str(&format!(

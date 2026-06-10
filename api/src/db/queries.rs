@@ -23,7 +23,7 @@ use super::models::{
 const SETTINGS_COLUMNS: &str =
     "org_name, global_instructions, default_review_policy, agent_paused, \
      claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
-     default_branch_template, current_session_id, updated_at, \
+     default_branch_template, config_repo_error, current_session_id, updated_at, \
      (claude_oauth_token <> '') AS claude_token_set, \
      (github_token <> '') AS github_token_set";
 
@@ -82,6 +82,15 @@ pub async fn set_paused(pool: &PgPool, paused: bool) -> sqlx::Result<()> {
 pub async fn set_current_session_id(pool: &PgPool, session_id: Option<&str>) -> sqlx::Result<()> {
     sqlx::query("UPDATE settings SET current_session_id = $1, updated_at = now() WHERE id = 1")
         .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Records (or clears with `None`) the config-repo setup error.
+pub async fn set_config_repo_error(pool: &PgPool, error: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET config_repo_error = $1, updated_at = now() WHERE id = 1")
+        .bind(error)
         .execute(pool)
         .await?;
     Ok(())
