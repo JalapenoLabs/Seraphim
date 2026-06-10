@@ -104,10 +104,18 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                     .get("result")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                // Honor the explicit `is_error` boolean first; fall back to the
+                // `subtype` for older shapes. (A "Not logged in" result reports
+                // is_error=true even though subtype is "success".)
                 is_error: value
-                    .get("subtype")
-                    .and_then(Value::as_str)
-                    .is_some_and(|subtype| subtype != "success"),
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| {
+                        value
+                            .get("subtype")
+                            .and_then(Value::as_str)
+                            .is_some_and(|subtype| subtype != "success")
+                    }),
             },
             session_id,
             raw: value,
@@ -285,6 +293,24 @@ mod tests {
         let events = parse_line(line);
         match &events[0].kind {
             AgentEventKind::Result { is_error, .. } => assert!(is_error),
+            other => panic!("expected result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_is_error_overrides_success_subtype() {
+        // The "Not logged in" case: subtype success but is_error true.
+        let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in","session_id":"s9"}"#;
+        let events = parse_line(line);
+        match &events[0].kind {
+            AgentEventKind::Result {
+                is_error,
+                result_text,
+                ..
+            } => {
+                assert!(is_error);
+                assert_eq!(result_text.as_deref(), Some("Not logged in"));
+            }
             other => panic!("expected result, got {other:?}"),
         }
     }

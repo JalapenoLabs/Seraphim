@@ -174,11 +174,16 @@ async fn work_task(state: &AppState, task: Task) -> Result<()> {
     state.notify_board();
 
     // Drive the Claude turn and capture the (possibly new) session id.
-    let new_session_id = run_agent_turn(state, &settings, &repo, &task, &branch).await?;
-    if let Some(session_id) = new_session_id {
+    let outcome = run_agent_turn(state, &settings, &repo, &task, &branch).await?;
+    if let Some(session_id) = &outcome.session_id {
         if settings.current_session_id.as_deref() != Some(session_id.as_str()) {
-            queries::set_current_session_id(&state.db, Some(&session_id)).await?;
+            queries::set_current_session_id(&state.db, Some(session_id)).await?;
         }
+    }
+    // Surface a turn failure (e.g. "Not logged in") on the task itself, instead
+    // of letting it fall through to the generic "no pull request" message.
+    if let Some(message) = outcome.error {
+        return fail(state, &task, &message).await;
     }
 
     // Deterministically detect the PR the agent opened for this branch.
@@ -202,15 +207,22 @@ async fn work_task(state: &AppState, task: Task) -> Result<()> {
     Ok(())
 }
 
+/// The outcome of one Claude turn.
+struct TurnOutcome {
+    /// Session id reported by the turn (the shared, resumable conversation).
+    session_id: Option<String>,
+    /// A failure message to surface on the task, if the turn errored.
+    error: Option<String>,
+}
+
 /// Streams one Claude turn, persisting every event and pushing it to the UI.
-/// Returns the session id reported by the turn, if any.
 async fn run_agent_turn(
     state: &AppState,
     settings: &crate::db::models::Settings,
     repo: &Repository,
     task: &Task,
     branch: &str,
-) -> Result<Option<String>> {
+) -> Result<TurnOutcome> {
     let prompt = prompt::build(settings, repo, task, branch);
     // Claude runs at the workspace root so it can work across all cloned repos.
     let working_dir = "/workspace".to_string();
@@ -238,14 +250,14 @@ async fn run_agent_turn(
     let mut session_id = settings.current_session_id.clone();
     let mut result_text: Option<String> = None;
     let mut total_cost: Option<f64> = None;
-    let mut turn_failed = false;
+    let mut error_message: Option<String> = None;
 
     while let Some(item) = stream.next().await {
         let event = match item {
             Ok(event) => event,
             Err(error) => {
                 warn!(error = %error, "claude stream error");
-                turn_failed = true;
+                error_message = Some(format!("Claude stream error: {error}"));
                 break;
             }
         };
@@ -262,7 +274,10 @@ async fn run_agent_turn(
             total_cost = *total_cost_usd;
             result_text.clone_from(text);
             if *is_error {
-                turn_failed = true;
+                error_message = Some(
+                    text.clone()
+                        .unwrap_or_else(|| "the agent reported an error".to_string()),
+                );
             }
         }
 
@@ -278,7 +293,11 @@ async fn run_agent_turn(
         seq += 1;
     }
 
-    let status = if turn_failed { "failed" } else { "completed" };
+    let status = if error_message.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
     queries::finish_turn(
         &state.db,
         turn.id,
@@ -289,10 +308,10 @@ async fn run_agent_turn(
     )
     .await?;
 
-    if turn_failed {
-        return Err(eyre!("claude turn ended in an error"));
-    }
-    Ok(session_id)
+    Ok(TurnOutcome {
+        session_id,
+        error: error_message,
+    })
 }
 
 // --- Review loop -------------------------------------------------------------
@@ -352,7 +371,9 @@ async fn review_once(state: &AppState) -> Result<()> {
 /// Records a task failure: captures the message and surfaces it in `In Review`.
 async fn fail(state: &AppState, task: &Task, message: &str) -> Result<()> {
     warn!(task_id = %task.id, message, "task failed");
-    queries::set_task_error(&state.db, task.id, message).await?;
+    // Keep card-level errors readable; full detail lives in the event stream.
+    let trimmed: String = message.trim().chars().take(800).collect();
+    queries::set_task_error(&state.db, task.id, &trimmed).await?;
     queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     state.notify_board();
     Ok(())
