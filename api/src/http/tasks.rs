@@ -97,6 +97,44 @@ pub struct CommentRequest {
     pub body: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct IssueStateRequest {
+    /// `"open"` or `"closed"`.
+    pub state: String,
+    /// GitHub close reason when closing: `"completed"` or `"not_planned"`.
+    pub reason: Option<String>,
+}
+
+/// `POST /api/v1/tasks/:id/issue/state` - open or close the issue on GitHub.
+pub async fn set_issue_state(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<IssueStateRequest>,
+) -> ApiResult<Response> {
+    if payload.state != "open" && payload.state != "closed" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "state must be 'open' or 'closed'" })),
+        )
+            .into_response());
+    }
+    let (owner, name, number) = match issue_coords(&state, id).await? {
+        Ok(coords) => coords,
+        Err(response) => return Ok(response),
+    };
+    let github = state.github().await?;
+    let issue = git::set_issue_state(
+        &github,
+        &owner,
+        &name,
+        &number,
+        &payload.state,
+        payload.reason.as_deref(),
+    )
+    .await?;
+    Ok(Json(issue).into_response())
+}
+
 /// `POST /api/v1/tasks/:id/comment` - post a comment to the issue on GitHub.
 pub async fn add_comment(
     State(state): State<AppState>,

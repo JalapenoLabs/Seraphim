@@ -9,6 +9,7 @@ import type {
   ConfigBundle,
   EnvVar,
   IssueComment,
+  IssueDetail,
   IssueThread,
   Repository,
   ReviewPolicy,
@@ -36,6 +37,14 @@ export function getIssueThread(taskId: string) {
 
 export function addIssueComment(taskId: string, body: string) {
   return apiClient.post(`tasks/${taskId}/comment`, { json: { body } }).json<IssueComment>()
+}
+
+export function setIssueState(
+  taskId: string,
+  state: 'open' | 'closed',
+  reason?: 'completed' | 'not_planned'
+) {
+  return apiClient.post(`tasks/${taskId}/issue/state`, { json: { state, reason } }).json<IssueDetail>()
 }
 
 export function moveTask(taskId: string, column: TaskColumn, position: number) {

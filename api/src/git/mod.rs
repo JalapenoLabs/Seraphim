@@ -356,6 +356,31 @@ pub async fn get_issue_thread(
     Ok(IssueThread { issue, comments })
 }
 
+/// Opens or closes an issue (with an optional close reason) and returns the
+/// updated issue. `state` is `"open"` or `"closed"`; `state_reason` is GitHub's
+/// `"completed"` / `"not_planned"` when closing.
+pub async fn set_issue_state(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+    state: &str,
+    state_reason: Option<&str>,
+) -> Result<IssueDetail> {
+    let mut body = json!({ "state": state });
+    if let Some(reason) = state_reason {
+        body["state_reason"] = json!(reason);
+    }
+    let issue: IssueDetail = octo
+        .patch(
+            format!("/repos/{owner}/{repo}/issues/{number}"),
+            Some(&body),
+        )
+        .await
+        .wrap_err("failed to update issue state")?;
+    Ok(issue)
+}
+
 /// Posts a comment to an issue and returns the created comment.
 pub async fn add_issue_comment(
     octo: &Octocrab,

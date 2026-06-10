@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../app.css'
   import { page } from '$app/stores'
+  import { Toaster } from '$lib/components/ui/sonner'
 
   let { children } = $props()
 
@@ -39,3 +40,6 @@
     {@render children()}
   </main>
 </div>
+
+<Toaster theme="dark" richColors />
+

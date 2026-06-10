@@ -2,12 +2,24 @@
   import type { IssueThread, IssueUser, Task } from '../types'
 
   import { onMount } from 'svelte'
-  import { CircleDot, CircleCheck, GitPullRequest, GitBranch, ExternalLink, Plus, Link } from '@lucide/svelte'
+  import { toast } from 'svelte-sonner'
+  import {
+    CircleDot,
+    CircleCheck,
+    CircleSlash,
+    ChevronDown,
+    GitPullRequest,
+    GitBranch,
+    ExternalLink,
+    Plus,
+    Link
+  } from '@lucide/svelte'
 
-  import { addIssueComment, getIssueThread } from '../api'
+  import { addIssueComment, getIssueThread, setIssueState } from '../api'
   import Markdown from './Markdown.svelte'
   import { Button, buttonVariants } from './ui/button'
   import { Textarea } from './ui/textarea'
+  import * as DropdownMenu from './ui/dropdown-menu'
 
   let { task }: { task: Task } = $props()
 
@@ -16,14 +28,16 @@
   const repoUrl = $derived(task.url ? task.url.replace(/\/issues\/\d+.*$/, '') : '')
   const newIssueUrl = $derived(repoUrl ? `${repoUrl}/issues/new/choose` : '')
 
-  let copied = $state(false)
   async function copyLink() {
     if (!task.url) {
       return
     }
-    await navigator.clipboard.writeText(task.url)
-    copied = true
-    setTimeout(() => (copied = false), 1500)
+    try {
+      await navigator.clipboard.writeText(task.url)
+      toast.success('Link copied to clipboard')
+    } catch {
+      toast.error('Could not copy the link')
+    }
   }
 
   let thread = $state<IssueThread | null>(null)
@@ -83,10 +97,38 @@
       const comment = await addIssueComment(task.id, commentBody)
       thread = { ...thread, comments: [...thread.comments, comment] }
       commentBody = ''
+      toast.success('Comment added')
+    } catch {
+      toast.error('Could not post the comment')
     } finally {
       posting = false
     }
   }
+
+  // Open or close the issue, optionally posting a pending comment first (GitHub's
+  // "close with comment"). `reason` is GitHub's close reason.
+  let updatingState = $state(false)
+  async function changeState(state: 'open' | 'closed', reason?: 'completed' | 'not_planned') {
+    if (!thread) {
+      return
+    }
+    updatingState = true
+    try {
+      if (commentBody.trim()) {
+        await submitComment()
+      }
+      const issue = await setIssueState(task.id, state, reason)
+      thread = { ...thread, issue }
+      toast.success(state === 'closed' ? 'Issue closed' : 'Issue reopened')
+    } catch {
+      toast.error(state === 'closed' ? 'Could not close the issue' : 'Could not reopen the issue')
+    } finally {
+      updatingState = false
+    }
+  }
+
+  // GitHub relabels the close/reopen button when there's a pending comment.
+  const hasComment = $derived(commentBody.trim().length > 0)
 
   onMount(load)
 </script>
@@ -134,7 +176,7 @@
         {/if}
         {#if task.url}
           <Button variant="outline" size="sm" onclick={copyLink}>
-            <Link class="size-4" /> {copied ? 'Copied' : 'Copy link'}
+            <Link class="size-4" /> Copy link
           </Button>
         {/if}
       </div>
@@ -179,7 +221,7 @@
           {@render commentCard(comment.user, comment.created_at, comment.author_association, comment.body)}
         {/each}
 
-        <!-- Add a comment -->
+        <!-- Add a comment / change state -->
         <div class="rounded-lg border border-border p-3">
           <Textarea
             rows={4}
@@ -187,7 +229,51 @@
             bind:value={commentBody}
             class="resize-y font-mono text-sm"
           />
-          <div class="mt-2 flex justify-end">
+          <div class="mt-2 flex flex-wrap items-center justify-end gap-2">
+            {#if thread.issue.state === 'open'}
+              <!-- Split button: close (completed) + a dropdown of close reasons. -->
+              <div class="flex">
+                <Button
+                  variant="outline"
+                  class="rounded-r-none"
+                  disabled={updatingState}
+                  onclick={() => changeState('closed', 'completed')}
+                >
+                  <CircleCheck class="size-4" />
+                  {hasComment ? 'Close with comment' : 'Close issue'}
+                </Button>
+                <DropdownMenu.Root>
+                  <DropdownMenu.Trigger
+                    class={`${buttonVariants({ variant: 'outline' })} rounded-l-none border-l-0 px-2`}
+                    aria-label="Close reasons"
+                    disabled={updatingState}
+                  >
+                    <ChevronDown class="size-4" />
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Content align="end">
+                    <DropdownMenu.Item onclick={() => changeState('closed', 'completed')}>
+                      <CircleCheck class="size-4 text-success" />
+                      <div>
+                        <div>Close as completed</div>
+                        <div class="text-xs text-muted-foreground">Done, closed, fully completed</div>
+                      </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onclick={() => changeState('closed', 'not_planned')}>
+                      <CircleSlash class="size-4 text-muted-foreground" />
+                      <div>
+                        <div>Close as not planned</div>
+                        <div class="text-xs text-muted-foreground">Won't fix, can't repro, duplicate, stale</div>
+                      </div>
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Root>
+              </div>
+            {:else}
+              <Button variant="outline" disabled={updatingState} onclick={() => changeState('open')}>
+                <CircleDot class="size-4" />
+                {hasComment ? 'Reopen with comment' : 'Reopen issue'}
+              </Button>
+            {/if}
             <Button disabled={posting || !commentBody.trim()} onclick={submitComment}>
               {posting ? 'Commenting…' : 'Comment'}
             </Button>
