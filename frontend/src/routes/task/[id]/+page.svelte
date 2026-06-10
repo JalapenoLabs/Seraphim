@@ -12,6 +12,18 @@
   let events = $state<Pick<AgentEvent, 'type' | 'payload'>[]>([])
   let eventSource: EventSource | null = null
 
+  // Which events are expanded. Tool use/results start collapsed; multiple can be
+  // open at once.
+  let expanded = $state<Record<number, boolean>>({})
+
+  function isCollapsible(type: string) {
+    return type === 'tool_use' || type === 'tool_result'
+  }
+
+  function toggle(index: number) {
+    expanded[index] = !expanded[index]
+  }
+
   async function load() {
     const detail = await getTask(taskId)
     task = detail.task
@@ -82,9 +94,23 @@
         <p class="muted">No activity yet.</p>
       {/if}
       {#each events as event, index (index)}
+        {@const collapsible = isCollapsible(event.type)}
+        {@const open = expanded[index] ?? false}
         <div class="event {event.type}">
-          <span class="kind">{event.type.replace('_', ' ')}</span>
-          <pre>{describe(event)}</pre>
+          <button
+            type="button"
+            class="event-head"
+            class:clickable={collapsible}
+            onclick={() => collapsible && toggle(index)}
+          >
+            {#if collapsible}<span class="arrow">{open ? '▾' : '▸'}</span>{/if}
+            <span class="kind">{event.type.replace('_', ' ')}</span>
+          </button>
+          <pre
+            class="event-body"
+            class:clamp3={collapsible && event.type === 'tool_result' && !open}
+            class:clamp1={collapsible && event.type === 'tool_use' && !open}
+          >{describe(event)}</pre>
         </div>
       {/each}
     </section>
@@ -156,6 +182,28 @@
     border-color: var(--accent-2);
   }
 
+  .event-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
+  }
+
+  .event-head.clickable {
+    cursor: pointer;
+  }
+
+  .arrow {
+    width: 0.8rem;
+    font-size: 0.7rem;
+    color: var(--muted);
+    flex: none;
+  }
+
   .kind {
     font-size: 0.72rem;
     color: var(--muted);
@@ -169,5 +217,20 @@
     word-break: break-word;
     font-family: ui-monospace, monospace;
     font-size: 0.82rem;
+  }
+
+  /* Collapsed tool results: first 3 lines; tool uses: a single ellipsized line. */
+  .event-body.clamp3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .event-body.clamp1 {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>
