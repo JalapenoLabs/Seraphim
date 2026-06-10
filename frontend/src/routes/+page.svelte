@@ -8,6 +8,7 @@
 
   import { COLUMNS } from '$lib/types'
   import { getBoard, listRepos, moveTask, provisionWorkspace, setPaused, syncNow } from '$lib/api'
+  import { isWithinSchedule } from '$lib/schedule'
   import Card from '$lib/components/Card.svelte'
   import { Button } from '$lib/components/ui/button'
   import * as Alert from '$lib/components/ui/alert'
@@ -92,6 +93,16 @@
     settings = await setPaused(!settings.agent_paused)
   }
 
+  // True when the agent is enabled but the schedule currently holds it idle, so
+  // the board can explain why nothing is being picked up. Recomputed on every
+  // board reload (the SSE stream keeps that frequent enough).
+  const outsideSchedule = $derived(
+    !!settings &&
+      !settings.agent_paused &&
+      settings.availability_enabled &&
+      !isWithinSchedule(settings, new Date())
+  )
+
   let checking = $state(false)
   async function checkIssues() {
     checking = true
@@ -145,6 +156,14 @@
     {#if settings}
       <strong class="text-base">{settings.org_name}</strong>
       <span class="text-sm text-muted-foreground">· {settings.claude_model}</span>
+      {#if outsideSchedule}
+        <span
+          class="rounded-full border border-warning/40 px-2 py-0.5 text-xs text-warning"
+          title="Outside the availability schedule"
+        >
+          ⏰ Outside scheduled hours
+        </span>
+      {/if}
     {/if}
   </div>
   <div class="flex gap-2">

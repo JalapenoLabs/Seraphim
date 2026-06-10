@@ -102,9 +102,21 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **`settings`** — single row (`id=1`): org profile, `global_instructions`,
   `default_review_policy`, `agent_paused`, `claude_model`, `base_setup_script`
   (= environment setup), `config_repo_url`, `default_branch_template`,
-  `current_session_id` (the one shared Claude session), and the secret columns
+  `current_session_id` (the one shared Claude session), the secret columns
   `claude_oauth_token` / `github_token` (the API only ever exposes
-  `*_token_set` booleans, never the raw values; write via `POST /settings/tokens`).
+  `*_token_set` booleans plus a masked `*_token_preview`, never the raw values;
+  write via `POST /settings/tokens`), and the optional **availability schedule**
+  (`availability_enabled`, `availability_timezone` (IANA), `availability_windows`
+  JSONB, `availability_skip_dates` JSONB). When enabled, the agent only pulls new
+  work during the configured weekly windows in the operator's time zone, skipping
+  listed dates; empty windows mean "any time of day". The gate is the pure,
+  unit-tested `orchestrator::availability::is_available`, checked alongside
+  `agent_paused`.
+- **`environment_variables`** — user-defined `key` / `value` / `is_secret` rows,
+  injected into the agent's turn and setup execs at runtime. A secret value is
+  scrubbed out of Claude's output before anything is persisted or streamed
+  (`secrets::Scrubber`), and the API only ever returns it masked. CRUD via
+  `GET`/`PUT /settings/env`.
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
   `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this
@@ -145,9 +157,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
    them into **Available** (never clobbers human-set column/position). Tasks are
    unique per `(repo_id, source_kind, external_id)`. Callable via `POST /sync`.
-2. **agent** — single-threaded: when not paused and idle, pulls top of **To Do**,
-   prepares the branch, drives one Claude turn, detects the PR, moves to
-   **In Review**. One task awaited to completion before the next (no overlap).
+2. **agent** — single-threaded: when not paused, inside the availability schedule,
+   and idle, pulls top of **To Do**, prepares the branch, drives one Claude turn,
+   detects the PR, moves to **In Review**. One task awaited to completion before
+   the next (no overlap).
 3. **review** — for `auto_squash_merge` repos, polls CI and squash-merges when
    green → **Done**.
 

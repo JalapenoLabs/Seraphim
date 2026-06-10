@@ -4,7 +4,7 @@
 //! variants), and each struct maps to a table row via [`sqlx::FromRow`]. All
 //! types serialize to the snake_case JSON the frontend consumes.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
 use uuid::Uuid;
@@ -63,7 +63,27 @@ pub enum TaskStatus {
     Failed,
 }
 
+/// A recurring weekly window during which the agent may pick up new work.
+///
+/// Times are minutes from local midnight in the operator's configured time zone,
+/// so they stay stable across daylight-saving shifts (the zone, not the offset,
+/// is stored). `start_minute` is inclusive and `end_minute` exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailabilityWindow {
+    /// Day of week, `0` = Monday through `6` = Sunday
+    /// (matches `chrono::Weekday::num_days_from_monday`).
+    pub weekday: u8,
+    /// Inclusive start of the window, in minutes from midnight (`0..=1440`).
+    pub start_minute: u16,
+    /// Exclusive end of the window, in minutes from midnight (`0..=1440`).
+    pub end_minute: u16,
+}
+
 /// The single-row org / environment profile.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the settings DB row; each flag is an independent stored column"
+)]
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Settings {
     pub org_name: String,
@@ -85,6 +105,48 @@ pub struct Settings {
     pub claude_token_set: bool,
     /// Whether a GitHub token is stored (the token itself is never sent).
     pub github_token_set: bool,
+    /// When true, the agent only works during [`Self::availability_windows`].
+    pub availability_enabled: bool,
+    /// IANA time zone the windows and skip dates are interpreted in (e.g.
+    /// `America/Denver`). The database itself always stores UTC.
+    pub availability_timezone: String,
+    /// Weekly availability windows. Empty means "any time of day".
+    pub availability_windows: Json<Vec<AvailabilityWindow>>,
+    /// Calendar dates to skip entirely (vacations, holidays).
+    pub availability_skip_dates: Json<Vec<NaiveDate>>,
+    /// Masked preview of the stored Claude token, e.g. `sk-ant-****abcd`. Not a
+    /// DB column; the settings handler fills it from the raw token so an operator
+    /// can recognize what is stored without it being revealed.
+    #[sqlx(default)]
+    pub claude_token_preview: Option<String>,
+    /// Masked preview of the stored GitHub token. Filled like
+    /// [`Self::claude_token_preview`].
+    #[sqlx(default)]
+    pub github_token_preview: Option<String>,
+}
+
+/// A user-defined environment variable injected into the agent's execs.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct EnvVar {
+    pub id: Uuid,
+    pub key: String,
+    pub value: String,
+    /// When true, the value is scrubbed from output and only ever returned masked.
+    pub is_secret: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One environment variable as submitted by the settings UI.
+///
+/// `value` is optional so a secret can be left unchanged: `None` means "keep the
+/// stored value" (the UI never receives raw secrets to send back), while `Some`
+/// sets a new value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvVarWrite {
+    pub key: String,
+    pub value: Option<String>,
+    pub is_secret: bool,
 }
 
 /// A repository the agent is allowed to clone and work in.

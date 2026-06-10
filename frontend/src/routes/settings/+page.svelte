@@ -1,15 +1,20 @@
 <script lang="ts">
-  import type { ReviewPolicy, Settings } from '$lib/types'
+  import type { AvailabilityWindow, EnvVar, ReviewPolicy, Settings } from '$lib/types'
+  import type { EnvVarWrite } from '$lib/api'
 
   import { onMount } from 'svelte'
 
   import { KNOWN_MODELS } from '$lib/types'
+  import { WEEKDAYS, minutesToTime, timeToMinutes } from '$lib/schedule'
+  import { usFederalHolidays } from '$lib/holidays'
   import {
     exportConfig,
     getSettings,
     importConfig,
+    listEnvVars,
     recreateWorkspace,
     restartWorkspace,
+    setEnvVars,
     setTokens,
     updateSettings
   } from '$lib/api'
@@ -20,8 +25,24 @@
   import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
   import { Badge } from '$lib/components/ui/badge'
+  import { Switch } from '$lib/components/ui/switch'
 
   const CUSTOM_MODEL = '__custom__'
+
+  // One editable row per weekday for the working-hours grid. The data model
+  // allows several windows per day, but a single contiguous shift covers the
+  // common "9 to 5" case and keeps the UI legible.
+  type DayRow = { active: boolean; start: string; end: string }
+
+  // One editable row in the environment-variables table. For a secret loaded from
+  // the server, `value` starts blank and `preview` holds the masked stored value;
+  // leaving it blank on save keeps the stored secret unchanged.
+  type EnvRow = {
+    key: string
+    value: string
+    is_secret: boolean
+    preview: string | null
+  }
 
   let settings = $state<Settings | null>(null)
   let savedAt = $state<string | null>(null)
@@ -36,6 +57,20 @@
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
   let modelChoice = $state<string>(KNOWN_MODELS[0].value)
 
+  // Availability schedule editing state, kept separate from `settings` because
+  // the per-weekday grid and skip-date chips are derived shapes.
+  let days = $state<DayRow[]>([])
+  let skipDates = $state<string[]>([])
+  let newSkipDate = $state('')
+  let scheduleSavedAt = $state<string | null>(null)
+  // The browser's full IANA zone list, when the engine exposes it.
+  const timezones =
+    typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []
+
+  // Environment variables (DigitalOcean-style rows).
+  let envRows = $state<EnvRow[]>([])
+  let envMessage = $state<string | null>(null)
+
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
 
   const modelLabel = $derived(
@@ -44,12 +79,112 @@
       : (KNOWN_MODELS.find((model) => model.value === modelChoice)?.label ?? modelChoice)
   )
 
+  // Upcoming US federal holidays (this year and next) not already skipped.
+  const holidaySuggestions = $derived.by(() => {
+    const today = new Date().toISOString().slice(0, 10)
+    const year = new Date().getFullYear()
+    return [...usFederalHolidays(year), ...usFederalHolidays(year + 1)]
+      .filter((holiday) => holiday.date >= today && !skipDates.includes(holiday.date))
+      .slice(0, 8)
+  })
+
+  function buildDays(windows: AvailabilityWindow[]): DayRow[] {
+    return WEEKDAYS.map((_, weekday) => {
+      const window = windows.find((existing) => existing.weekday === weekday)
+      if (!window) {
+        return { active: false, start: '09:00', end: '17:00' }
+      }
+      return {
+        active: true,
+        start: minutesToTime(window.start_minute),
+        end: minutesToTime(window.end_minute)
+      }
+    })
+  }
+
+  function toEnvRow(variable: EnvVar): EnvRow {
+    return {
+      key: variable.key,
+      // Secrets arrive masked; show that as a placeholder and keep the input
+      // blank so an unedited secret is preserved on save.
+      value: variable.is_secret ? '' : variable.value,
+      is_secret: variable.is_secret,
+      preview: variable.is_secret ? variable.value : null
+    }
+  }
+
   async function load() {
     const loaded = await getSettings()
     settings = loaded
     modelChoice = KNOWN_MODELS.some((model) => model.value === loaded.claude_model)
       ? loaded.claude_model
       : CUSTOM_MODEL
+    days = buildDays(loaded.availability_windows)
+    skipDates = [...loaded.availability_skip_dates]
+    const env = await listEnvVars()
+    envRows = env.variables.map(toEnvRow)
+  }
+
+  function addSkipDate(date: string) {
+    const trimmed = date.trim()
+    if (!trimmed || skipDates.includes(trimmed)) {
+      return
+    }
+    skipDates = [...skipDates, trimmed].sort()
+    newSkipDate = ''
+  }
+
+  function removeSkipDate(date: string) {
+    skipDates = skipDates.filter((existing) => existing !== date)
+  }
+
+  async function saveSchedule() {
+    if (!settings) {
+      return
+    }
+    const windows: AvailabilityWindow[] = days
+      .map((day, weekday) => ({ day, weekday }))
+      .filter(({ day }) => day.active)
+      .map(({ day, weekday }) => ({
+        weekday,
+        start_minute: timeToMinutes(day.start),
+        end_minute: timeToMinutes(day.end)
+      }))
+    settings = await updateSettings({
+      availability_enabled: settings.availability_enabled,
+      availability_timezone: settings.availability_timezone,
+      availability_windows: windows,
+      availability_skip_dates: skipDates
+    })
+    scheduleSavedAt = new Date().toLocaleTimeString()
+  }
+
+  function addEnvRow() {
+    envRows = [...envRows, { key: '', value: '', is_secret: false, preview: null }]
+  }
+
+  function removeEnvRow(index: number) {
+    envRows = envRows.filter((_, position) => position !== index)
+  }
+
+  async function saveEnv() {
+    const variables: EnvVarWrite[] = envRows
+      .filter((row) => row.key.trim())
+      .map((row) => {
+        const key = row.key.trim()
+        if (!row.is_secret) {
+          return { key, value: row.value, is_secret: false }
+        }
+        // A blank secret input keeps the stored value, so omit it; otherwise the
+        // typed value becomes the new secret.
+        if (row.value) {
+          return { key, value: row.value, is_secret: true }
+        }
+        return { key, is_secret: true }
+      })
+    const saved = await setEnvVars(variables)
+    envRows = saved.variables.map(toEnvRow)
+    envMessage = 'Saved.'
   }
 
   function chooseModel(value: string) {
@@ -301,6 +436,147 @@
             <input type="file" accept="application/json" onchange={onImportFile} hidden />
           </label>
           {#if importMessage}<span class="text-sm text-muted-foreground">{importMessage}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Availability schedule</Card.Title>
+        <Card.Description>
+          Optional. When on, the agent only picks up new work during the hours and days you set
+          here, in your time zone, and never on a skipped date. The database always stores UTC; this
+          is just your local view. A task already in progress always runs to completion.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="flex items-center gap-2">
+          <Switch id="availability-enabled" bind:checked={settings.availability_enabled} />
+          <Label for="availability-enabled">Restrict the agent to a schedule</Label>
+        </div>
+
+        {#if settings.availability_enabled}
+          <div class="space-y-1.5">
+            <Label for="timezone">Time zone</Label>
+            <select
+              id="timezone"
+              bind:value={settings.availability_timezone}
+              class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              {#if !timezones.includes(settings.availability_timezone)}
+                <option value={settings.availability_timezone}>{settings.availability_timezone}</option>
+              {/if}
+              {#each timezones as timezone}
+                <option value={timezone}>{timezone}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="space-y-2">
+            <Label>Working hours</Label>
+            <p class="text-xs text-muted-foreground">
+              Leave every day unchecked to allow any time of day (handy when you only want to skip
+              specific dates).
+            </p>
+            <div class="space-y-2">
+              {#each days as day, weekday}
+                <div class="flex items-center gap-3 {day.active ? '' : 'opacity-60'}">
+                  <label class="flex w-28 items-center gap-2">
+                    <Switch bind:checked={day.active} />
+                    <span class="text-sm">{WEEKDAYS[weekday]}</span>
+                  </label>
+                  <Input type="time" class="w-32" bind:value={day.start} disabled={!day.active} />
+                  <span class="text-sm text-muted-foreground">to</span>
+                  <Input type="time" class="w-32" bind:value={day.end} disabled={!day.active} />
+                </div>
+              {/each}
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <Label>Skip dates</Label>
+            <p class="text-xs text-muted-foreground">
+              Vacations, holidays, any single day the agent should stay idle.
+            </p>
+            <div class="flex items-center gap-2">
+              <Input type="date" class="w-44" bind:value={newSkipDate} />
+              <Button variant="outline" size="sm" onclick={() => addSkipDate(newSkipDate)}>Add date</Button>
+            </div>
+            {#if skipDates.length}
+              <div class="flex flex-wrap gap-2">
+                {#each skipDates as date}
+                  <Button variant="outline" size="sm" class="h-7" title="Remove" onclick={() => removeSkipDate(date)}>
+                    {date} ✕
+                  </Button>
+                {/each}
+              </div>
+            {:else}
+              <p class="text-sm text-muted-foreground">No skipped dates.</p>
+            {/if}
+
+            {#if holidaySuggestions.length}
+              <p class="text-xs text-muted-foreground">Suggested US holidays (click to add):</p>
+              <div class="flex flex-wrap gap-2">
+                {#each holidaySuggestions as holiday}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-7 border border-dashed border-border text-muted-foreground"
+                    onclick={() => addSkipDate(holiday.date)}
+                  >
+                    + {holiday.name} ({holiday.date})
+                  </Button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <div class="flex items-center gap-3">
+            <Button onclick={saveSchedule}>Save schedule</Button>
+            {#if scheduleSavedAt}<span class="text-sm text-muted-foreground">Saved at {scheduleSavedAt}</span>{/if}
+          </div>
+        {/if}
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Environment variables</Card.Title>
+        <Card.Description>
+          Injected into the agent's environment at runtime (alongside its tokens) and available to
+          setup scripts. Mark a row <strong>secret</strong> to have its value scrubbed from the
+          agent's output before it reaches the logs or database, and only ever shown here masked.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-4">
+        {#if envRows.length}
+          <div class="space-y-2">
+            {#each envRows as row, index}
+              <div class="flex items-center gap-2">
+                <Input class="w-1/3 font-mono" placeholder="KEY" bind:value={row.key} />
+                <Input
+                  class="flex-1 font-mono"
+                  type={row.is_secret ? 'password' : 'text'}
+                  placeholder={row.is_secret && row.preview ? `${row.preview} (leave blank to keep)` : 'value'}
+                  autocomplete="off"
+                  bind:value={row.value}
+                />
+                <label class="flex items-center gap-1.5 text-sm text-muted-foreground" title="Scrub this value from all output">
+                  <Switch bind:checked={row.is_secret} />
+                  secret
+                </label>
+                <Button variant="ghost" size="icon" title="Remove" onclick={() => removeEnvRow(index)}>✕</Button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-sm text-muted-foreground">No environment variables yet.</p>
+        {/if}
+
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={addEnvRow}>+ Add another</Button>
+          <Button onclick={saveEnv}>Save variables</Button>
+          {#if envMessage}<span class="text-sm text-muted-foreground">{envMessage}</span>{/if}
         </div>
       </Card.Content>
     </Card.Root>

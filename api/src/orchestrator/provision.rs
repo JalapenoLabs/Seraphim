@@ -231,7 +231,11 @@ async fn run(state: &AppState, script: &str) -> Result<()> {
     // Wire git's credential helper for HTTPS remotes (GH_TOKEN is in this exec's
     // env); SSH remotes use the mounted key instead.
     let full_script = format!("gh auth setup-git >/dev/null 2>&1 || true\n{script}");
-    let env = vec![format!("GH_TOKEN={github_token}")];
+    // User-defined env vars are available to setup scripts (e.g. registry tokens).
+    let mut env = vec![format!("GH_TOKEN={github_token}")];
+    for variable in queries::list_environment_variables(&state.db).await? {
+        env.push(format!("{}={}", variable.key, variable.value));
+    }
     let output = state
         .workspace
         .exec_capture(

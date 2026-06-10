@@ -35,6 +35,10 @@ octocrab = "0.41"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# IANA time zone database for DST-correct availability windows (e.g. a user in
+# "America/Denver" whose 9-5 shifts with daylight saving). Pure Rust, no system
+# tzdata dependency.
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Encodes instruction-file contents so they cross the docker exec boundary
 # without any shell-quoting hazards.
