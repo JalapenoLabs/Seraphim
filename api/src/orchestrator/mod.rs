@@ -609,7 +609,7 @@ async fn run_agent_turn(
         queries::append_event(&state.db, turn.id, seq, label, payload.clone()).await?;
         state.notify_task(
             task.id,
-            serde_json::json!({ "type": label, "payload": payload }),
+            serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
         );
         queries::set_task_status(&state.db, task.id, TaskStatus::Working)
             .await
