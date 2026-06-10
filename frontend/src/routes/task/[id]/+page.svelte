@@ -11,6 +11,7 @@
   import { Badge } from '$lib/components/ui/badge'
   import * as Alert from '$lib/components/ui/alert'
   import * as Resizable from '$lib/components/ui/resizable'
+  import IssueView from '$lib/components/IssueView.svelte'
 
   const taskId = $page.params.id ?? ''
 
@@ -150,58 +151,9 @@
       autoSaveId="seraphim-task-split-v2"
       class="flex min-h-0 w-full flex-1 overflow-hidden"
     >
-      <Resizable.Pane defaultSize={50} minSize={25} class="min-w-0">
-        <div class="h-full min-w-0 overflow-y-auto pr-3">
-          <div class="text-sm tabular-nums text-muted-foreground">#{task.external_id}</div>
-          <h1 class="mb-3 mt-1 text-xl font-semibold leading-snug">{task.title}</h1>
-
-          <Badge variant="outline" class={STATUS_BADGE[task.status]}>
-            {STATUS_LABELS[task.status] ?? task.status}
-          </Badge>
-
-          <dl class="mt-4 space-y-3 text-sm">
-            {#if task.branch}
-              <div>
-                <dt class="text-xs uppercase tracking-wide text-muted-foreground">Branch</dt>
-                <dd class="break-words font-mono">{task.branch}</dd>
-              </div>
-            {/if}
-            {#if task.pr_url}
-              <div>
-                <dt class="text-xs uppercase tracking-wide text-muted-foreground">Pull request</dt>
-                <dd class="break-words">
-                  <a href={task.pr_url} target="_blank" rel="noreferrer" class="text-primary hover:underline">
-                    {task.pr_url.replace('https://github.com/', '')} ↗
-                  </a>
-                </dd>
-              </div>
-            {/if}
-            {#if task.url}
-              <div>
-                <dt class="text-xs uppercase tracking-wide text-muted-foreground">Issue</dt>
-                <dd>
-                  <a href={task.url} target="_blank" rel="noreferrer" class="text-primary hover:underline">
-                    open on GitHub ↗
-                  </a>
-                </dd>
-              </div>
-            {/if}
-          </dl>
-
-          {#if task.error}
-            <Alert.Root variant="destructive" class="mt-4">
-              <Alert.Description class="break-words">{task.error}</Alert.Description>
-            </Alert.Root>
-          {/if}
-
-          {#if task.body_snapshot}
-            <h2 class="mb-2 mt-6 text-xs uppercase tracking-wide text-muted-foreground">Issue</h2>
-            <div
-              class="whitespace-pre-wrap rounded-lg border border-border bg-card p-3 text-sm leading-relaxed text-muted-foreground"
-            >
-              {task.body_snapshot}
-            </div>
-          {/if}
+      <Resizable.Pane defaultSize={55} minSize={30} class="min-w-0">
+        <div class="h-full min-w-0 pr-3">
+          <IssueView {task} />
         </div>
       </Resizable.Pane>
 
@@ -212,13 +164,19 @@
         class="w-1.5 bg-border transition-colors hover:bg-primary data-[active]:bg-primary"
       />
 
-      <Resizable.Pane defaultSize={50} minSize={30} class="min-w-0">
+      <Resizable.Pane defaultSize={45} minSize={25} class="min-w-0">
         <div class="ml-3 flex h-full min-w-0 flex-col rounded-lg border border-border bg-card">
-          <header
-            class="border-b border-border px-4 py-2.5 text-xs uppercase tracking-wide text-muted-foreground"
-          >
-            Activity
+          <header class="flex items-center gap-2 border-b border-border px-4 py-2.5">
+            <span class="text-xs uppercase tracking-wide text-muted-foreground">Agent activity</span>
+            <Badge variant="outline" class="ml-auto {STATUS_BADGE[task.status]}">
+              {STATUS_LABELS[task.status] ?? task.status}
+            </Badge>
           </header>
+          {#if task.error}
+            <Alert.Root variant="destructive" class="m-3 mb-0">
+              <Alert.Description class="break-words text-xs">{task.error}</Alert.Description>
+            </Alert.Root>
+          {/if}
           <div class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 font-mono text-sm leading-relaxed">
             {#if events.length === 0}
               <p class="text-muted-foreground">No activity yet.</p>

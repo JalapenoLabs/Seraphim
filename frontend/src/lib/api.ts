@@ -8,6 +8,8 @@ import type {
   BoardResponse,
   ConfigBundle,
   EnvVar,
+  IssueComment,
+  IssueThread,
   Repository,
   ReviewPolicy,
   Settings,
@@ -26,6 +28,14 @@ export function getBoard() {
 
 export function getTask(taskId: string) {
   return apiClient.get(`tasks/${taskId}`).json<TaskDetail>()
+}
+
+export function getIssueThread(taskId: string) {
+  return apiClient.get(`tasks/${taskId}/issue`).json<IssueThread>()
+}
+
+export function addIssueComment(taskId: string, body: string) {
+  return apiClient.post(`tasks/${taskId}/comment`, { json: { body } }).json<IssueComment>()
 }
 
 export function moveTask(taskId: string, column: TaskColumn, position: number) {

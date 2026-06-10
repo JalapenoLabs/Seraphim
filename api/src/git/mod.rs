@@ -9,7 +9,8 @@ use eyre::{Context, Result};
 use octocrab::params::pulls::MergeMethod;
 use octocrab::params::State;
 use octocrab::Octocrab;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// How many issues we pull per repo per sync, and repos per org per discovery.
 const PER_PAGE: u8 = 100;
@@ -263,4 +264,112 @@ pub async fn squash_merge(octo: &Octocrab, owner: &str, repo: &str, number: u64)
         .await
         .wrap_err("failed to squash-merge pull request")?;
     Ok(())
+}
+
+// --- Issue thread (GitHub-style detail view) ---------------------------------
+//
+// These structs deserialize straight from the GitHub REST shapes and serialize
+// to the frontend unchanged (GitHub already uses the snake_case the UI expects),
+// so the issue view renders the real conversation: author, avatars, labels,
+// assignees, and comments.
+
+/// A GitHub account as it appears on an issue or comment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueUser {
+    pub login: String,
+    pub avatar_url: String,
+    #[serde(default)]
+    pub html_url: String,
+}
+
+/// An issue label with its hex color (no leading `#`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueLabel {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueMilestone {
+    pub title: String,
+}
+
+/// One comment in the conversation (the issue body is rendered separately).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueComment {
+    pub user: IssueUser,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub author_association: String,
+}
+
+/// The issue itself: header, opener, body, and sidebar metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDetail {
+    pub number: u64,
+    pub title: String,
+    /// `"open"` or `"closed"`.
+    pub state: String,
+    pub user: IssueUser,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub author_association: String,
+    #[serde(default)]
+    pub labels: Vec<IssueLabel>,
+    #[serde(default)]
+    pub assignees: Vec<IssueUser>,
+    pub milestone: Option<IssueMilestone>,
+}
+
+/// An issue plus its comments, powering the GitHub-style conversation view.
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueThread {
+    pub issue: IssueDetail,
+    pub comments: Vec<IssueComment>,
+}
+
+/// Fetches an issue and its comments for the conversation view.
+pub async fn get_issue_thread(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+) -> Result<IssueThread> {
+    let issue: IssueDetail = octo
+        .get(
+            format!("/repos/{owner}/{repo}/issues/{number}"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to fetch issue")?;
+    let comments: Vec<IssueComment> = octo
+        .get(
+            format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page=100"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to fetch issue comments")?;
+    Ok(IssueThread { issue, comments })
+}
+
+/// Posts a comment to an issue and returns the created comment.
+pub async fn add_issue_comment(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+    body: &str,
+) -> Result<IssueComment> {
+    let comment: IssueComment = octo
+        .post(
+            format!("/repos/{owner}/{repo}/issues/{number}/comments"),
+            Some(&json!({ "body": body })),
+        )
+        .await
+        .wrap_err("failed to post issue comment")?;
+    Ok(comment)
 }

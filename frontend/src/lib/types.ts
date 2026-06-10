@@ -171,6 +171,44 @@ export const KNOWN_MODELS: { value: string; label: string }[] = [
   { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (200K)' }
 ]
 
+// --- GitHub issue thread (conversation view) ---------------------------------
+
+export type IssueUser = {
+  login: string
+  avatar_url: string
+  html_url: string
+}
+
+export type IssueLabel = {
+  name: string
+  color: string
+}
+
+export type IssueComment = {
+  user: IssueUser
+  body: string | null
+  created_at: string
+  author_association: string
+}
+
+export type IssueDetail = {
+  number: number
+  title: string
+  state: 'open' | 'closed'
+  user: IssueUser
+  body: string | null
+  created_at: string
+  author_association: string
+  labels: IssueLabel[]
+  assignees: IssueUser[]
+  milestone: { title: string } | null
+}
+
+export type IssueThread = {
+  issue: IssueDetail
+  comments: IssueComment[]
+}
+
 export type ConfigBundle = {
   settings: Record<string, unknown>
   repositories: unknown[]

@@ -16,6 +16,7 @@
     "@sveltejs/adapter-node": "^5.2.0",
     "@sveltejs/kit": "^2.8.0",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.0",
     "@types/node": "^22.9.0",
     "svelte": "^5.1.0",
@@ -27,7 +28,9 @@
   "dependencies": {
     "bits-ui": "^2.18.1",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.9",
     "ky": "^1.7.0",
+    "marked": "^18.0.5",
     "paneforge": "^1.0.2",
     "svelte-dnd-action": "^0.9.50",
     "tailwind-merge": "^3.6.0",

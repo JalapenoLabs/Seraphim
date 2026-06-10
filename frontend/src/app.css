@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+@plugin '@tailwindcss/typography';
 
 /* shadcn-svelte design tokens, themed to Seraphim's dark palette. The app is
    dark-only, so the values live directly on :root (no light/dark switch). */
