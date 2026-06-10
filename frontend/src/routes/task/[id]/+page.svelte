@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { AgentEvent, Task } from '$lib/types'
 
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount, onDestroy, tick } from 'svelte'
   import { page } from '$app/stores'
 
   import { getTask } from '$lib/api'
@@ -31,6 +31,32 @@
   function resetSplit() {
     paneGroup?.setLayout([50, 50])
   }
+
+  // Activity log autoscroll: follow new events only while the user is parked at
+  // the bottom. Scrolling up pauses it; returning to the bottom re-engages it.
+  const STICK_THRESHOLD_PX = 48
+  let logEl = $state<HTMLDivElement>()
+  let stickToBottom = $state(true)
+
+  function onLogScroll() {
+    if (!logEl) {
+      return
+    }
+    const distanceFromBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight
+    stickToBottom = distanceFromBottom < STICK_THRESHOLD_PX
+  }
+
+  $effect(() => {
+    // Re-run whenever an event arrives; scroll only if we're still following.
+    events.length
+    if (stickToBottom && logEl) {
+      tick().then(() => {
+        if (logEl) {
+          logEl.scrollTop = logEl.scrollHeight
+        }
+      })
+    }
+  })
 
   // Leading glyph per event type, modeled on Claude Code's transcript: a filled
   // dot for the agent's own actions, a corner connector for their output.
@@ -177,7 +203,11 @@
               <Alert.Description class="break-words text-xs">{task.error}</Alert.Description>
             </Alert.Root>
           {/if}
-          <div class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 font-mono text-sm leading-relaxed">
+          <div
+            bind:this={logEl}
+            onscroll={onLogScroll}
+            class="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 font-mono text-sm leading-relaxed"
+          >
             {#if events.length === 0}
               <p class="text-muted-foreground">No activity yet.</p>
             {/if}
