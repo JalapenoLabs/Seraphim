@@ -13,6 +13,7 @@ mod availability;
 mod network;
 mod prompt;
 mod provision;
+mod thoughts;
 mod usage;
 
 pub use provision::provision_workspace;
@@ -548,6 +549,9 @@ async fn run_agent_turn(
     // The reset time of the last usage pause we applied this turn, so repeated
     // rate-limit notices don't re-write the same value.
     let mut usage_pause_reset: Option<i64> = None;
+    // The agent's non-JSON "thoughts" this turn (its reasoning and prose),
+    // collected for an optional summary comment on the source issue.
+    let mut thoughts: Vec<String> = Vec::new();
 
     while let Some(item) = stream.next().await {
         let event = match item {
@@ -575,6 +579,17 @@ async fn run_agent_turn(
                     .clone()
                     .unwrap_or_else(|| "the agent reported an error".to_string());
                 error_message = Some(scrubber.scrub_text(&message));
+            }
+        }
+
+        // Collect the agent's non-JSON thoughts (reasoning + prose), scrubbed, in
+        // case we summarize them back onto the issue once the turn ends.
+        if let AgentEventKind::Thinking { text } | AgentEventKind::AssistantText { text } =
+            &event.kind
+        {
+            let scrubbed = scrubber.scrub_text(text);
+            if !scrubbed.trim().is_empty() {
+                thoughts.push(scrubbed);
             }
         }
 
@@ -631,6 +646,12 @@ async fn run_agent_turn(
         session_id.as_deref(),
     )
     .await?;
+
+    // Optionally summarize this turn's reasoning back onto the source issue.
+    // Best-effort: a failure here never affects the task's own outcome.
+    if let Err(error) = thoughts::post_turn_thoughts(state, settings, task, &thoughts).await {
+        warn!(error = %error, task = %task.id, "failed to post reasoning summary to the issue");
+    }
 
     Ok(TurnOutcome {
         session_id,

@@ -86,6 +86,7 @@
   let networkIncludeDefaults = $state(true)
   let networkSavedAt = $state<string | null>(null)
   let usageSavedAt = $state<string | null>(null)
+  let thoughtsSavedAt = $state<string | null>(null)
 
   // Order and copy mirror the claude.ai network-access selector.
   const NETWORK_LEVELS: { value: NetworkAccessLevel; title: string; description: string }[] = [
@@ -222,6 +223,14 @@
       usage_limit_threshold: settings.usage_limit_threshold
     })
     usageSavedAt = new Date().toLocaleTimeString()
+  }
+
+  async function saveThoughts() {
+    if (!settings) {
+      return
+    }
+    settings = await updateSettings({ post_thoughts_enabled: settings.post_thoughts_enabled })
+    thoughtsSavedAt = new Date().toLocaleTimeString()
   }
 
   function addEnvRow() {
@@ -723,6 +732,27 @@
         <div class="flex items-center gap-3">
           <Button onclick={saveUsage}>Save usage limits</Button>
           {#if usageSavedAt}<span class="text-sm text-muted-foreground">Saved at {usageSavedAt}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Issue updates</Card.Title>
+        <Card.Description>
+          When on, after each work turn the agent's reasoning is condensed by a separate Claude
+          call and posted as a single comment on the source GitHub issue, so you can follow along
+          on the ticket. Off by default.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="flex items-center gap-2">
+          <Switch id="post-thoughts" bind:checked={settings.post_thoughts_enabled} />
+          <Label for="post-thoughts">Post a reasoning summary to the issue after each turn</Label>
+        </div>
+        <div class="flex items-center gap-3">
+          <Button onclick={saveThoughts}>Save</Button>
+          {#if thoughtsSavedAt}<span class="text-sm text-muted-foreground">Saved at {thoughtsSavedAt}</span>{/if}
         </div>
       </Card.Content>
     </Card.Root>
