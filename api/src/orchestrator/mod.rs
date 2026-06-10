@@ -78,6 +78,15 @@ pub fn spawn(state: AppState) {
 /// Best-effort full provision at boot so the workspace is ready before the first
 /// task. Failures (e.g. no token yet) are logged; per-task prep retries anyway.
 async fn provision_on_startup(state: AppState) {
+    // A turn in flight when the process stopped left its card stuck in In
+    // Progress. Return any such card to To Do so the agent reworks it cleanly
+    // rather than stranding it.
+    match queries::reclaim_orphaned_tasks(&state.db).await {
+        Ok(0) => {}
+        Ok(count) => warn!(count, "reclaimed tasks stranded in progress by a restart"),
+        Err(error) => warn!(error = %error, "failed to reclaim in-progress tasks on startup"),
+    }
+
     // Mark provisioning in-progress so the agent halts until the config repo is
     // verified this boot (only matters when a config repo is configured).
     if let Ok(settings) = queries::get_settings(&state.db).await {

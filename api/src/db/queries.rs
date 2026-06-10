@@ -498,6 +498,19 @@ pub async fn set_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> sql
     .await
 }
 
+/// Returns tasks stranded in `In Progress` by an interrupted turn (e.g. the API
+/// restarting mid-turn) back to `To Do`, reset to a clean queued state, so the
+/// agent reworks them instead of leaving them stuck. Returns how many.
+pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE tasks SET board_column = 'todo', status = 'queued', error = NULL, \
+         ci_fix_attempts = 0, updated_at = now() WHERE board_column = 'in_progress'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// The next card the agent should work: top of `To Do`, not on hold.
 pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
