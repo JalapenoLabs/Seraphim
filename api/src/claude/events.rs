@@ -88,16 +88,23 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         .map(str::to_string);
 
     match value.get("type").and_then(Value::as_str) {
-        Some("system") => vec![AgentEvent {
-            kind: AgentEventKind::Init {
-                model: value
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            },
-            session_id,
-            raw: value,
-        }],
+        // Only the `init` system line is meaningful here. Claude Code also emits a
+        // stream of other `system` subtypes (`thinking_tokens`, `task_started`,
+        // `task_notification`, `status`, `compact_boundary`, ...) as live
+        // telemetry; surfacing those would flood the activity log, so drop them.
+        Some("system") => match value.get("subtype").and_then(Value::as_str) {
+            Some("init") => vec![AgentEvent {
+                kind: AgentEventKind::Init {
+                    model: value
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                },
+                session_id,
+                raw: value,
+            }],
+            _ => Vec::new(),
+        },
         Some("assistant") => parse_assistant(&value, session_id.as_deref(), value.clone()),
         Some("user") => parse_user(&value, session_id.as_deref()),
         Some("result") => vec![AgentEvent {
@@ -254,6 +261,13 @@ mod tests {
                 model: Some("claude-opus-4-8".to_string())
             }
         );
+    }
+
+    #[test]
+    fn non_init_system_telemetry_is_dropped() {
+        // Streaming telemetry (e.g. thinking_tokens) must not flood the log.
+        let line = r#"{"type":"system","subtype":"thinking_tokens","session_id":"s1","estimated_tokens":1100}"#;
+        assert!(parse_line(line).is_empty());
     }
 
     #[test]
