@@ -160,8 +160,23 @@ fn context_header(settings: &Settings, repo: &Repository, task: &Task) -> String
         url = task.url,
     ));
 
+    // Shared by every mode: noticing missing tooling can happen on any run, so
+    // the recommend-improvements guidance lives in the common header.
+    prompt.push_str(ENVIRONMENT_SUGGESTIONS);
     prompt
 }
+
+/// Guidance, appended to every task prompt, on recommending setup improvements.
+const ENVIRONMENT_SUGGESTIONS: &str = "\n\
+    # Recommend environment improvements\n\
+    If during the task you noticed tooling or setup that was missing or would \
+    make future runs on a fresh workstation go smoother (a toolchain you had to \
+    install, a CLI that was absent, a slow step that a cached tool would fix), \
+    record it before you finish so it is not buried in your output. Run:\n\n\
+    \x20 seraphim-suggest '{\"suggestions\":[{\"title\":\"<short recommendation>\",\
+    \"detail\":\"<why it helps and how to apply it, e.g. a setup-script snippet>\"}]}'\n\n\
+    Only suggest things that genuinely help; if nothing comes to mind, skip it. \
+    This does not replace opening the pull request.\n";
 
 /// Guidance, appended to every fresh task prompt, on escalating to the user.
 const ASKING_FOR_HELP: &str = "\n\

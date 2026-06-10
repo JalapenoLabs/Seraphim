@@ -15,8 +15,9 @@ pub struct Config {
     pub org_name: String,
     pub workspace_container: String,
     /// URL the workspace container uses to reach this API, so the agent's
-    /// `seraphim-ask` helper can post questions. Defaults to the compose service
-    /// address (`api:27182`), reachable on the shared Docker network.
+    /// `seraphim-ask` and `seraphim-suggest` helpers can post questions and
+    /// recommendations. Defaults to the compose service address (`api:27182`),
+    /// reachable on the shared Docker network.
     pub internal_api_url: String,
 }
 

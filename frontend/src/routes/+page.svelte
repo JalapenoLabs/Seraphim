@@ -16,6 +16,7 @@
   const FLIP_MS = 150
 
   let settings = $state<Settings | null>(null)
+  let suggestionCounts = $state<Record<string, number>>({})
   // One array per lane; svelte-dnd-action mutates these during a drag.
   let columns = $state<Record<TaskColumn, Task[]>>({
     available: [],
@@ -33,6 +34,7 @@
   async function load() {
     const [board, repos] = await Promise.all([getBoard(), listRepos()])
     settings = board.settings
+    suggestionCounts = board.suggestion_counts
     repoNames = Object.fromEntries(repos.map((repo) => [repo.id, repo.full_name]))
     const grouped: Record<TaskColumn, Task[]> = {
       available: [],
@@ -208,7 +210,12 @@
       >
         {#each columns[column.key] as task (task.id)}
           <div>
-            <Card {task} onchange={load} repoName={task.repo_id ? repoNames[task.repo_id] : undefined} />
+            <Card
+              {task}
+              onchange={load}
+              repoName={task.repo_id ? repoNames[task.repo_id] : undefined}
+              suggestionCount={suggestionCounts[task.id] ?? 0}
+            />
           </div>
         {/each}
       </div>

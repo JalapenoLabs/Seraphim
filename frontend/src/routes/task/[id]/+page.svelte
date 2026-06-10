@@ -1,12 +1,12 @@
 <script lang="ts">
-  import type { AgentEvent, AnswerKind, Question, Task } from '$lib/types'
+  import type { AgentEvent, AnswerKind, EnvSuggestion, Question, Task } from '$lib/types'
 
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
   import { Pause, Play } from '@lucide/svelte'
 
-  import { answerQuestion, getTask, setTaskHold } from '$lib/api'
+  import { acknowledgeSuggestion, answerQuestion, getTask, setTaskHold } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
@@ -26,6 +26,7 @@
 
   let task = $state<Task | null>(null)
   let events = $state<StreamEvent[]>([])
+  let suggestions = $state<EnvSuggestion[]>([])
   let questions = $state<Question[]>([])
   let eventSource: EventSource | null = null
 
@@ -35,6 +36,19 @@
 
   const pendingQuestions = $derived(questions.filter((question) => question.status === 'pending'))
   const answeredQuestions = $derived(questions.filter((question) => question.status !== 'pending'))
+
+  async function toggleSuggestion(suggestion: EnvSuggestion) {
+    // Optimistically flip so the checkbox feels instant, then persist; revert on
+    // failure so the UI never lies about what was actually saved.
+    const next = !suggestion.acknowledged
+    suggestion.acknowledged = next
+    try {
+      await acknowledgeSuggestion(suggestion.id, next)
+    } catch (error) {
+      console.debug('failed to update suggestion, reverting', error)
+      suggestion.acknowledged = !next
+    }
+  }
 
   async function submitAnswer(questionId: string, kind: AnswerKind, text: string) {
     await answerQuestion(questionId, kind, text)
@@ -136,6 +150,7 @@
     const detail = await getTask(taskId)
     task = detail.task
     events = detail.events.map((event) => ({ type: event.type, payload: event.payload }))
+    suggestions = detail.suggestions
     questions = detail.questions
   }
 
@@ -203,6 +218,45 @@
   <a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Board</a>
 
   {#if task}
+    {#if suggestions.length}
+      <!-- Loud on the task too: the checkboxes here are what clear the board badge. -->
+      <section class="rounded-lg border border-warning/50 bg-card p-3">
+        <h2 class="text-sm font-semibold">💡 Environment recommendations</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground">
+          Things the agent thinks would make future runs smoother. Check one off once you have
+          handled it; unchecked ones stay loud on the board.
+        </p>
+        <ul class="mt-2 divide-y divide-border">
+          {#each suggestions as suggestion (suggestion.id)}
+            <li>
+              <label class="flex cursor-pointer items-start gap-2 py-2">
+                <input
+                  type="checkbox"
+                  checked={suggestion.acknowledged}
+                  onchange={() => toggleSuggestion(suggestion)}
+                  class="mt-0.5"
+                />
+                <span class="flex min-w-0 flex-col gap-0.5">
+                  <span
+                    class="text-sm font-medium {suggestion.acknowledged
+                      ? 'text-muted-foreground line-through'
+                      : ''}"
+                  >
+                    {suggestion.title}
+                  </span>
+                  {#if suggestion.detail}
+                    <span class="whitespace-pre-wrap text-xs text-muted-foreground"
+                      >{suggestion.detail}</span
+                    >
+                  {/if}
+                </span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
     {#if pendingQuestions.length}
       <div class="rounded-lg border border-warning/40 bg-card p-4">
         <h2 class="mb-3 text-sm font-semibold">The agent needs your input</h2>

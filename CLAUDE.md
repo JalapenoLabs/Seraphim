@@ -128,6 +128,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `error`, `hold`, `session_id`.
 - **`turns`** / **`events`** — per-task Claude invocations and the append-only
   parsed stream-json (live feed + chat history).
+- **`environment_suggestions`** — setup recommendations the agent makes after a
+  task (`title`, `detail`, `acknowledged`). Posted by the agent's
+  `seraphim-suggest` helper; shown loudly on the board and as checkboxes on the
+  task until the user acknowledges them.
 - **`questions`** — decisions the agent escalated to the user, stored on the task
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and
@@ -169,9 +173,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    detect PR → **In Review**, or **park** as `waiting_for_input` if the agent
    asked a question), then (d) when nothing else is queued, *revisit* a PR it gave
    up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min). The agent
-   asks via the `seraphim-ask` CLI (baked into the workspace image), which posts
-   to `POST /agent/questions`; the exec injects `SERAPHIM_TASK_ID` +
-   `SERAPHIM_API_URL`. One task awaited to completion before the next (no overlap).
+   asks via the `seraphim-ask` CLI and records environment recommendations via the
+   `seraphim-suggest` CLI (both baked into the workspace image), posting to
+   `POST /agent/questions` and `POST /agent/suggestions`; the exec injects
+   `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL`. One task awaited to completion before
+   the next (no overlap).
 3. **review** — watches every open PR's CI: green → squash-merge
    (`auto_squash_merge` repos) → **Done**, else wait; red → hand back to the
    agent, bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for

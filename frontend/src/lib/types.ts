@@ -141,6 +141,17 @@ export type AgentEvent = {
   created_at: string
 }
 
+// A setup recommendation the agent made after finishing a task.
+export type EnvSuggestion = {
+  id: string
+  task_id: string
+  title: string
+  detail: string
+  acknowledged: boolean
+  created_at: string
+  acknowledged_at: string | null
+}
+
 // A decision the agent escalated to the user.
 export type QuestionStatus = 'pending' | 'answered' | 'declined'
 export type AnswerKind = 'option' | 'custom' | 'declined'
@@ -176,11 +187,14 @@ export type PendingQuestion = {
 export type BoardResponse = {
   tasks: Task[]
   settings: Settings
+  // Unacknowledged suggestion counts keyed by task id (tasks with none omitted).
+  suggestion_counts: Record<string, number>
 }
 
 export type TaskDetail = {
   task: Task
   events: AgentEvent[]
+  suggestions: EnvSuggestion[]
   questions: Question[]
 }
 

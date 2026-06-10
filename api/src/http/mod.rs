@@ -10,6 +10,7 @@ mod questions;
 mod repos;
 mod settings;
 mod sse;
+mod suggestions;
 mod tasks;
 mod workspace;
 
@@ -62,6 +63,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/stream", get(sse::task_stream))
         .route("/tasks/:id/move", post(board::move_task))
         .route("/tasks/:id/hold", post(board::set_hold))
+        .route("/agent/suggestions", post(suggestions::create))
+        .route("/suggestions/:id/ack", post(suggestions::acknowledge))
         .route("/agent/questions", post(questions::ask))
         .route("/questions/pending", get(questions::pending))
         .route("/questions/:id/answer", post(questions::answer))

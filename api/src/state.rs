@@ -39,7 +39,7 @@ pub struct AppState {
     pub db: PgPool,
     pub workspace: Workspace,
     pub events: broadcast::Sender<ServerEvent>,
-    /// URL the workspace uses to reach this API (for the agent's `seraphim-ask`).
+    /// URL the workspace uses to reach this API (for the agent's helpers).
     pub internal_api_url: String,
 }
 

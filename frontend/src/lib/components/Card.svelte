@@ -11,8 +11,14 @@
   let {
     task,
     onchange,
-    repoName
-  }: { task: Task; onchange: () => void; repoName?: string } = $props()
+    repoName,
+    suggestionCount = 0
+  }: {
+    task: Task
+    onchange: () => void
+    repoName?: string
+    suggestionCount?: number
+  } = $props()
 
   // Show just the repo name (after the owner); the full owner/repo is on hover.
   const repoShort = $derived(repoName ? repoName.split('/').pop() : null)
@@ -43,6 +49,16 @@
   </div>
 
   <div class="mt-2 text-sm leading-snug">{task.title}</div>
+
+  <!-- Loud on purpose: pulses until the user acknowledges the suggestions on the task. -->
+  {#if suggestionCount > 0}
+    <div
+      class="mt-2 animate-pulse rounded-md bg-warning px-2 py-1 text-center text-xs font-bold text-background motion-reduce:animate-none"
+      title="The agent recommended environment changes"
+    >
+      💡 {suggestionCount} setup {suggestionCount === 1 ? 'suggestion' : 'suggestions'}
+    </div>
+  {/if}
 
   {#if task.pr_url}
     <div class="mt-2 flex justify-end">

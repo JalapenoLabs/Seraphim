@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+// seraphim-suggest: the agent records environment setup recommendations.
+//
+// After finishing a task, the agent calls this to flag tooling or configuration
+// that would make future runs on a fresh workstation go smoother (a toolchain it
+// had to install, a missing CLI, a slow step). The API stores them on the task;
+// the UI shows them loudly on the board and as checkboxes on the task until the
+// user acknowledges them.
+//
+// Usage (JSON as an argument or on stdin):
+//   seraphim-suggest '{"suggestions":[{"title":"Install the Rust toolchain",
+//                      "detail":"Tasks here build a Rust API; add rustup to the
+//                      environment setup script to skip a 3-minute install."}]}'
+//
+// A bare string, a single {title, detail} object, or an array of those are all
+// accepted for convenience.
+
+const API_URL = process.env.SERAPHIM_API_URL
+const TASK_ID = process.env.SERAPHIM_TASK_ID
+
+function fail(message) {
+  console.error(`seraphim-suggest: ${message}`)
+  process.exit(1)
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk) => (data += chunk))
+    process.stdin.on('end', () => resolve(data))
+  })
+}
+
+// Normalizes the accepted input shapes into an array of {title, detail}.
+function normalizeSuggestions(parsed) {
+  const rawList = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.suggestions)
+      ? parsed.suggestions
+      : [parsed]
+
+  return rawList
+    .map((entry) => {
+      const suggestion = typeof entry === 'string' ? { title: entry } : entry
+      return {
+        title: String(suggestion?.title ?? '').trim(),
+        detail: String(suggestion?.detail ?? '').trim()
+      }
+    })
+    .filter((suggestion) => suggestion.title.length > 0)
+}
+
+async function main() {
+  if (!API_URL || !TASK_ID) {
+    fail('SERAPHIM_API_URL and SERAPHIM_TASK_ID must be set (they are injected by the orchestrator)')
+  }
+
+  const rawInput = process.argv[2] ?? (await readStdin())
+  if (!rawInput || !rawInput.trim()) {
+    fail('no suggestion provided (pass JSON as an argument or on stdin)')
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(rawInput)
+  } catch {
+    // Allow a plain, unquoted recommendation string as a convenience.
+    parsed = rawInput.trim()
+  }
+
+  const suggestions = normalizeSuggestions(parsed)
+  if (!suggestions.length) {
+    fail('could not find any suggestion title in the input')
+  }
+
+  let response
+  try {
+    response = await fetch(`${API_URL}/api/v1/agent/suggestions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task_id: TASK_ID, suggestions })
+    })
+  } catch (error) {
+    fail(`could not reach the Seraphim API at ${API_URL}: ${error.message}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    fail(`the API rejected the suggestion (HTTP ${response.status}): ${detail}`)
+  }
+
+  const count = suggestions.length
+  console.log(`Recorded ${count} environment suggestion${count === 1 ? '' : 's'} for the user.`)
+}
+
+main().catch((error) => fail(error.message))
