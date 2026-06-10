@@ -1,6 +1,13 @@
 <script lang="ts">
+  import type { BoardResponse } from '$lib/types'
+
   import '../app.css'
+  import { onMount, onDestroy } from 'svelte'
   import { page } from '$app/stores'
+  import { Pause, TriangleAlert } from '@lucide/svelte'
+
+  import { getBoard } from '$lib/api'
+  import { isWithinSchedule } from '$lib/schedule'
   import { Toaster } from '$lib/components/ui/sonner'
 
   let { children } = $props()
@@ -10,6 +17,70 @@
     { href: '/repos', label: 'Repositories' },
     { href: '/settings', label: 'Settings' }
   ]
+
+  // The board (settings + tasks) drives the navbar status. The board SSE stream
+  // ticks on every change (including pause/resume), keeping the badge live.
+  let board = $state<BoardResponse | null>(null)
+  let eventSource: EventSource | null = null
+
+  async function loadStatus() {
+    try {
+      board = await getBoard()
+    } catch {
+      // Transient; the next stream tick or navigation retries.
+    }
+  }
+
+  // What the agent is doing right now, in priority order, so the navbar explains
+  // why work is (or isn't) being picked up.
+  const status = $derived.by(() => {
+    const settings = board?.settings
+    if (!settings) {
+      return null
+    }
+    if (settings.agent_paused) {
+      return { key: 'paused', label: 'Agent paused' } as const
+    }
+    if (settings.config_repo_url && settings.config_repo_error) {
+      return { key: 'halted', label: 'Agent halted' } as const
+    }
+    const working = board?.tasks.some(
+      (task) =>
+        task.board_column === 'in_progress' ||
+        ['preparing', 'working', 'opening_pr', 'merging'].includes(task.status)
+    )
+    if (working) {
+      return { key: 'working', label: 'Working' } as const
+    }
+    if (settings.availability_enabled && !isWithinSchedule(settings, new Date())) {
+      return { key: 'offhours', label: 'Off hours' } as const
+    }
+    return { key: 'idle', label: 'Idle' } as const
+  })
+
+  // Filled, loud pills for the states that mean "not working"; subtle pills with a
+  // status dot otherwise.
+  const PILLS = {
+    paused: 'bg-warning text-warning-foreground',
+    halted: 'bg-destructive text-white',
+    working: 'border border-border text-foreground',
+    offhours: 'border border-border text-muted-foreground',
+    idle: 'border border-border text-muted-foreground'
+  } as const
+
+  const DOTS = {
+    working: 'bg-success animate-pulse',
+    offhours: 'bg-warning',
+    idle: 'bg-muted-foreground'
+  } as const
+
+  onMount(() => {
+    loadStatus()
+    eventSource = new EventSource('/api/v1/board/stream')
+    eventSource.addEventListener('board', () => loadStatus())
+  })
+
+  onDestroy(() => eventSource?.close())
 </script>
 
 <div class="flex h-screen flex-col">
@@ -35,6 +106,24 @@
         </a>
       {/each}
     </nav>
+
+    {#if status}
+      <span
+        class="ml-auto inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold {PILLS[
+          status.key
+        ]}"
+        title="Agent status"
+      >
+        {#if status.key === 'paused'}
+          <Pause class="size-3.5" />
+        {:else if status.key === 'halted'}
+          <TriangleAlert class="size-3.5" />
+        {:else}
+          <span class="size-2 rounded-full {DOTS[status.key as keyof typeof DOTS]}"></span>
+        {/if}
+        {status.label}
+      </span>
+    {/if}
   </header>
   <main class="min-h-0 flex-1 overflow-auto">
     {@render children()}
@@ -42,4 +131,3 @@
 </div>
 
 <Toaster theme="dark" richColors />
-
