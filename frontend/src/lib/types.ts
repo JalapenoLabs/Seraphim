@@ -6,6 +6,7 @@ export type TaskStatus =
   | 'queued'
   | 'preparing'
   | 'working'
+  | 'waiting_for_input'
   | 'opening_pr'
   | 'awaiting_review'
   | 'ci_failing'
@@ -19,6 +20,7 @@ export const STATUS_LABELS = {
   queued: 'queued',
   preparing: 'preparing',
   working: 'working',
+  waiting_for_input: 'waiting for input',
   opening_pr: 'opening PR',
   awaiting_review: 'awaiting review',
   ci_failing: 'CI failing',
@@ -33,6 +35,7 @@ export const STATUS_BADGE = {
   queued: 'border-border text-muted-foreground',
   preparing: 'border-primary/40 text-primary',
   working: 'border-primary/40 text-primary',
+  waiting_for_input: 'border-warning/40 text-warning',
   opening_pr: 'border-primary/40 text-primary',
   awaiting_review: 'border-warning/40 text-warning',
   ci_failing: 'border-warning/40 text-warning',
@@ -138,6 +141,38 @@ export type AgentEvent = {
   created_at: string
 }
 
+// A decision the agent escalated to the user.
+export type QuestionStatus = 'pending' | 'answered' | 'declined'
+export type AnswerKind = 'option' | 'custom' | 'declined'
+
+export type QuestionOption = {
+  title: string
+  description: string
+}
+
+export type Question = {
+  id: string
+  task_id: string
+  prompt: string
+  options: QuestionOption[]
+  status: QuestionStatus
+  answer_kind: AnswerKind | null
+  answer: string | null
+  acknowledged: boolean
+  created_at: string
+  answered_at: string | null
+}
+
+// A pending question plus its task title, for the notifications sidebar.
+export type PendingQuestion = {
+  id: string
+  task_id: string
+  task_title: string
+  prompt: string
+  options: QuestionOption[]
+  created_at: string
+}
+
 export type BoardResponse = {
   tasks: Task[]
   settings: Settings
@@ -146,6 +181,7 @@ export type BoardResponse = {
 export type TaskDetail = {
   task: Task
   events: AgentEvent[]
+  questions: Question[]
 }
 
 // The kanban lanes, in display order, with human-readable labels.

@@ -6,6 +6,7 @@
 
 mod board;
 mod data;
+mod questions;
 mod repos;
 mod settings;
 mod sse;
@@ -61,6 +62,10 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/stream", get(sse::task_stream))
         .route("/tasks/:id/move", post(board::move_task))
         .route("/tasks/:id/hold", post(board::set_hold))
+        .route("/agent/questions", post(questions::ask))
+        .route("/questions/pending", get(questions::pending))
+        .route("/questions/:id/answer", post(questions::answer))
+        .route("/notifications/stream", get(sse::notification_stream))
         .route("/repos", get(repos::list).post(repos::upsert))
         .route(
             "/repos/:id",

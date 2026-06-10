@@ -25,6 +25,12 @@ pub enum ServerEvent {
         task_id: Uuid,
         payload: serde_json::Value,
     },
+    /// The agent asked the user something; drives toasts and native notifications.
+    Notification {
+        task_id: Uuid,
+        task_title: String,
+        prompt: String,
+    },
 }
 
 /// Clonable, shared state handed to every request handler and background task.
@@ -33,15 +39,18 @@ pub struct AppState {
     pub db: PgPool,
     pub workspace: Workspace,
     pub events: broadcast::Sender<ServerEvent>,
+    /// URL the workspace uses to reach this API (for the agent's `seraphim-ask`).
+    pub internal_api_url: String,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, workspace: Workspace) -> Self {
+    pub fn new(db: PgPool, workspace: Workspace, internal_api_url: String) -> Self {
         let (events, _receiver) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             db,
             workspace,
             events,
+            internal_api_url,
         }
     }
 
@@ -66,5 +75,14 @@ impl AppState {
     /// Pushes an agent event onto a task's live stream.
     pub fn notify_task(&self, task_id: Uuid, payload: serde_json::Value) {
         let _ = self.events.send(ServerEvent::Task { task_id, payload });
+    }
+
+    /// Announces a new question so the UI can toast and notify the user.
+    pub fn notify_question(&self, task_id: Uuid, task_title: String, prompt: String) {
+        let _ = self.events.send(ServerEvent::Notification {
+            task_id,
+            task_title,
+            prompt,
+        });
     }
 }

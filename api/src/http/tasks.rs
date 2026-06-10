@@ -9,7 +9,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
-use crate::db::models::{Event, SourceKind, Task};
+use crate::db::models::{Event, Question, SourceKind, Task};
 use crate::db::queries;
 use crate::git;
 use crate::state::AppState;
@@ -18,9 +18,11 @@ use crate::state::AppState;
 pub struct TaskDetail {
     pub task: Task,
     pub events: Vec<Event>,
+    /// Every decision the agent escalated on this task, answered or pending.
+    pub questions: Vec<Question>,
 }
 
-/// `GET /api/v1/tasks/:id` - the card and its persisted conversation events.
+/// `GET /api/v1/tasks/:id` - the card, its conversation events, and its questions.
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -33,7 +35,13 @@ pub async fn get_task(
             .into_response());
     };
     let events = queries::list_events_for_task(&state.db, id).await?;
-    Ok(Json(TaskDetail { task, events }).into_response())
+    let questions = queries::list_questions_for_task(&state.db, id).await?;
+    Ok(Json(TaskDetail {
+        task,
+        events,
+        questions,
+    })
+    .into_response())
 }
 
 /// Resolves a task to its GitHub `(owner, repo, issue number)`, or an error
