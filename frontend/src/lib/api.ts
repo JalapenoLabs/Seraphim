@@ -5,6 +5,7 @@ import ky from 'ky'
 
 import type {
   BoardResponse,
+  ConfigBundle,
   IssueSource,
   Repository,
   ReviewPolicy,
@@ -74,6 +75,10 @@ export function deleteSource(sourceId: string) {
   return apiClient.delete(`sources/${sourceId}`).json()
 }
 
+export function syncNow() {
+  return apiClient.post('sources/sync').json()
+}
+
 // --- Settings + workspace ----------------------------------------------------
 
 export function getSettings() {
@@ -86,6 +91,8 @@ export type UpdateSettingsRequest = {
   default_review_policy?: ReviewPolicy
   claude_model?: string
   base_setup_script?: string
+  config_repo_url?: string
+  default_branch_template?: string
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {
@@ -102,4 +109,18 @@ export function restartWorkspace() {
 
 export function recreateWorkspace() {
   return apiClient.post('workspace/recreate').json()
+}
+
+export function provisionWorkspace() {
+  return apiClient.post('workspace/provision').json()
+}
+
+// --- Config export / import --------------------------------------------------
+
+export function exportConfig() {
+  return apiClient.get('export').json<ConfigBundle>()
+}
+
+export function importConfig(bundle: ConfigBundle) {
+  return apiClient.post('import', { json: bundle }).json()
 }

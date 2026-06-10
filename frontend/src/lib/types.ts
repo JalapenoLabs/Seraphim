@@ -1,6 +1,6 @@
 // Domain types mirroring the Rust API's JSON (snake_case throughout).
 
-export type TaskColumn = 'available' | 'todo' | 'in_progress' | 'in_review' | 'done'
+export type TaskColumn = 'available' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'ignored'
 
 export type TaskStatus =
   | 'queued'
@@ -47,6 +47,8 @@ export type Settings = {
   claude_model: string
   workspace_image_tag: string
   base_setup_script: string
+  config_repo_url: string
+  default_branch_template: string
   current_session_id: string | null
   updated_at: string
 }
@@ -100,5 +102,22 @@ export const COLUMNS: { key: TaskColumn; label: string }[] = [
   { key: 'todo', label: 'To Do' },
   { key: 'in_progress', label: 'In Progress' },
   { key: 'in_review', label: 'In Review' },
-  { key: 'done', label: 'Done' }
+  { key: 'done', label: 'Done' },
+  { key: 'ignored', label: 'Ignored' }
 ]
+
+// Known Claude models for the settings dropdown; users can also enter a custom
+// id (e.g. a model released after this build).
+export const KNOWN_MODELS: string[] = [
+  'claude-opus-4-8[1m]',
+  'claude-opus-4-8',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+  'claude-fable-5'
+]
+
+export type ConfigBundle = {
+  settings: Record<string, unknown>
+  repositories: unknown[]
+  sources: unknown[]
+}

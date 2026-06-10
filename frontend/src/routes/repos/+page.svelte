@@ -113,13 +113,26 @@
         <input id="enabled" type="checkbox" bind:checked={form.enabled} />
       </div>
     </div>
+    <p class="hint">
+      Clone URL accepts SSH (<code>git@github.com:owner/repo.git</code>) or HTTPS. SSH uses your
+      mounted <code>~/.ssh</code> key; HTTPS uses <code>GH_TOKEN</code>.
+    </p>
     <div class="field">
       <label for="instr">Repo-specific instructions</label>
       <textarea id="instr" rows="3" bind:value={form.instructions}></textarea>
+      <p class="hint">
+        Written to <code>/workspace/{'{repo}'}/CLAUDE.md</code>, loaded whenever the agent works in
+        this repo. Put build/test commands and repo-specific gotchas here.
+      </p>
     </div>
     <div class="field">
-      <label for="rsetup">Setup script (run after branch checkout)</label>
+      <label for="rsetup">Setup script (run after clone/checkout)</label>
       <textarea id="rsetup" rows="3" bind:value={form.setup_script}></textarea>
+      <p class="hint">
+        Runs in this repo after it's cloned/updated (e.g. <code>yarn install</code>,
+        <code>corepack enable</code>). Tools shared across all repos belong in the environment setup
+        script under Settings.
+      </p>
     </div>
     <div class="actions">
       <button class="primary" onclick={submit}>Save repository</button>
@@ -211,5 +224,19 @@
   .muted {
     color: var(--muted);
     font-size: 0.85rem;
+  }
+
+  .hint {
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    margin: 0.2rem 0 0.6rem;
+  }
+
+  .hint code {
+    background: var(--panel-2);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
   }
 </style>

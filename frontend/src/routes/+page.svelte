@@ -6,7 +6,7 @@
   import { dndzone } from 'svelte-dnd-action'
 
   import { COLUMNS } from '$lib/types'
-  import { getBoard, moveTask, setPaused } from '$lib/api'
+  import { getBoard, moveTask, setPaused, syncNow } from '$lib/api'
   import Card from '$lib/components/Card.svelte'
 
   const FLIP_MS = 150
@@ -18,7 +18,8 @@
     todo: [],
     in_progress: [],
     in_review: [],
-    done: []
+    done: [],
+    ignored: []
   })
 
   let eventSource: EventSource | null = null
@@ -31,7 +32,8 @@
       todo: [],
       in_progress: [],
       in_review: [],
-      done: []
+      done: [],
+      ignored: []
     }
     for (const task of board.tasks) {
       grouped[task.board_column].push(task)
@@ -84,6 +86,17 @@
     settings = await setPaused(!settings.agent_paused)
   }
 
+  let checking = $state(false)
+  async function checkIssues() {
+    checking = true
+    try {
+      await syncNow()
+      await load()
+    } finally {
+      checking = false
+    }
+  }
+
   onMount(() => {
     load()
     // Live board: the API ticks this stream whenever anything changes.
@@ -101,11 +114,16 @@
       <span class="muted">· {settings.claude_model}</span>
     {/if}
   </div>
-  {#if settings}
-    <button class:primary={settings.agent_paused} onclick={togglePause}>
-      {settings.agent_paused ? '▶ Resume agent' : '⏸ Pause agent'}
+  <div class="header-actions">
+    <button onclick={checkIssues} disabled={checking}>
+      {checking ? 'Checking…' : '⟳ Check issues'}
     </button>
-  {/if}
+    {#if settings}
+      <button class:primary={settings.agent_paused} onclick={togglePause}>
+        {settings.agent_paused ? '▶ Resume agent' : '⏸ Pause agent'}
+      </button>
+    {/if}
+  </div>
 </div>
 
 <div class="board">
@@ -144,9 +162,14 @@
     font-size: 0.85rem;
   }
 
+  .header-actions {
+    display: flex;
+    gap: 0.6rem;
+  }
+
   .board {
     display: grid;
-    grid-template-columns: repeat(5, minmax(220px, 1fr));
+    grid-template-columns: repeat(6, minmax(200px, 1fr));
     gap: 0.9rem;
     padding: 0.6rem 1.4rem 1.4rem;
     height: 100%;
