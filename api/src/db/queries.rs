@@ -5,14 +5,15 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    EnvVar, EnvVarWrite, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn,
-    TaskStatus, Turn,
+    AvailabilityWindow, EnvVar, EnvVarWrite, Repository, ReviewPolicy, Settings, SourceKind, Task,
+    TaskColumn, TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -25,7 +26,9 @@ const SETTINGS_COLUMNS: &str =
      claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
      default_branch_template, config_repo_error, current_session_id, updated_at, \
      (claude_oauth_token <> '') AS claude_token_set, \
-     (github_token <> '') AS github_token_set";
+     (github_token <> '') AS github_token_set, \
+     availability_enabled, availability_timezone, availability_windows, \
+     availability_skip_dates";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -36,6 +39,10 @@ pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
 }
 
 /// Patches the settings row; `NULL` arguments leave the existing value intact.
+///
+/// The four availability arguments travel together: `enabled`, the IANA
+/// `timezone`, the weekly `windows`, and the `skip_dates`. As with every other
+/// field, passing `None` keeps the stored value.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_settings(
     pool: &PgPool,
@@ -46,6 +53,10 @@ pub async fn update_settings(
     base_setup_script: Option<String>,
     config_repo_url: Option<String>,
     default_branch_template: Option<String>,
+    availability_enabled: Option<bool>,
+    availability_timezone: Option<String>,
+    availability_windows: Option<Json<Vec<AvailabilityWindow>>>,
+    availability_skip_dates: Option<Json<Vec<NaiveDate>>>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -56,6 +67,10 @@ pub async fn update_settings(
          base_setup_script = COALESCE($5, base_setup_script), \
          config_repo_url = COALESCE($6, config_repo_url), \
          default_branch_template = COALESCE($7, default_branch_template), \
+         availability_enabled = COALESCE($8, availability_enabled), \
+         availability_timezone = COALESCE($9, availability_timezone), \
+         availability_windows = COALESCE($10, availability_windows), \
+         availability_skip_dates = COALESCE($11, availability_skip_dates), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -67,6 +82,10 @@ pub async fn update_settings(
     .bind(base_setup_script)
     .bind(config_repo_url)
     .bind(default_branch_template)
+    .bind(availability_enabled)
+    .bind(availability_timezone)
+    .bind(availability_windows)
+    .bind(availability_skip_dates)
     .fetch_one(pool)
     .await
 }

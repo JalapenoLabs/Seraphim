@@ -1,10 +1,12 @@
 <script lang="ts">
-  import type { EnvVar, ReviewPolicy, Settings } from '$lib/types'
+  import type { AvailabilityWindow, EnvVar, ReviewPolicy, Settings } from '$lib/types'
   import type { EnvVarWrite } from '$lib/api'
 
   import { onMount } from 'svelte'
 
   import { KNOWN_MODELS } from '$lib/types'
+  import { WEEKDAYS, minutesToTime, timeToMinutes } from '$lib/schedule'
+  import { usFederalHolidays } from '$lib/holidays'
   import {
     exportConfig,
     getSettings,
@@ -18,6 +20,11 @@
   } from '$lib/api'
 
   const CUSTOM_MODEL = '__custom__'
+
+  // One editable row per weekday for the working-hours grid. The data model
+  // allows several windows per day, but a single contiguous shift covers the
+  // common "9 to 5" case and keeps the UI legible.
+  type DayRow = { active: boolean; start: string; end: string }
 
   // One editable row in the environment-variables table. For a secret loaded from
   // the server, `value` starts blank and `preview` holds the masked stored value;
@@ -42,11 +49,44 @@
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
   let modelChoice = $state<string>(KNOWN_MODELS[0].value)
 
+  // Availability schedule editing state, kept separate from `settings` because
+  // the per-weekday grid and skip-date chips are derived shapes.
+  let days = $state<DayRow[]>([])
+  let skipDates = $state<string[]>([])
+  let newSkipDate = $state('')
+  let scheduleSavedAt = $state<string | null>(null)
+  // The browser's full IANA zone list, when the engine exposes it.
+  const timezones =
+    typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []
+
   // Environment variables (DigitalOcean-style rows).
   let envRows = $state<EnvRow[]>([])
   let envMessage = $state<string | null>(null)
 
   const policies: ReviewPolicy[] = ['auto_squash_merge', 'human_review', 'none']
+
+  // Upcoming US federal holidays (this year and next) not already skipped.
+  const holidaySuggestions = $derived.by(() => {
+    const today = new Date().toISOString().slice(0, 10)
+    const year = new Date().getFullYear()
+    return [...usFederalHolidays(year), ...usFederalHolidays(year + 1)]
+      .filter((holiday) => holiday.date >= today && !skipDates.includes(holiday.date))
+      .slice(0, 8)
+  })
+
+  function buildDays(windows: AvailabilityWindow[]): DayRow[] {
+    return WEEKDAYS.map((_, weekday) => {
+      const window = windows.find((existing) => existing.weekday === weekday)
+      if (!window) {
+        return { active: false, start: '09:00', end: '17:00' }
+      }
+      return {
+        active: true,
+        start: minutesToTime(window.start_minute),
+        end: minutesToTime(window.end_minute)
+      }
+    })
+  }
 
   function toEnvRow(variable: EnvVar): EnvRow {
     return {
@@ -65,8 +105,44 @@
     modelChoice = KNOWN_MODELS.some((model) => model.value === loaded.claude_model)
       ? loaded.claude_model
       : CUSTOM_MODEL
+    days = buildDays(loaded.availability_windows)
+    skipDates = [...loaded.availability_skip_dates]
     const env = await listEnvVars()
     envRows = env.variables.map(toEnvRow)
+  }
+
+  function addSkipDate(date: string) {
+    const trimmed = date.trim()
+    if (!trimmed || skipDates.includes(trimmed)) {
+      return
+    }
+    skipDates = [...skipDates, trimmed].sort()
+    newSkipDate = ''
+  }
+
+  function removeSkipDate(date: string) {
+    skipDates = skipDates.filter((existing) => existing !== date)
+  }
+
+  async function saveSchedule() {
+    if (!settings) {
+      return
+    }
+    const windows: AvailabilityWindow[] = days
+      .map((day, weekday) => ({ day, weekday }))
+      .filter(({ day }) => day.active)
+      .map(({ day, weekday }) => ({
+        weekday,
+        start_minute: timeToMinutes(day.start),
+        end_minute: timeToMinutes(day.end)
+      }))
+    settings = await updateSettings({
+      availability_enabled: settings.availability_enabled,
+      availability_timezone: settings.availability_timezone,
+      availability_windows: windows,
+      availability_skip_dates: skipDates
+    })
+    scheduleSavedAt = new Date().toLocaleTimeString()
   }
 
   function addEnvRow() {
@@ -241,6 +317,99 @@
       <div class="actions">
         <button class="primary" onclick={save}>Save</button>
         {#if savedAt}<span class="muted">Saved at {savedAt}</span>{/if}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Availability schedule</h2>
+      <p class="hint">
+        Optional. When on, the agent only picks up new work during the hours and days you set
+        here, in your time zone, and never on a skipped date. The database always stores UTC; this
+        is just your local view. A task already in progress always runs to completion.
+      </p>
+
+      <div class="field checkbox">
+        <input
+          id="availability-enabled"
+          type="checkbox"
+          bind:checked={settings.availability_enabled}
+        />
+        <label for="availability-enabled">Restrict the agent to a schedule</label>
+      </div>
+
+      {#if settings.availability_enabled}
+        <div class="field">
+          <label for="timezone">Time zone</label>
+          <select id="timezone" bind:value={settings.availability_timezone}>
+            {#if !timezones.includes(settings.availability_timezone)}
+              <option value={settings.availability_timezone}>
+                {settings.availability_timezone}
+              </option>
+            {/if}
+            {#each timezones as timezone}
+              <option value={timezone}>{timezone}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="field">
+          <span class="section-label">Working hours</span>
+          <p class="hint">
+            Leave every day unchecked to allow any time of day (handy when you only want to skip
+            specific dates).
+          </p>
+          <div class="days">
+            {#each days as day, weekday}
+              <div class="day-row" class:inactive={!day.active}>
+                <label class="day-toggle">
+                  <input type="checkbox" bind:checked={day.active} />
+                  <span>{WEEKDAYS[weekday]}</span>
+                </label>
+                <div class="times">
+                  <input type="time" bind:value={day.start} disabled={!day.active} />
+                  <span>to</span>
+                  <input type="time" bind:value={day.end} disabled={!day.active} />
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="section-label">Skip dates</span>
+          <p class="hint">Vacations, holidays, any single day the agent should stay idle.</p>
+          <div class="skip-add">
+            <input type="date" bind:value={newSkipDate} />
+            <button onclick={() => addSkipDate(newSkipDate)}>Add date</button>
+          </div>
+          {#if skipDates.length}
+            <div class="chips">
+              {#each skipDates as date}
+                <button class="chip" title="Remove" onclick={() => removeSkipDate(date)}>
+                  {date} ✕
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="muted">No skipped dates.</p>
+          {/if}
+
+          {#if holidaySuggestions.length}
+            <p class="hint">Suggested US holidays (click to add):</p>
+            <div class="chips">
+              {#each holidaySuggestions as holiday}
+                <button class="chip suggest" onclick={() => addSkipDate(holiday.date)}>
+                  + {holiday.name} ({holiday.date})
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <div class="actions">
+        <button class="primary" onclick={saveSchedule}>Save schedule</button>
+        {#if scheduleSavedAt}<span class="muted">Saved at {scheduleSavedAt}</span>{/if}
       </div>
     </section>
 
@@ -437,6 +606,56 @@
     margin-top: 0.4rem;
   }
 
+  .checkbox {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .checkbox input {
+    width: auto;
+  }
+
+  .section-label {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .days {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
+  }
+
+  .day-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+  }
+
+  .day-row.inactive {
+    opacity: 0.55;
+  }
+
+  .day-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 9rem;
+  }
+
+  .day-toggle input {
+    width: auto;
+  }
+
+  .times {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   .env-table {
     display: flex;
     flex-direction: column;
@@ -448,6 +667,38 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+
+  .times input {
+    width: auto;
+  }
+
+  .skip-add {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .skip-add input {
+    width: auto;
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.5rem 0;
+  }
+
+  .chip {
+    font-size: 0.78rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+  }
+
+  .chip.suggest {
+    border-style: dashed;
+    color: var(--muted);
   }
 
   .env-key {

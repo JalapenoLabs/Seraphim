@@ -74,8 +74,21 @@ async fn bootstrap_settings(db: &sqlx::PgPool, config: &Config) -> Result<()> {
         .then(|| config.claude_model.clone());
 
     if org_name.is_some() || claude_model.is_some() {
-        db::queries::update_settings(db, org_name, None, None, claude_model, None, None, None)
-            .await?;
+        db::queries::update_settings(
+            db,
+            org_name,
+            None,
+            None,
+            claude_model,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
     }
     Ok(())
 }

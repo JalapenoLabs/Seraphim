@@ -9,6 +9,7 @@
 //! The agent loop is inherently single-threaded: one task is awaited to
 //! completion before the next is considered, so turns never overlap.
 
+mod availability;
 mod prompt;
 mod provision;
 
@@ -16,6 +17,7 @@ pub use provision::provision_workspace;
 
 use std::time::Duration;
 
+use chrono::Utc;
 use eyre::{eyre, Result};
 use futures::StreamExt;
 use tokio::time::sleep;
@@ -147,7 +149,8 @@ async fn agent_loop(state: AppState) {
     }
 }
 
-/// The next card to work, or `None` if paused, halted, or the queue is empty.
+/// The next card to work, or `None` if paused, halted, outside the availability
+/// schedule, or the queue is empty.
 async fn next_actionable_task(state: &AppState) -> Result<Option<Task>> {
     let settings = queries::get_settings(&state.db).await?;
     if settings.agent_paused {
@@ -157,6 +160,10 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<Task>> {
     // is missing its instructions/skills. Refuse to pull work until it's fixed.
     // Bypassed only when no config repo is configured (blank url).
     if !settings.config_repo_url.trim().is_empty() && settings.config_repo_error.is_some() {
+        return Ok(None);
+    }
+    // Optional availability schedule (hours/days/skip-dates in the user's zone).
+    if !availability::is_available(&settings, Utc::now()) {
         return Ok(None);
     }
     queries::pick_next_todo(&state.db).await.map_err(Into::into)

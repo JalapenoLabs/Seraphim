@@ -3,10 +3,12 @@
 
 use axum::extract::State;
 use axum::Json;
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json as SqlxJson;
 
 use super::ApiResult;
-use crate::db::models::{EnvVarWrite, ReviewPolicy, Settings};
+use crate::db::models::{AvailabilityWindow, EnvVarWrite, ReviewPolicy, Settings};
 use crate::db::queries;
 use crate::secrets::mask;
 use crate::state::AppState;
@@ -36,6 +38,10 @@ pub struct UpdateSettingsRequest {
     pub base_setup_script: Option<String>,
     pub config_repo_url: Option<String>,
     pub default_branch_template: Option<String>,
+    pub availability_enabled: Option<bool>,
+    pub availability_timezone: Option<String>,
+    pub availability_windows: Option<Vec<AvailabilityWindow>>,
+    pub availability_skip_dates: Option<Vec<NaiveDate>>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -52,6 +58,10 @@ pub async fn update(
         body.base_setup_script,
         body.config_repo_url,
         body.default_branch_template,
+        body.availability_enabled,
+        body.availability_timezone,
+        body.availability_windows.map(SqlxJson),
+        body.availability_skip_dates.map(SqlxJson),
     )
     .await?;
     state.notify_board();
