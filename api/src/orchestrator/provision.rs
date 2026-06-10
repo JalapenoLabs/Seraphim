@@ -132,6 +132,18 @@ pub async fn provision_workspace(state: &AppState) -> Result<()> {
     run(state, &script).await
 }
 
+/// Bash that returns a repo's working tree to a clean state before a checkout.
+///
+/// A turn interrupted mid-merge/rebase (e.g. the API restarting during a
+/// conflict-resolving revisit) leaves an unresolved index that makes every later
+/// `git checkout` fail with "you need to resolve your current index first". These
+/// are safe no-ops when nothing is in progress.
+fn reset_tree_snippet() -> &'static str {
+    "git merge --abort 2>/dev/null || true\n\
+     git rebase --abort 2>/dev/null || true\n\
+     git reset --hard 2>/dev/null || true\n"
+}
+
 /// Per-task prep: ensure config + AGENTS.md + the focus repo, then cut `branch`.
 pub async fn prepare_branch(
     state: &AppState,
@@ -145,12 +157,12 @@ pub async fn prepare_branch(
     script.push_str(&prelude_agents(settings));
     // Ensure the focus repo exists (clone + setup on first sight), then branch.
     script.push_str(&repo_block(repo, false));
+    script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
+    script.push_str(reset_tree_snippet());
     script.push_str(&format!(
-        "cd \"{dir}\"\n\
-         git checkout \"{default}\"\n\
+        "git checkout \"{default}\"\n\
          git pull --ff-only origin \"{default}\" || true\n\
          git checkout -B \"{branch}\" \"origin/{default}\"\n",
-        dir = dir,
         default = repo.default_branch,
         branch = branch,
     ));
@@ -175,12 +187,12 @@ pub async fn prepare_existing_branch(
     // Ensure the focus repo exists (clone on first sight), then sync to the
     // remote branch tip CI actually tested.
     script.push_str(&repo_block(repo, false));
+    script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
+    script.push_str(reset_tree_snippet());
     script.push_str(&format!(
-        "cd \"{dir}\"\n\
-         git fetch origin\n\
+        "git fetch origin\n\
          git checkout -B \"{branch}\" \"origin/{branch}\"\n\
          git reset --hard \"origin/{branch}\"\n",
-        dir = dir,
         branch = branch,
     ));
 
