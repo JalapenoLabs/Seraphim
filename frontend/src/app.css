@@ -112,3 +112,37 @@
     font-family: var(--font-sans);
   }
 }
+
+/* Slim, theme-matched scrollbars in place of the chunky native ones. The thumb
+   is a translucent tint of the muted text color (so it reads on the background,
+   the card, and the secondary panels alike) and brightens on hover; the track
+   stays transparent. Unlayered so it isn't overridden by Tailwind's base reset. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted-foreground) 40%, transparent) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  /* The transparent border + padding-box clip insets the thumb to a slim pill. */
+  background-color: color-mix(in srgb, var(--muted-foreground) 35%, transparent);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
