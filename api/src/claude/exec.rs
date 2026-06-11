@@ -66,6 +66,10 @@ fn build_command(args: &TurnArgs) -> Vec<String> {
         "stream-json".to_string(),
         // stream-json with -p requires --verbose to emit the full event stream.
         "--verbose".to_string(),
+        // Opt into the raw Messages-API stream events so we get live, per-chunk
+        // token usage (`message_start` / `message_delta`) for the live counter,
+        // not just the coarse totals at message/turn boundaries.
+        "--include-partial-messages".to_string(),
         "--permission-mode".to_string(),
         "bypassPermissions".to_string(),
         "--model".to_string(),
@@ -167,6 +171,7 @@ mod tests {
         assert!(command.contains(&"sess-1".to_string()));
         assert!(command.contains(&"bypassPermissions".to_string()));
         assert!(command.contains(&"stream-json".to_string()));
+        assert!(command.contains(&"--include-partial-messages".to_string()));
     }
 
     #[test]
