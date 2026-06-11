@@ -104,6 +104,8 @@ export type Task = {
   error: string | null
   ci_fix_attempts: number
   hold: boolean
+  // The operator's private scratchpad; stored only here, never sent to the ticket.
+  notes: string
   session_id: string | null
   started_at: string | null
   finished_at: string | null

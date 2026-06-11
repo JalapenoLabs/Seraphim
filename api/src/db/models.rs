@@ -325,6 +325,9 @@ pub struct Task {
     /// Fix turns already spent on this task's failing CI (bounds retry thrash).
     pub ci_fix_attempts: i32,
     pub hold: bool,
+    /// The operator's private scratchpad for this task. Stored only here and
+    /// never written back to the source ticket.
+    pub notes: String,
     pub session_id: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,

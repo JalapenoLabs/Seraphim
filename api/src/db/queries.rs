@@ -739,6 +739,17 @@ pub async fn set_task_hold(pool: &PgPool, id: Uuid, hold: bool) -> sqlx::Result<
     .await
 }
 
+/// Saves the operator's private scratchpad for a task. Does not touch
+/// `updated_at`: notes are orthogonal to the task's lifecycle and saved often.
+pub async fn set_task_notes(pool: &PgPool, id: Uuid, notes: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE tasks SET notes = $2 WHERE id = $1")
+        .bind(id)
+        .bind(notes)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET status = $2, last_activity_at = now(), updated_at = now() \

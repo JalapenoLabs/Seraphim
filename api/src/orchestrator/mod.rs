@@ -1013,6 +1013,7 @@ mod tests {
             error: None,
             ci_fix_attempts: 0,
             hold: false,
+            notes: String::new(),
             session_id: None,
             started_at: None,
             finished_at: None,
