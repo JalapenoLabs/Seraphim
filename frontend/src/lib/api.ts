@@ -62,6 +62,11 @@ export function setTaskHold(taskId: string, hold: boolean) {
   return apiClient.post(`tasks/${taskId}/hold`, { json: { hold } }).json<Task>()
 }
 
+// Save the private per-task notepad. Stored only in our DB, never sent to the ticket.
+export function setTaskNotes(taskId: string, notes: string) {
+  return apiClient.put(`tasks/${taskId}/notes`, { json: { notes } }).json<{ saved: boolean }>()
+}
+
 // --- Environment suggestions -------------------------------------------------
 
 export function acknowledgeSuggestion(suggestionId: string, acknowledged: boolean) {

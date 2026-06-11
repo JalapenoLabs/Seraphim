@@ -49,6 +49,23 @@ pub async fn get_task(
     .into_response())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct NotesRequest {
+    pub notes: String,
+}
+
+/// `PUT /api/v1/tasks/:id/notes` - save the operator's private scratchpad for a
+/// task. Stored only in our database; never sent to the source ticket. No board
+/// notification, since notes are private and change nothing others can see.
+pub async fn set_notes(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<NotesRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    queries::set_task_notes(&state.db, id, &body.notes).await?;
+    Ok(Json(json!({ "saved": true })))
+}
+
 /// Resolves a task to its GitHub `(owner, repo, issue number)`, or an error
 /// response when the task isn't a GitHub issue with a linked repository.
 async fn issue_coords(

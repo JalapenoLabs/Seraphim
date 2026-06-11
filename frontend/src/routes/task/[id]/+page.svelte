@@ -4,13 +4,20 @@
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
-  import { Pause, Play } from '@lucide/svelte'
+  import { ChevronDown, NotebookPen, Pause, Play } from '@lucide/svelte'
 
-  import { acknowledgeSuggestion, answerQuestion, getTask, setTaskHold } from '$lib/api'
+  import {
+    acknowledgeSuggestion,
+    answerQuestion,
+    getTask,
+    setTaskHold,
+    setTaskNotes
+  } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
   import { Badge } from '$lib/components/ui/badge'
+  import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import * as Resizable from '$lib/components/ui/resizable'
@@ -62,6 +69,36 @@
       await answerQuestion(answer.questionId, answer.kind, answer.text)
     }
     await load()
+  }
+
+  // Private per-task notepad. Initialized once from the loaded task (not on every
+  // SSE-driven reload, which would clobber in-progress edits) and auto-saved.
+  let notes = $state('')
+  let notesInitialized = false
+  let notesOpen = $state(false)
+  let notesStatus = $state<'idle' | 'saving' | 'saved'>('idle')
+  let notesTimer: ReturnType<typeof setTimeout> | null = null
+
+  function scheduleNotesSave() {
+    notesStatus = 'saving'
+    if (notesTimer) {
+      clearTimeout(notesTimer)
+    }
+    notesTimer = setTimeout(saveNotes, 700)
+  }
+
+  async function saveNotes() {
+    if (notesTimer) {
+      clearTimeout(notesTimer)
+      notesTimer = null
+    }
+    try {
+      await setTaskNotes(taskId, notes)
+      notesStatus = 'saved'
+    } catch (error) {
+      console.debug('failed to save notes', error)
+      notesStatus = 'idle'
+    }
   }
 
   // Tool use/results/thinking start collapsed; any number can be open at once.
@@ -201,6 +238,12 @@
     }))
     suggestions = detail.suggestions
     questions = detail.questions
+    // Seed the notepad once, and open it if there is already something to read.
+    if (!notesInitialized) {
+      notes = detail.task.notes
+      notesOpen = notes.trim().length > 0
+      notesInitialized = true
+    }
   }
 
   // Hold toggle, behind a confirmation so it's a deliberate action.
@@ -338,6 +381,10 @@
     if (timer) {
       clearInterval(timer)
     }
+    // Flush a pending notes edit so leaving the page doesn't drop it.
+    if (notesTimer) {
+      void saveNotes()
+    }
   })
 </script>
 
@@ -383,6 +430,44 @@
         </ul>
       </section>
     {/if}
+
+    <!-- Private scratchpad: stored only here, never written to the source ticket. -->
+    <section class="flex-none rounded-lg border border-border bg-card">
+      <button
+        type="button"
+        onclick={() => (notesOpen = !notesOpen)}
+        class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-secondary/40"
+      >
+        <NotebookPen class="size-4 flex-none text-muted-foreground" />
+        <span class="font-semibold">Private notes</span>
+        {#if notes.trim()}
+          <span class="size-1.5 flex-none rounded-full bg-primary" title="This task has notes"></span>
+        {/if}
+        <span class="ml-auto text-xs text-muted-foreground">
+          {#if notesStatus === 'saving'}Saving…{:else if notesStatus === 'saved'}Saved{/if}
+        </span>
+        <ChevronDown
+          class="size-4 flex-none text-muted-foreground transition-transform {notesOpen
+            ? 'rotate-180'
+            : ''}"
+        />
+      </button>
+      {#if notesOpen}
+        <div class="space-y-1.5 border-t border-border p-3">
+          <Textarea
+            rows={8}
+            placeholder="Scratchpad for your own notes on this task…"
+            bind:value={notes}
+            oninput={scheduleNotesSave}
+            onblur={saveNotes}
+            class="resize-y text-sm"
+          />
+          <p class="text-xs text-muted-foreground">
+            Only you can see these. They are stored privately and never sent to GitHub or Jira.
+          </p>
+        </div>
+      {/if}
+    </section>
 
     <PaneGroup
       bind:this={paneGroup}
