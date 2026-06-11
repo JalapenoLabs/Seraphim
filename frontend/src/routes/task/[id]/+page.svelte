@@ -23,13 +23,23 @@
 
   const taskId = $page.params.id ?? ''
 
-  type StreamEvent = Pick<AgentEvent, 'type' | 'payload'>
+  type StreamEvent = Pick<AgentEvent, 'type' | 'payload' | 'created_at'>
 
   let task = $state<Task | null>(null)
   let events = $state<StreamEvent[]>([])
   let suggestions = $state<EnvSuggestion[]>([])
   let questions = $state<Question[]>([])
   let eventSource: EventSource | null = null
+
+  // A live clock driving the "Running …" timer below the latest event; ticks
+  // once a second while a turn is in flight.
+  let now = $state(Date.now())
+  let timer: ReturnType<typeof setInterval> | null = null
+
+  const lastEvent = $derived(events.at(-1))
+  // Show the live timer only while the agent is mid-turn, i.e. its latest event
+  // isn't the turn's terminal `result`.
+  const running = $derived(task?.status === 'working' && !!lastEvent && lastEvent.type !== 'result')
 
   // Per-question free-text inputs for the "something else" and "decline" choices.
   let customText = $state<Record<string, string>>({})
@@ -184,7 +194,11 @@
   async function load() {
     const detail = await getTask(taskId)
     task = detail.task
-    events = detail.events.map((event) => ({ type: event.type, payload: event.payload }))
+    events = detail.events.map((event) => ({
+      type: event.type,
+      payload: event.payload,
+      created_at: event.created_at
+    }))
     suggestions = detail.suggestions
     questions = detail.questions
   }
@@ -261,6 +275,21 @@
     return `${name}(${argument})`
   }
 
+  // "1h 2m 3s" / "2m 3s" / "3s" from a millisecond span.
+  function formatDuration(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = totalSeconds % 60
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`
+    }
+    if (minutes > 0) {
+      return `${minutes}m ${seconds}s`
+    }
+    return `${seconds}s`
+  }
+
   function describe(event: StreamEvent): string {
     const payload = event.payload as Record<string, unknown>
     if (event.type === 'thinking') {
@@ -281,7 +310,11 @@
     }
     if (event.type === 'result') {
       const cost = payload?.total_cost_usd
-      return `turn complete${cost ? ` · $${cost}` : ''}`
+      const durationMs = typeof payload?.duration_ms === 'number' ? payload.duration_ms : null
+      const parts = ['turn complete']
+      if (cost) parts.push(`$${cost}`)
+      if (durationMs !== null) parts.push(formatDuration(durationMs))
+      return parts.join(' · ')
     }
     if (event.type === 'rate_limit') {
       return describeRateLimit(payload)
@@ -291,15 +324,21 @@
 
   onMount(() => {
     load()
+    timer = setInterval(() => (now = Date.now()), 1000)
     eventSource = new EventSource(`/api/v1/tasks/${taskId}/stream`)
     eventSource.addEventListener('task', (message) => {
       const envelope = JSON.parse(message.data) as StreamEvent
-      events = [...events, envelope]
+      events = [...events, { ...envelope, created_at: envelope.created_at ?? new Date().toISOString() }]
       load()
     })
   })
 
-  onDestroy(() => eventSource?.close())
+  onDestroy(() => {
+    eventSource?.close()
+    if (timer) {
+      clearInterval(timer)
+    }
+  })
 </script>
 
 <div class="flex h-full flex-col gap-3 p-4">
@@ -513,6 +552,12 @@
                 {/if}
               {/if}
             {/each}
+            {#if running && lastEvent}
+              <div class="flex items-start gap-2 py-0.5 text-muted-foreground">
+                <span class="w-[1ch] flex-none"></span>
+                <span>Running {formatDuration(now - new Date(lastEvent.created_at).getTime())}</span>
+              </div>
+            {/if}
           </div>
         </div>
       </Resizable.Pane>
