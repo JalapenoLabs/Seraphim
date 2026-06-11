@@ -765,6 +765,67 @@ pub async fn min_position_in_column(
         .await
 }
 
+/// Reflects an external state change onto the board: when a tracked issue's
+/// source state actually changes (e.g. a human closes or reopens it on
+/// GitHub/Jira), record the new state and move the card to `target_column` at
+/// `target_position`, applying the same fresh-start resets `move_task` /
+/// `finish_task` do for that column.
+///
+/// Update-only (never inserts), so a closed issue we don't track creates nothing.
+/// Idempotent: the `external_state IS DISTINCT FROM` guard makes this a no-op
+/// unless the state genuinely transitioned, so steady-state syncs never clobber a
+/// human-curated column. A card the agent is actively working (`in_progress`) is
+/// left untouched so the move doesn't fight the agent loop; the next sync (once it
+/// leaves `in_progress`) reconciles it. Pass `repo_id = None` to match on
+/// `external_id` alone (Jira keys are globally unique; GitHub numbers need the
+/// repo). Returns whether a row changed.
+pub async fn apply_external_state(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    repo_id: Option<Uuid>,
+    external_id: &str,
+    external_state: &str,
+    target_column: TaskColumn,
+    target_position: f64,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE tasks SET \
+         external_state = $4, \
+         board_column = $5, \
+         position = CASE WHEN board_column IS DISTINCT FROM $5 THEN $6 ELSE position END, \
+         status = CASE \
+             WHEN board_column IS NOT DISTINCT FROM $5 THEN status \
+             WHEN $5 IN ('available'::task_column, 'todo'::task_column) THEN 'queued'::task_status \
+             WHEN $5 = 'done'::task_column THEN 'done'::task_status \
+             ELSE status END, \
+         error = CASE WHEN board_column IS DISTINCT FROM $5 \
+                      AND $5 IN ('available'::task_column, 'todo'::task_column) \
+                      THEN NULL ELSE error END, \
+         ci_fix_attempts = CASE WHEN board_column IS DISTINCT FROM $5 \
+                                AND $5 IN ('available'::task_column, 'todo'::task_column) \
+                                THEN 0 ELSE ci_fix_attempts END, \
+         finished_at = CASE WHEN board_column IS DISTINCT FROM $5 AND $5 = 'done'::task_column \
+                            THEN now() ELSE finished_at END, \
+         stats_reset_at = CASE WHEN board_column IS DISTINCT FROM $5 \
+                               AND $5 IN ('available'::task_column, 'todo'::task_column) \
+                               THEN now() ELSE stats_reset_at END, \
+         updated_at = now() \
+         WHERE source_kind = $1 AND external_id = $3 \
+         AND ($2::uuid IS NULL OR repo_id IS NOT DISTINCT FROM $2::uuid) \
+         AND external_state IS DISTINCT FROM $4 \
+         AND board_column <> 'in_progress'::task_column",
+    )
+    .bind(source_kind)
+    .bind(repo_id)
+    .bind(external_id)
+    .bind(external_state)
+    .bind(target_column)
+    .bind(target_position)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Refreshes the source-ticket state (e.g. `open` -> `closed`) of an already
 /// tracked issue, identified the way sync dedupes it. Returns whether a row
 /// changed; never inserts, so a webhook for an untracked issue is a no-op.
