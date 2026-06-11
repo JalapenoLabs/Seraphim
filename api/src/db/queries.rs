@@ -540,6 +540,16 @@ pub async fn list_tasks(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
         .await
 }
 
+/// Whether the agent is mid-turn (a card sits in the In Progress lane). Used to
+/// block a self-update while work is actively running.
+pub async fn any_task_in_progress(pool: &PgPool) -> sqlx::Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE board_column = 'in_progress')",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn get_task(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE id = $1")
         .bind(id)

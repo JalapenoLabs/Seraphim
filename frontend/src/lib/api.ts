@@ -293,6 +293,40 @@ export function resetAgent(purgeMemories: boolean) {
   return apiClient.post('agent/reset', { json: { purge_memories: purgeMemories } }).json()
 }
 
+// --- Self-update -------------------------------------------------------------
+
+export type UpdateStatus = {
+  current_sha: string
+  current_branch: string
+  latest_sha: string | null
+  update_available: boolean
+  // Whether the in-app update is wired up (HOST_REPO_DIR set).
+  configured: boolean
+  updating: boolean
+  checked_at: string | null
+  error: string | null
+  agent_paused: boolean
+  agent_working: boolean
+}
+
+export function getUpdateStatus() {
+  return apiClient.get('update/status').json<UpdateStatus>()
+}
+
+export function checkForUpdate() {
+  return apiClient.post('update/check').json<UpdateStatus>()
+}
+
+export function runUpdate() {
+  return apiClient.post('update').json<{ status: string }>()
+}
+
+export type VersionInfo = { sha: string; branch: string }
+
+export function getVersion() {
+  return apiClient.get('version').json<VersionInfo>()
+}
+
 // --- Config export / import --------------------------------------------------
 
 export function exportConfig() {

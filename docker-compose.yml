@@ -31,6 +31,12 @@ services:
     container_name: seraphim-api
     build:
       context: ./api
+      args:
+        # The commit/branch this image is built from, stamped in so the running
+        # API can detect updates and signal when a rebuild has landed. Set by
+        # scripts/start.sh (and the self-updater) from host git.
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
@@ -42,6 +48,13 @@ services:
       # Name of the workspace container the API drives via `docker exec`.
       WORKSPACE_CONTAINER: seraphim-workspace
       RUST_LOG: info,seraphim_api=debug
+      # Self-update: the API launches an updater container that bind-mounts these
+      # HOST paths to git pull + `docker compose up -d --build`. HOST_REPO_DIR is
+      # the host path to this checked-out repo (scripts/start.sh sets it to the
+      # repo root; override in .env if needed, e.g. on Windows).
+      HOST_REPO_DIR: ${HOST_REPO_DIR:-}
+      SSH_HOME: ${SSH_HOME}
+      DOCKER_SOCKET: ${DOCKER_SOCKET}
     ports:
       - "${API_PORT}:27182"
     volumes:

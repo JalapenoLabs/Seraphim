@@ -10,7 +10,7 @@
     Settings,
     TaskColumn
   } from '$lib/types'
-  import type { EnvVarWrite } from '$lib/api'
+  import type { EnvVarWrite, UpdateStatus } from '$lib/api'
 
   import { onMount } from 'svelte'
 
@@ -18,10 +18,13 @@
   import { WEEKDAYS, minutesToTime, timeToMinutes } from '$lib/schedule'
   import { usFederalHolidays } from '$lib/holidays'
   import {
+    checkForUpdate,
     deleteJiraBoard,
     discoverJiraBoards,
     exportConfig,
     getSettings,
+    getUpdateStatus,
+    getVersion,
     importConfig,
     listEnvVars,
     listJiraBoards,
@@ -30,6 +33,7 @@
     resetAgent,
     resetStats,
     restartWorkspace,
+    runUpdate,
     setEnvVars,
     setTokens,
     testJira,
@@ -62,6 +66,7 @@
     { id: 'statistics', label: 'Statistics' },
     { id: 'env', label: 'Environment variables' },
     { id: 'workspace', label: 'Workspace' },
+    { id: 'updates', label: 'Updates' },
     { id: 'backup', label: 'Backup & restore' }
   ] as const
 
@@ -549,7 +554,74 @@
     input.value = ''
   }
 
-  onMount(load)
+  // --- Self-update -----------------------------------------------------------
+  let updateStatus = $state<UpdateStatus | null>(null)
+  let checkingUpdate = $state(false)
+  let updateMessage = $state<string | null>(null)
+  // True from clicking Update until the new build is up and we reload.
+  let updateRunning = $state(false)
+
+  async function loadUpdateStatus() {
+    try {
+      updateStatus = await getUpdateStatus()
+    } catch (error) {
+      console.debug('failed to load update status', error)
+    }
+  }
+
+  async function runCheck() {
+    checkingUpdate = true
+    updateMessage = null
+    try {
+      updateStatus = await checkForUpdate()
+    } catch {
+      updateMessage = 'Update check failed.'
+    } finally {
+      checkingUpdate = false
+    }
+  }
+
+  async function doUpdate() {
+    if (!updateStatus) {
+      return
+    }
+    updateRunning = true
+    updateMessage = 'Pausing the agent and rebuilding… this can take a few minutes.'
+    let startingSha: string
+    try {
+      startingSha = (await getVersion()).sha
+      await runUpdate()
+    } catch {
+      updateMessage = 'Failed to start the update. Is the agent idle and HOST_REPO_DIR set?'
+      updateRunning = false
+      return
+    }
+    // The rebuild replaces the API; poll /version (tolerating downtime) until the
+    // commit changes, then reload onto the new build.
+    const deadline = Date.now() + 12 * 60 * 1000
+    const poll = setInterval(async () => {
+      if (Date.now() > deadline) {
+        clearInterval(poll)
+        updateMessage = 'Update is taking a while. Refresh the page once it finishes.'
+        updateRunning = false
+        return
+      }
+      try {
+        const { sha } = await getVersion()
+        if (sha && sha !== startingSha) {
+          clearInterval(poll)
+          window.location.reload()
+        }
+      } catch {
+        // API is down mid-rebuild; keep polling until it returns on the new build.
+      }
+    }, 4000)
+  }
+
+  onMount(() => {
+    load()
+    loadUpdateStatus()
+  })
 </script>
 
 <div class="mx-auto flex max-w-5xl gap-6 px-6 py-6">
@@ -1353,6 +1425,88 @@
             </AlertDialog.Footer>
           </AlertDialog.Content>
         </AlertDialog.Root>
+      </Card.Content>
+    </Card.Root>
+    {/if}
+
+    {#if active === 'updates'}
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Updates</Card.Title>
+        <Card.Description>
+          Pull the latest from GitHub (the branch this was deployed from) and rebuild the stack.
+          Checked automatically every hour. The agent is paused before an update begins, and the
+          page reloads once the new build is live.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-4">
+        {#if updateStatus}
+          <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+            <span class="text-muted-foreground">
+              Running:
+              <code class="rounded bg-secondary px-1 py-0.5">{updateStatus.current_branch}</code>
+              @
+              <code class="rounded bg-secondary px-1 py-0.5">
+                {updateStatus.current_sha === 'unknown'
+                  ? 'unknown'
+                  : updateStatus.current_sha.slice(0, 7)}
+              </code>
+            </span>
+            {#if updateStatus.checked_at}
+              <span class="text-muted-foreground">
+                Last checked {new Date(updateStatus.checked_at).toLocaleString()}
+              </span>
+            {/if}
+          </div>
+
+          {#if updateStatus.update_available}
+            <div
+              class="flex flex-wrap items-center gap-3 rounded-lg border border-primary/40 bg-primary/10 px-4 py-3"
+            >
+              <span class="text-sm font-medium text-primary">An update is available.</span>
+              {#if updateStatus.latest_sha}
+                <code class="rounded bg-secondary px-1 py-0.5 text-xs">
+                  {updateStatus.latest_sha.slice(0, 7)}
+                </code>
+              {/if}
+              <Button
+                onclick={doUpdate}
+                disabled={updateRunning ||
+                  updateStatus.updating ||
+                  updateStatus.agent_working ||
+                  !updateStatus.configured}
+              >
+                {updateRunning || updateStatus.updating ? 'Updating…' : 'Update'}
+              </Button>
+            </div>
+          {:else if !updateStatus.error}
+            <p class="text-sm text-success">You're on the latest version.</p>
+          {/if}
+
+          {#if updateStatus.agent_working}
+            <p class="text-sm text-warning">
+              The agent is working. Wait until it's idle (or pause it) to update.
+            </p>
+          {/if}
+          {#if !updateStatus.configured}
+            <p class="text-sm text-muted-foreground">
+              In-app updates aren't configured: set
+              <code class="rounded bg-secondary px-1 py-0.5">HOST_REPO_DIR</code> in
+              <code class="rounded bg-secondary px-1 py-0.5">.env</code> (the host path to this repo)
+              and restart. The version check still works without it.
+            </p>
+          {/if}
+          {#if updateStatus.error}
+            <p class="text-sm text-muted-foreground">{updateStatus.error}</p>
+          {/if}
+        {/if}
+
+        <div class="flex items-center gap-3">
+          <Button variant="outline" onclick={runCheck} disabled={checkingUpdate || updateRunning}>
+            {checkingUpdate ? 'Checking…' : 'Check for updates'}
+          </Button>
+          {#if updateMessage}<span class="text-sm text-muted-foreground">{updateMessage}</span>{/if}
+        </div>
       </Card.Content>
     </Card.Root>
     {/if}

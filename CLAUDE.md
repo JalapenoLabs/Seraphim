@@ -235,6 +235,17 @@ built on demand from the DB token, and the agent's `claude`/`git` execs get the
 tokens injected as env at call time. Migrations are embedded at compile time
 (`sqlx::migrate!`) and run on API boot.
 
+**Self-update** (Settings -> Updates, `src/update/`): the running image is stamped
+with `GIT_SHA`/`GIT_BRANCH` (compose build args set by `scripts/start.sh` from
+host git, baked in `api/Dockerfile`). The hourly check compares that to the
+branch's latest commit via the GitHub API. The "Update" button refuses while a
+turn is in progress, pauses the agent, then launches a detached `docker:cli`
+**updater container** (via the Docker socket) that bind-mounts the host repo
+(`HOST_REPO_DIR`) + socket + `SSH_HOME` and runs `git pull` + `docker compose up
+-d --build`; being outside the compose project, it survives the API being rebuilt.
+The UI then polls `/version` and reloads when the commit changes. `HOST_REPO_DIR`
+is the only new required env for the in-app update (the check works without it).
+
 ## Local dev / checks (must pass before committing)
 
 ```bash
