@@ -289,6 +289,10 @@ export function provisionWorkspace() {
   return apiClient.post('workspace/provision').json()
 }
 
+export function resetAgent(purgeMemories: boolean) {
+  return apiClient.post('agent/reset', { json: { purge_memories: purgeMemories } }).json()
+}
+
 // --- Config export / import --------------------------------------------------
 
 export function exportConfig() {
