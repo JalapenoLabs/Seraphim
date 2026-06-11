@@ -1264,6 +1264,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"fuse.js@npm:^7.4.2":
+  version: 7.4.2
+  resolution: "fuse.js@npm:7.4.2"
+  checksum: 10c0/b83e50e0cdbeca995ea373e19569c7d89a8a9af64e5752cc23d06e823332a699a5f14f0c6e4036f7e2b4cbd9ed960761cec6b20ea8a3bf3905b1af0cfa296447
+  languageName: node
+  linkType: hard
+
 "graceful-fs@npm:^4.2.4, graceful-fs@npm:^4.2.6":
   version: 4.2.11
   resolution: "graceful-fs@npm:4.2.11"
@@ -1955,6 +1962,7 @@ __metadata:
     bits-ui: "npm:^2.18.1"
     clsx: "npm:^2.1.1"
     dompurify: "npm:^3.4.9"
+    fuse.js: "npm:^7.4.2"
     ky: "npm:^1.7.0"
     marked: "npm:^18.0.5"
     mode-watcher: "npm:^1.1.0"
