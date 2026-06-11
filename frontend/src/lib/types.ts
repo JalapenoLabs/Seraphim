@@ -66,6 +66,23 @@ export type ReviewPolicy = 'auto_squash_merge' | 'human_review' | 'none'
 // Code on the web's network access levels).
 export type NetworkAccessLevel = 'none' | 'trusted' | 'full' | 'custom'
 
+// Which Jira deployment we talk to (decides auth scheme + REST version).
+export type JiraDeployment = 'cloud' | 'server'
+
+// A Jira board we follow. `status_map` maps a Jira status name to one of our
+// kanban columns; `repo_ids` is the set of repos a ticket from this board targets.
+export type JiraBoard = {
+  id: string
+  board_id: number
+  name: string
+  project_key: string
+  sync_enabled: boolean
+  status_map: Record<string, TaskColumn>
+  repo_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
 export type SourceKind = 'github' | 'jira'
 
 export type Task = {
@@ -138,10 +155,17 @@ export type Settings = {
   usage_paused_until: string | null
   // Post a per-turn summary of the agent's reasoning back to the source issue.
   post_thoughts_enabled: boolean
+  // Jira connection. Cloud uses email + API token; Server/DC uses a PAT.
+  jira_enabled: boolean
+  jira_deployment: JiraDeployment
+  jira_base_url: string
+  jira_email: string
+  jira_token_set: boolean
   // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null
   github_token_preview: string | null
+  jira_token_preview: string | null
   // Runtime signal: while set and in the future, the agent is in a brief global
   // cooldown after a transient rate limit, auto-retrying the current turn.
   cooldown_until: string | null

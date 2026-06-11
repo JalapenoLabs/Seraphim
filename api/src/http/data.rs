@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 
 use super::ApiResult;
-use crate::db::models::{AvailabilityWindow, NetworkAccessLevel, ReviewPolicy};
+use crate::db::models::{AvailabilityWindow, JiraDeployment, NetworkAccessLevel, ReviewPolicy};
 use crate::db::queries;
 use crate::state::AppState;
 
@@ -45,6 +45,17 @@ pub struct SettingsExport {
     pub usage_limit_threshold: i32,
     #[serde(default)]
     pub post_thoughts_enabled: bool,
+    // Jira connection (non-secret parts only; the API token is never exported,
+    // like the Claude/GitHub tokens). Followed boards are machine-specific (they
+    // reference repo ids), so they are not part of the bundle.
+    #[serde(default)]
+    pub jira_enabled: bool,
+    #[serde(default = "default_jira_deployment")]
+    pub jira_deployment: JiraDeployment,
+    #[serde(default)]
+    pub jira_base_url: String,
+    #[serde(default)]
+    pub jira_email: String,
 }
 
 /// Matches the database default so an older bundle imports as plain UTC.
@@ -64,6 +75,11 @@ fn default_true() -> bool {
 /// Matches the database default usage-limit threshold (80%).
 fn default_usage_threshold() -> i32 {
     80
+}
+
+/// Matches the database default (`cloud`) so older bundles import sensibly.
+fn default_jira_deployment() -> JiraDeployment {
+    JiraDeployment::Cloud
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,6 +128,10 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             usage_limit_pause_enabled: settings.usage_limit_pause_enabled,
             usage_limit_threshold: settings.usage_limit_threshold,
             post_thoughts_enabled: settings.post_thoughts_enabled,
+            jira_enabled: settings.jira_enabled,
+            jira_deployment: settings.jira_deployment,
+            jira_base_url: settings.jira_base_url,
+            jira_email: settings.jira_email,
         },
         repositories: repositories
             .into_iter()
@@ -159,6 +179,10 @@ pub async fn import(
         Some(settings.usage_limit_pause_enabled),
         Some(settings.usage_limit_threshold),
         Some(settings.post_thoughts_enabled),
+        Some(settings.jira_enabled),
+        Some(settings.jira_deployment),
+        Some(settings.jira_base_url),
+        Some(settings.jira_email),
     )
     .await?;
 

@@ -6,6 +6,7 @@
 
 mod board;
 mod data;
+mod jira;
 mod questions;
 mod repos;
 mod settings;
@@ -76,6 +77,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/repos/import-org", post(repos::import_org))
         .route("/sync", post(repos::sync))
+        .route("/jira/test", post(jira::test))
+        .route("/jira/discover", post(jira::discover))
+        .route("/jira/boards", get(jira::list))
+        .route(
+            "/jira/boards/:id",
+            axum::routing::put(jira::update).delete(jira::delete),
+        )
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
         .route("/settings/tokens", post(settings::set_tokens))

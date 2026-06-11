@@ -253,9 +253,15 @@ fail-fast) on every PR and on `main`/`develop`.
 - **Real end-to-end run is unproven** — a full Claude turn → PR → auto-merge needs
   `CLAUDE_CODE_OAUTH_TOKEN` + `GH_TOKEN` set. SSH cloning of a real private repo
   (`yearloom`) is already verified.
-- **Jira source** — not implemented. The GitHub path is folded into repos
-  (`sync_issues`); Jira (issues not bound to a GitHub repo) will need its own
-  modeling when added. `SourceKind` enum and `tasks.source_kind` already exist.
+- **Jira source** — foundation in place (`api/src/jira/`, migration `0016`):
+  a dual-mode (Cloud + Server/DC) client, connection config + secret token on the
+  `settings` row, followed `jira_boards` with a status->column map and a repo set,
+  board auto-discovery, ticket sync into tasks, and a two-way status transition
+  when a Jira card moves columns. **Not yet:** the agent auto-coding Jira tickets.
+  That needs the multi-repo execution model (a "BUG" board ticket can span several
+  repos), so `pick_next_todo` is GitHub-only for now; Jira tickets sync, map, and
+  transition but are not auto-pulled to be worked. Posting agent comments back to
+  Jira is also future.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
 - **Multi-repo PRs** — one primary repo per task for PR detection; cross-repo

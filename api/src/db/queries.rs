@@ -12,9 +12,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, NetworkAccessLevel,
-    PendingQuestion, Question, QuestionOption, QuestionStatus, Repository, ReviewPolicy, Settings,
-    SourceKind, Task, TaskColumn, TaskStatus, Turn,
+    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, JiraBoard, JiraDeployment,
+    NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus, Repository,
+    ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -31,7 +31,9 @@ const SETTINGS_COLUMNS: &str =
      availability_enabled, availability_timezone, availability_windows, \
      availability_skip_dates, network_access_level, network_access_domains, \
      network_access_include_defaults, usage_limit_pause_enabled, \
-     usage_limit_threshold, usage_paused_until, post_thoughts_enabled";
+     usage_limit_threshold, usage_paused_until, post_thoughts_enabled, \
+     jira_enabled, jira_deployment, jira_base_url, jira_email, \
+     (jira_api_token <> '') AS jira_token_set";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -66,6 +68,10 @@ pub async fn update_settings(
     usage_limit_pause_enabled: Option<bool>,
     usage_limit_threshold: Option<i32>,
     post_thoughts_enabled: Option<bool>,
+    jira_enabled: Option<bool>,
+    jira_deployment: Option<JiraDeployment>,
+    jira_base_url: Option<String>,
+    jira_email: Option<String>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -88,6 +94,10 @@ pub async fn update_settings(
              COALESCE($15, usage_limit_pause_enabled), \
          usage_limit_threshold = COALESCE($16, usage_limit_threshold), \
          post_thoughts_enabled = COALESCE($17, post_thoughts_enabled), \
+         jira_enabled = COALESCE($18, jira_enabled), \
+         jira_deployment = COALESCE($19, jira_deployment), \
+         jira_base_url = COALESCE($20, jira_base_url), \
+         jira_email = COALESCE($21, jira_email), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -109,6 +119,10 @@ pub async fn update_settings(
     .bind(usage_limit_pause_enabled)
     .bind(usage_limit_threshold)
     .bind(post_thoughts_enabled)
+    .bind(jira_enabled)
+    .bind(jira_deployment)
+    .bind(jira_base_url)
+    .bind(jira_email)
     .fetch_one(pool)
     .await
 }
@@ -165,21 +179,31 @@ pub async fn get_github_token(pool: &PgPool) -> sqlx::Result<String> {
         .await
 }
 
+/// The stored Jira API token / PAT (empty string if unset). Internal use only.
+pub async fn get_jira_token(pool: &PgPool) -> sqlx::Result<String> {
+    sqlx::query_scalar("SELECT jira_api_token FROM settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+}
+
 /// Writes the app tokens; `None` leaves the existing value untouched (so the UI
-/// can update one without resending the other).
+/// can update one without resending the others).
 pub async fn set_tokens(
     pool: &PgPool,
     claude_oauth_token: Option<String>,
     github_token: Option<String>,
+    jira_api_token: Option<String>,
 ) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE settings SET \
          claude_oauth_token = COALESCE($1, claude_oauth_token), \
          github_token = COALESCE($2, github_token), \
+         jira_api_token = COALESCE($3, jira_api_token), \
          updated_at = now() WHERE id = 1",
     )
     .bind(claude_oauth_token)
     .bind(github_token)
+    .bind(jira_api_token)
     .execute(pool)
     .await?;
     Ok(())
@@ -196,15 +220,17 @@ pub async fn list_environment_variables(pool: &PgPool) -> sqlx::Result<Vec<EnvVa
 }
 
 /// Every secret value that should be scrubbed from agent output: the secret
-/// environment variables plus the stored Claude and GitHub tokens. Empty values
-/// are omitted.
+/// environment variables plus the stored Claude, GitHub, and Jira tokens. Empty
+/// values are omitted.
 pub async fn list_secret_values(pool: &PgPool) -> sqlx::Result<Vec<String>> {
     let values: Vec<String> = sqlx::query_scalar(
         "SELECT value FROM environment_variables WHERE is_secret = TRUE AND value <> '' \
          UNION ALL \
          SELECT claude_oauth_token FROM settings WHERE id = 1 AND claude_oauth_token <> '' \
          UNION ALL \
-         SELECT github_token FROM settings WHERE id = 1 AND github_token <> ''",
+         SELECT github_token FROM settings WHERE id = 1 AND github_token <> '' \
+         UNION ALL \
+         SELECT jira_api_token FROM settings WHERE id = 1 AND jira_api_token <> ''",
     )
     .fetch_all(pool)
     .await?;
@@ -479,6 +505,122 @@ pub async fn upsert_issue_task(
     .await
 }
 
+/// Upserts a Jira ticket as a task, deduped on the issue key. New tickets land in
+/// the column their mapped Jira status implies; on conflict we refresh the cached
+/// fields and the live Jira status, but never the human-curated `board_column` or
+/// `position`.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_jira_task(
+    pool: &PgPool,
+    external_id: &str,
+    repo_id: Option<Uuid>,
+    jira_board_id: Uuid,
+    title: &str,
+    body: &str,
+    url: &str,
+    status: &str,
+    initial_column: TaskColumn,
+    initial_position: f64,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "INSERT INTO tasks (source_kind, external_id, repo_id, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES ('jira', $1, $2, $3, $4, $5, $6, $7, $8, $9) \
+         ON CONFLICT (external_id) WHERE source_kind = 'jira' DO UPDATE SET \
+         repo_id = EXCLUDED.repo_id, \
+         jira_board_id = EXCLUDED.jira_board_id, \
+         title = EXCLUDED.title, \
+         body_snapshot = EXCLUDED.body_snapshot, \
+         url = EXCLUDED.url, \
+         external_state = EXCLUDED.external_state, \
+         updated_at = now() \
+         RETURNING *",
+    )
+    .bind(external_id)
+    .bind(repo_id)
+    .bind(jira_board_id)
+    .bind(title)
+    .bind(body)
+    .bind(url)
+    .bind(status)
+    .bind(initial_column)
+    .bind(initial_position)
+    .fetch_one(pool)
+    .await
+}
+
+// --- Jira boards -------------------------------------------------------------
+
+/// Every followed Jira board, ordered by name.
+pub async fn list_jira_boards(pool: &PgPool) -> sqlx::Result<Vec<JiraBoard>> {
+    sqlx::query_as::<_, JiraBoard>("SELECT * FROM jira_boards ORDER BY name")
+        .fetch_all(pool)
+        .await
+}
+
+/// Followed boards that are flagged to sync.
+pub async fn list_jira_boards_to_sync(pool: &PgPool) -> sqlx::Result<Vec<JiraBoard>> {
+    sqlx::query_as::<_, JiraBoard>(
+        "SELECT * FROM jira_boards WHERE sync_enabled = TRUE ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get_jira_board(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<JiraBoard>> {
+    sqlx::query_as::<_, JiraBoard>("SELECT * FROM jira_boards WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Adds a discovered board if we are not already following it; never clobbers an
+/// existing board's mapping or repo associations.
+pub async fn create_jira_board_if_absent(
+    pool: &PgPool,
+    board_id: i64,
+    name: &str,
+    project_key: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO jira_boards (board_id, name, project_key) VALUES ($1, $2, $3) \
+         ON CONFLICT (board_id) DO NOTHING",
+    )
+    .bind(board_id)
+    .bind(name)
+    .bind(project_key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Updates a followed board's sync flag, status mapping, and repo associations.
+pub async fn update_jira_board(
+    pool: &PgPool,
+    id: Uuid,
+    sync_enabled: bool,
+    status_map: Json<std::collections::HashMap<String, TaskColumn>>,
+    repo_ids: Json<Vec<Uuid>>,
+) -> sqlx::Result<JiraBoard> {
+    sqlx::query_as::<_, JiraBoard>(
+        "UPDATE jira_boards SET sync_enabled = $2, status_map = $3, repo_ids = $4, \
+         updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(sync_enabled)
+    .bind(status_map)
+    .bind(repo_ids)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn delete_jira_board(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM jira_boards WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Records the source ticket's state on a task (e.g. "open"/"closed" after a
 /// close or reopen from the task view). Returns the refreshed task.
 pub async fn set_task_external_state(
@@ -586,9 +728,16 @@ pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
 }
 
 /// The next card the agent should work: top of `To Do`, not on hold.
+///
+/// Restricted to GitHub tasks for now: the agent codes a ticket by branching and
+/// opening a PR in one repo, while a Jira ticket may span several (its board's
+/// repo set), which is a separate execution model not yet built. Jira tickets
+/// still sync in, map to columns, and transition on moves; they just are not
+/// auto-pulled to be coded.
 pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'todo' AND hold = FALSE \
+         AND source_kind = 'github' \
          ORDER BY position ASC LIMIT 1",
     )
     .fetch_optional(pool)

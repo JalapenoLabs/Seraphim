@@ -4,6 +4,8 @@
 //! variants), and each struct maps to a table row via [`sqlx::FromRow`]. All
 //! types serialize to the snake_case JSON the frontend consumes.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
@@ -47,6 +49,17 @@ pub enum NetworkAccessLevel {
     Full,
     /// The operator's own allow-list, optionally plus the built-in defaults.
     Custom,
+}
+
+/// Which Jira deployment we are talking to, which decides both the auth scheme
+/// and the REST API version. Cloud uses Basic auth (email + API token) and REST
+/// v3; Server / Data Center uses a Bearer personal access token and REST v2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "jira_deployment", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum JiraDeployment {
+    Cloud,
+    Server,
 }
 
 /// The kanban lane a card sits in.
@@ -178,6 +191,20 @@ pub struct Settings {
     pub usage_paused_until: Option<DateTime<Utc>>,
     /// Post a per-turn summary of the agent's reasoning back to the source issue.
     pub post_thoughts_enabled: bool,
+    /// Whether the Jira integration is turned on (a connection is configured).
+    pub jira_enabled: bool,
+    /// Cloud vs Server/Data Center, deciding auth scheme and REST version.
+    pub jira_deployment: JiraDeployment,
+    /// Jira site base URL, e.g. `https://acme.atlassian.net`.
+    pub jira_base_url: String,
+    /// Account email (the Basic-auth username on Cloud; unused on Server).
+    pub jira_email: String,
+    /// Whether a Jira API token / PAT is stored (the token itself is never sent).
+    pub jira_token_set: bool,
+    /// Masked preview of the stored Jira API token. Filled like
+    /// [`Self::claude_token_preview`].
+    #[sqlx(default)]
+    pub jira_token_preview: Option<String>,
     /// Masked preview of the stored Claude token, e.g. `sk-ant-****abcd`. Not a
     /// DB column; the settings handler fills it from the raw token so an operator
     /// can recognize what is stored without it being revealed.
@@ -241,6 +268,26 @@ pub struct Repository {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A Jira board we follow for tickets.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct JiraBoard {
+    pub id: Uuid,
+    /// Jira's own numeric board id.
+    pub board_id: i64,
+    pub name: String,
+    pub project_key: String,
+    /// Poll this board for issues during sync.
+    pub sync_enabled: bool,
+    /// Maps a Jira status name (e.g. "In Progress") to one of our kanban lanes.
+    /// Unmapped statuses fall back to `Available` on first sync.
+    pub status_map: Json<HashMap<String, TaskColumn>>,
+    /// The repositories a ticket from this board may target. A single ticket can
+    /// span several repos (e.g. a shared "BUG" board), so this is a set.
+    pub repo_ids: Json<Vec<Uuid>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A kanban card: one issue the agent may work.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Task {
@@ -248,6 +295,9 @@ pub struct Task {
     pub source_kind: SourceKind,
     pub external_id: String,
     pub repo_id: Option<Uuid>,
+    /// For a Jira task, the followed board it came from, so a column move can map
+    /// back to a Jira status and transition the ticket. `None` for GitHub tasks.
+    pub jira_board_id: Option<Uuid>,
     pub title: String,
     pub body_snapshot: String,
     pub url: String,

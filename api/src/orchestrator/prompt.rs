@@ -279,6 +279,7 @@ mod tests {
             source_kind: SourceKind::Github,
             external_id: "57".to_string(),
             repo_id: None,
+            jira_board_id: None,
             title: "Ask the user for help".to_string(),
             body_snapshot: String::new(),
             url: String::new(),

@@ -2,26 +2,36 @@
   import type {
     AvailabilityWindow,
     EnvVar,
+    JiraBoard,
+    JiraDeployment,
     NetworkAccessLevel,
+    Repository,
     ReviewPolicy,
-    Settings
+    Settings,
+    TaskColumn
   } from '$lib/types'
   import type { EnvVarWrite } from '$lib/api'
 
   import { onMount } from 'svelte'
 
-  import { KNOWN_MODELS } from '$lib/types'
+  import { COLUMNS, KNOWN_MODELS } from '$lib/types'
   import { WEEKDAYS, minutesToTime, timeToMinutes } from '$lib/schedule'
   import { usFederalHolidays } from '$lib/holidays'
   import {
+    deleteJiraBoard,
+    discoverJiraBoards,
     exportConfig,
     getSettings,
     importConfig,
     listEnvVars,
+    listJiraBoards,
+    listRepos,
     recreateWorkspace,
     restartWorkspace,
     setEnvVars,
     setTokens,
+    testJira,
+    updateJiraBoard,
     updateSettings
   } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
@@ -159,8 +169,13 @@
     networkLevel = loaded.network_access_level
     networkDomains = loaded.network_access_domains.join('\n')
     networkIncludeDefaults = loaded.network_access_include_defaults
+    jiraDeployment = loaded.jira_deployment
+    jiraBaseUrl = loaded.jira_base_url
+    jiraEmail = loaded.jira_email
     const env = await listEnvVars()
     envRows = env.variables.map(toEnvRow)
+    repos = await listRepos()
+    await refreshJiraBoards()
   }
 
   function addSkipDate(date: string) {
@@ -212,6 +227,130 @@
     })
     networkDomains = settings.network_access_domains.join('\n')
     networkSavedAt = new Date().toLocaleTimeString()
+  }
+
+  // --- Jira ------------------------------------------------------------------
+  let jiraDeployment = $state<JiraDeployment>('cloud')
+  let jiraBaseUrl = $state('')
+  let jiraEmail = $state('')
+  let jiraTokenInput = $state('')
+  let jiraSavedAt = $state<string | null>(null)
+  let jiraTestMessage = $state<string | null>(null)
+  let jiraBusy = $state(false)
+  let repos = $state<Repository[]>([])
+  let jiraBoards = $state<JiraBoard[]>([])
+
+  // Per-board editable state, keyed by board id: the sync flag, the status->column
+  // rows being edited, and the chosen repo ids. Kept separate from the loaded
+  // boards so edits aren't lost until saved.
+  type StatusRow = { status: string; column: TaskColumn }
+  type BoardEdit = { sync_enabled: boolean; rows: StatusRow[]; repoIds: string[] }
+  let boardEdits = $state<Record<string, BoardEdit>>({})
+
+  const JIRA_DEPLOYMENTS: { value: JiraDeployment; label: string }[] = [
+    { value: 'cloud', label: 'Jira Cloud (email + API token)' },
+    { value: 'server', label: 'Jira Server / Data Center (PAT)' }
+  ]
+  const jiraDeploymentLabel = $derived(
+    JIRA_DEPLOYMENTS.find((option) => option.value === jiraDeployment)?.label ?? jiraDeployment
+  )
+
+  function rebuildBoardEdits() {
+    boardEdits = Object.fromEntries(
+      jiraBoards.map((board) => [
+        board.id,
+        {
+          sync_enabled: board.sync_enabled,
+          rows: Object.entries(board.status_map).map(([status, column]) => ({ status, column })),
+          repoIds: [...board.repo_ids]
+        }
+      ])
+    )
+  }
+
+  async function refreshJiraBoards() {
+    jiraBoards = await listJiraBoards()
+    rebuildBoardEdits()
+  }
+
+  async function saveJiraConnection() {
+    settings = await updateSettings({
+      jira_enabled: settings?.jira_enabled ?? false,
+      jira_deployment: jiraDeployment,
+      jira_base_url: jiraBaseUrl.trim(),
+      jira_email: jiraEmail.trim()
+    })
+    if (jiraTokenInput.trim()) {
+      settings = await setTokens({ jira_api_token: jiraTokenInput.trim() })
+      jiraTokenInput = ''
+    }
+    jiraSavedAt = new Date().toLocaleTimeString()
+  }
+
+  async function runJiraTest() {
+    jiraBusy = true
+    jiraTestMessage = null
+    try {
+      const result = await testJira()
+      jiraTestMessage = result.ok
+        ? `Connected as ${result.user ?? 'Jira user'}`
+        : (result.error ?? 'Connection failed')
+    } finally {
+      jiraBusy = false
+    }
+  }
+
+  async function runJiraDiscover() {
+    jiraBusy = true
+    try {
+      jiraBoards = await discoverJiraBoards()
+      rebuildBoardEdits()
+    } finally {
+      jiraBusy = false
+    }
+  }
+
+  function addStatusRow(boardId: string) {
+    boardEdits[boardId]?.rows.push({ status: '', column: 'available' })
+  }
+
+  function removeStatusRow(boardId: string, index: number) {
+    boardEdits[boardId]?.rows.splice(index, 1)
+  }
+
+  function toggleBoardRepo(boardId: string, repoId: string) {
+    const edit = boardEdits[boardId]
+    if (!edit) {
+      return
+    }
+    edit.repoIds = edit.repoIds.includes(repoId)
+      ? edit.repoIds.filter((id) => id !== repoId)
+      : [...edit.repoIds, repoId]
+  }
+
+  async function saveBoard(boardId: string) {
+    const edit = boardEdits[boardId]
+    if (!edit) {
+      return
+    }
+    const status_map: Record<string, TaskColumn> = {}
+    for (const row of edit.rows) {
+      const status = row.status.trim()
+      if (status) {
+        status_map[status] = row.column
+      }
+    }
+    await updateJiraBoard(boardId, {
+      sync_enabled: edit.sync_enabled,
+      status_map,
+      repo_ids: edit.repoIds
+    })
+    await refreshJiraBoards()
+  }
+
+  async function removeBoard(boardId: string) {
+    await deleteJiraBoard(boardId)
+    await refreshJiraBoards()
   }
 
   async function saveUsage() {
@@ -754,6 +893,166 @@
           <Button onclick={saveThoughts}>Save</Button>
           {#if thoughtsSavedAt}<span class="text-sm text-muted-foreground">Saved at {thoughtsSavedAt}</span>{/if}
         </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Jira</Card.Title>
+        <Card.Description>
+          Connect a Jira site to pull tickets onto the board alongside GitHub issues. The token is
+          stored in the database, never in .env. Moving a Jira card between columns transitions the
+          ticket's status per the mapping below. The agent does not auto-code Jira tickets yet.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-5">
+        <div class="flex items-center gap-2">
+          <Switch id="jira-enabled" bind:checked={settings.jira_enabled} />
+          <Label for="jira-enabled">Enable Jira integration</Label>
+        </div>
+
+        <div class="grid gap-2">
+          <Label for="jira-deployment">Deployment</Label>
+          <Select.Root
+            type="single"
+            value={jiraDeployment}
+            onValueChange={(value) => (jiraDeployment = value as JiraDeployment)}
+          >
+            <Select.Trigger id="jira-deployment" class="w-full">{jiraDeploymentLabel}</Select.Trigger>
+            <Select.Content>
+              {#each JIRA_DEPLOYMENTS as option}
+                <Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+
+        <div class="grid gap-2">
+          <Label for="jira-url">Site URL</Label>
+          <Input id="jira-url" placeholder="https://your-org.atlassian.net" bind:value={jiraBaseUrl} />
+        </div>
+
+        {#if jiraDeployment === 'cloud'}
+          <div class="grid gap-2">
+            <Label for="jira-email">Account email</Label>
+            <Input id="jira-email" placeholder="you@example.com" bind:value={jiraEmail} />
+          </div>
+        {/if}
+
+        <div class="grid gap-2">
+          <Label for="jira-token">
+            {jiraDeployment === 'cloud' ? 'API token' : 'Personal access token'}
+          </Label>
+          <Input
+            id="jira-token"
+            type="password"
+            placeholder={settings.jira_token_preview ?? 'Paste a token'}
+            bind:value={jiraTokenInput}
+          />
+          {#if settings.jira_token_set}
+            <span class="text-xs text-muted-foreground">A token is stored. Leave blank to keep it.</span>
+          {/if}
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <Button onclick={saveJiraConnection}>Save</Button>
+          <Button variant="outline" disabled={jiraBusy} onclick={runJiraTest}>Test connection</Button>
+          {#if jiraSavedAt}<span class="text-sm text-muted-foreground">Saved at {jiraSavedAt}</span>{/if}
+          {#if jiraTestMessage}<span class="text-sm text-muted-foreground">{jiraTestMessage}</span>{/if}
+        </div>
+
+        <hr class="border-border" />
+
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold">Followed boards</h3>
+          <Button variant="outline" size="sm" disabled={jiraBusy} onclick={runJiraDiscover}>
+            Discover boards
+          </Button>
+        </div>
+
+        {#if jiraBoards.length === 0}
+          <p class="text-sm text-muted-foreground">
+            No boards yet. Save your connection, then discover boards.
+          </p>
+        {/if}
+
+        {#each jiraBoards as board (board.id)}
+          {@const edit = boardEdits[board.id]}
+          {#if edit}
+            <div class="space-y-3 rounded-lg border border-border p-3">
+              <div class="flex items-center justify-between gap-2">
+                <div class="min-w-0">
+                  <div class="font-medium">{board.name}</div>
+                  {#if board.project_key}
+                    <div class="text-xs text-muted-foreground">Project {board.project_key}</div>
+                  {/if}
+                </div>
+                <div class="flex items-center gap-2">
+                  <Switch id={`board-sync-${board.id}`} bind:checked={edit.sync_enabled} />
+                  <Label for={`board-sync-${board.id}`} class="text-xs">Sync</Label>
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <div class="text-xs font-semibold text-muted-foreground">Map Jira status to column</div>
+                {#each edit.rows as row, index}
+                  <div class="flex items-center gap-2">
+                    <Input placeholder="Jira status (e.g. In Progress)" bind:value={row.status} class="flex-1" />
+                    <span class="text-muted-foreground">→</span>
+                    <Select.Root
+                      type="single"
+                      value={row.column}
+                      onValueChange={(value) => (row.column = value as TaskColumn)}
+                    >
+                      <Select.Trigger class="w-40">
+                        {COLUMNS.find((column) => column.key === row.column)?.label ?? row.column}
+                      </Select.Trigger>
+                      <Select.Content>
+                        {#each COLUMNS as column}
+                          <Select.Item value={column.key} label={column.label}>{column.label}</Select.Item>
+                        {/each}
+                      </Select.Content>
+                    </Select.Root>
+                    <Button variant="ghost" size="sm" onclick={() => removeStatusRow(board.id, index)}>
+                      Remove
+                    </Button>
+                  </div>
+                {/each}
+                <Button variant="outline" size="sm" onclick={() => addStatusRow(board.id)}>
+                  Add mapping
+                </Button>
+              </div>
+
+              <div class="space-y-1">
+                <div class="text-xs font-semibold text-muted-foreground">
+                  Repositories a ticket targets
+                </div>
+                {#if repos.length === 0}
+                  <p class="text-xs text-muted-foreground">No repositories configured yet.</p>
+                {/if}
+                <div class="flex flex-wrap gap-3">
+                  {#each repos as repo (repo.id)}
+                    <label class="flex items-center gap-1.5 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={edit.repoIds.includes(repo.id)}
+                        onchange={() => toggleBoardRepo(board.id, repo.id)}
+                      />
+                      {repo.full_name}
+                    </label>
+                  {/each}
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <Button size="sm" onclick={() => saveBoard(board.id)}>Save board</Button>
+                <Button variant="ghost" size="sm" onclick={() => removeBoard(board.id)}>
+                  Stop following
+                </Button>
+              </div>
+            </div>
+          {/if}
+        {/each}
       </Card.Content>
     </Card.Root>
 
