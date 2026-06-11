@@ -1,169 +1,53 @@
 <script lang="ts">
-  import type { RepoDeletionImpact, Repository, ReviewPolicy } from '$lib/types'
+  import type { RepoDeletionImpact, Repository } from '$lib/types'
+  import type { UpsertRepoRequest } from '$lib/api'
 
   import { onMount } from 'svelte'
-  import { Pencil, Trash2 } from '@lucide/svelte'
+  import { toast } from 'svelte-sonner'
+  import { CircleCheck, CircleOff, GitBranch, Pencil, Plus, Trash2 } from '@lucide/svelte'
 
-  import {
-    deleteRepo,
-    getSettings,
-    importOrg,
-    listRepos,
-    repoDeletionImpact,
-    updateRepo,
-    upsertRepo
-  } from '$lib/api'
+  import { deleteRepo, importOrg, listRepos, repoDeletionImpact, updateRepo } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
-  import * as Select from '$lib/components/ui/select'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
-  import { Label } from '$lib/components/ui/label'
-  import { Textarea } from '$lib/components/ui/textarea'
   import { Switch } from '$lib/components/ui/switch'
-  import { Badge } from '$lib/components/ui/badge'
-
-  // Form preferences (the defaults you tend to reuse) are remembered locally so a
-  // new repo form pre-fills with your last choices.
-  const PREFS_KEY = 'seraphim.repoFormPrefs'
-
-  type FormState = {
-    full_name: string
-    clone_url: string
-    default_branch: string
-    branch_template: string
-    review_policy: ReviewPolicy | ''
-    instructions: string
-    setup_script: string
-    enabled: boolean
-    sync_issues: boolean
-    issue_labels: string
-  }
-
-  type FormPrefs = Pick<
-    FormState,
-    'default_branch' | 'branch_template' | 'review_policy' | 'enabled' | 'sync_issues' | 'issue_labels'
-  >
-
-  function loadPrefs(): FormPrefs {
-    const fallback: FormPrefs = {
-      default_branch: 'main',
-      // Blank inherits the global template set in Settings.
-      branch_template: '',
-      review_policy: '',
-      enabled: true,
-      sync_issues: true,
-      issue_labels: ''
-    }
-    if (typeof localStorage === 'undefined') {
-      return fallback
-    }
-    try {
-      const stored = localStorage.getItem(PREFS_KEY)
-      return stored ? { ...fallback, ...JSON.parse(stored) } : fallback
-    } catch {
-      return fallback
-    }
-  }
-
-  function savePrefs(form: FormState) {
-    if (typeof localStorage === 'undefined') {
-      return
-    }
-    const prefs: FormPrefs = {
-      default_branch: form.default_branch,
-      branch_template: form.branch_template,
-      review_policy: form.review_policy,
-      enabled: form.enabled,
-      sync_issues: form.sync_issues,
-      issue_labels: form.issue_labels
-    }
-    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
-  }
-
-  function emptyForm(): FormState {
-    return { full_name: '', clone_url: '', instructions: '', setup_script: '', ...loadPrefs() }
-  }
 
   let repos = $state<Repository[]>([])
-  // The global branch template, shown as the placeholder when a repo's override
-  // is blank (it inherits this).
-  let globalBranchTemplate = $state('seraphim/issue-{number}-{slug}')
-  let form = $state<FormState>(emptyForm())
-  // The id of the repo being edited, or null when adding a new one. Editing
-  // updates that row by id (rename-safe); adding upserts by full name.
-  let editingId = $state<string | null>(null)
   let importOwner = $state('')
   let importMessage = $state<string | null>(null)
 
-  // The review-policy select uses an "inherit" sentinel since Bits UI dislikes an
-  // empty-string option value; the form keeps '' to mean "inherit default".
-  const policyValue = $derived(form.review_policy === '' ? 'inherit' : form.review_policy)
-  const policyLabel = $derived(
-    form.review_policy === '' ? 'inherit default' : form.review_policy.replace(/_/g, ' ')
-  )
-
-  function choosePolicy(value: string) {
-    form.review_policy = value === 'inherit' ? '' : (value as ReviewPolicy)
-  }
-
   async function load() {
-    const [loadedRepos, settings] = await Promise.all([listRepos(), getSettings()])
-    repos = loadedRepos
-    globalBranchTemplate = settings.default_branch_template
+    repos = await listRepos()
   }
 
-  function clearForm() {
-    editingId = null
-    form = emptyForm()
-  }
-
-  function edit(repo: Repository) {
-    editingId = repo.id
-    form = {
+  // The full update body for a quick in-place edit (the sync toggle), built from
+  // the row we already have so nothing else changes.
+  function repoToBody(repo: Repository): UpsertRepoRequest {
+    return {
       full_name: repo.full_name,
       clone_url: repo.clone_url,
       default_branch: repo.default_branch,
-      branch_template: repo.branch_template ?? '',
-      review_policy: repo.review_policy ?? '',
-      instructions: repo.instructions,
+      branch_template: repo.branch_template,
       setup_script: repo.setup_script,
+      instructions: repo.instructions,
+      review_policy: repo.review_policy,
       enabled: repo.enabled,
       sync_issues: repo.sync_issues,
-      issue_labels: repo.issue_labels.join(', ')
+      issue_labels: repo.issue_labels
     }
   }
 
-  async function submit() {
-    if (!form.full_name.trim()) {
-      return
+  // Flip a repo's issue sync from the list, optimistically; revert on failure.
+  async function toggleSync(repo: Repository, value: boolean) {
+    const previous = repo.sync_issues
+    repo.sync_issues = value
+    try {
+      await updateRepo(repo.id, repoToBody(repo))
+    } catch {
+      repo.sync_issues = previous
+      toast.error('Could not update issue sync')
     }
-    const cloneUrl = form.clone_url.trim() || `https://github.com/${form.full_name.trim()}.git`
-    const labels = form.issue_labels
-      .split(',')
-      .map((label) => label.trim())
-      .filter(Boolean)
-    const body = {
-      full_name: form.full_name.trim(),
-      clone_url: cloneUrl,
-      default_branch: form.default_branch,
-      // Blank inherits the global template (sent as null, like review policy).
-      branch_template: form.branch_template.trim() || null,
-      review_policy: form.review_policy === '' ? null : form.review_policy,
-      instructions: form.instructions,
-      setup_script: form.setup_script,
-      enabled: form.enabled,
-      sync_issues: form.sync_issues,
-      issue_labels: labels
-    }
-    if (editingId) {
-      await updateRepo(editingId, body)
-    } else {
-      await upsertRepo(body)
-    }
-    savePrefs(form)
-    clearForm()
-    await load()
   }
 
   // Deleting a repo cascades to every task synced from it (and their logs,
@@ -215,8 +99,13 @@
   onMount(load)
 </script>
 
-<div class="mx-auto max-w-4xl space-y-5 px-6 py-6">
-  <h1 class="text-2xl font-semibold">Repositories</h1>
+<div class="mx-auto max-w-6xl space-y-5 px-6 py-6">
+  <div class="flex items-center justify-between gap-3">
+    <h1 class="text-2xl font-semibold">Repositories</h1>
+    <a href="/repos/new" class={buttonVariants({ variant: 'default' })}>
+      <Plus class="size-4" /> Add repository
+    </a>
+  </div>
 
   <Card.Root>
     <Card.Header>
@@ -235,132 +124,85 @@
     </Card.Content>
   </Card.Root>
 
-  {#if repos.length}
-    <Card.Root>
-      <Card.Header>
-        <Card.Title>Managed repositories</Card.Title>
-      </Card.Header>
-      <Card.Content class="divide-y divide-border">
-        {#each repos as repo (repo.id)}
-          <div class="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
-            <div class="min-w-0">
-              <div class="truncate font-medium">{repo.full_name}</div>
-              <div class="mt-1 flex flex-wrap items-center gap-2">
-                <Badge variant="outline" class="text-muted-foreground">
-                  {repo.review_policy ? repo.review_policy.replace(/_/g, ' ') : 'inherit'}
-                </Badge>
-                {#if repo.sync_issues}
-                  <Badge variant="outline" class="border-primary/40 text-primary">syncing</Badge>
-                {/if}
-                {#if !repo.enabled}
-                  <Badge variant="outline" class="text-muted-foreground">disabled</Badge>
-                {/if}
-              </div>
-            </div>
-            <div class="flex flex-none gap-1">
-              <Button variant="ghost" size="icon" title="Edit" onclick={() => edit(repo)}>
-                <Pencil class="size-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                title="Delete"
-                class="text-destructive hover:text-destructive"
-                onclick={() => askDelete(repo)}
-              >
-                <Trash2 class="size-4" />
-              </Button>
-            </div>
-          </div>
-        {/each}
-      </Card.Content>
-    </Card.Root>
-  {/if}
-
   <Card.Root>
     <Card.Header>
-      <Card.Title>{editingId ? `Edit ${form.full_name}` : 'Add a repository'}</Card.Title>
+      <Card.Title>Managed repositories</Card.Title>
     </Card.Header>
-    <Card.Content class="space-y-5">
-      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div class="space-y-1.5">
-          <Label for="full">Full name (owner/repo)</Label>
-          <Input id="full" placeholder="navarrotech/seraphim" bind:value={form.full_name} />
-        </div>
-        <div class="space-y-1.5">
-          <Label for="clone">Clone URL (optional)</Label>
-          <Input id="clone" placeholder="defaults from full name" bind:value={form.clone_url} />
-        </div>
-        <div class="space-y-1.5">
-          <Label for="branch">Default branch</Label>
-          <Input id="branch" bind:value={form.default_branch} />
-        </div>
-        <div class="space-y-1.5">
-          <Label for="tmpl">Branch template</Label>
-          <Input id="tmpl" placeholder={`inherit: ${globalBranchTemplate}`} bind:value={form.branch_template} />
-          <p class="text-xs leading-relaxed text-muted-foreground">
-            Leave blank to inherit the global template from
-            <a href="/settings" class="underline">Settings</a>. Supports
-            <code class="rounded bg-secondary px-1 py-0.5 text-xs">{'{number}'}</code> and
-            <code class="rounded bg-secondary px-1 py-0.5 text-xs">{'{slug}'}</code>.
-          </p>
-        </div>
-        <div class="space-y-1.5">
-          <Label for="rpolicy">Review policy</Label>
-          <Select.Root type="single" value={policyValue} onValueChange={choosePolicy}>
-            <Select.Trigger id="rpolicy" class="w-full">{policyLabel}</Select.Trigger>
-            <Select.Content>
-              <Select.Item value="inherit" label="inherit default">inherit default</Select.Item>
-              <Select.Item value="auto_squash_merge" label="auto squash merge">auto squash merge</Select.Item>
-              <Select.Item value="human_review" label="human review">human review</Select.Item>
-              <Select.Item value="none" label="none">none</Select.Item>
-            </Select.Content>
-          </Select.Root>
-        </div>
-        <div class="space-y-1.5">
-          <Label for="labels">Issue label filter (optional)</Label>
-          <Input id="labels" placeholder="comma-separated; blank = all" bind:value={form.issue_labels} />
-        </div>
-      </div>
-
-      <div class="flex flex-wrap gap-6">
-        <div class="flex items-center gap-2">
-          <Switch id="enabled" bind:checked={form.enabled} />
-          <Label for="enabled">Enabled</Label>
-        </div>
-        <div class="flex items-center gap-2">
-          <Switch id="sync" bind:checked={form.sync_issues} />
-          <Label for="sync">Sync issues from this repo</Label>
-        </div>
-      </div>
-
-      <div class="space-y-1.5">
-        <Label for="instr">Repo-specific instructions</Label>
-        <Textarea id="instr" rows={3} bind:value={form.instructions} />
-        <p class="text-xs leading-relaxed text-muted-foreground">
-          Written to <code class="rounded bg-secondary px-1 py-0.5 text-xs">/workspace/{'{repo}'}/CLAUDE.md</code>,
-          loaded whenever the agent works in this repo. Put build/test commands and repo-specific
-          gotchas here.
+    <Card.Content class="divide-y divide-border">
+      {#if repos.length === 0}
+        <p class="text-sm text-muted-foreground">
+          No repositories yet. Add one, or import a whole org above.
         </p>
-      </div>
+      {/if}
+      {#each repos as repo (repo.id)}
+        <div class="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+          <!-- Enabled / disabled indicator, furthest left. -->
+          <span class="flex-none" title={repo.enabled ? 'Enabled' : 'Disabled'}>
+            {#if repo.enabled}
+              <CircleCheck class="size-4 text-success" aria-label="Enabled" />
+            {:else}
+              <CircleOff class="size-4 text-muted-foreground" aria-label="Disabled" />
+            {/if}
+          </span>
 
-      <div class="space-y-1.5">
-        <Label for="rsetup">Setup script (run after clone/checkout)</Label>
-        <Textarea id="rsetup" rows={3} bind:value={form.setup_script} />
-        <p class="text-xs leading-relaxed text-muted-foreground">
-          Runs in this repo after it's cloned/updated, as the
-          <code class="rounded bg-secondary px-1 py-0.5 text-xs">node</code> user (passwordless
-          <code class="rounded bg-secondary px-1 py-0.5 text-xs">sudo</code> available). Newlines execute
-          sequentially, e.g. <code class="rounded bg-secondary px-1 py-0.5 text-xs">pnpm install</code> or
-          <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn install</code>. pnpm, yarn, and npm are
-          preinstalled, so skip <code class="rounded bg-secondary px-1 py-0.5 text-xs">corepack enable</code>.
-        </p>
-      </div>
+          <!-- Quick issue-sync toggle. -->
+          <span
+            class="flex-none"
+            title={repo.sync_issues ? 'Syncing issues (toggle off)' : 'Not syncing issues (toggle on)'}
+          >
+            <Switch
+              checked={repo.sync_issues}
+              onCheckedChange={(value) => toggleSync(repo, value)}
+              aria-label="Sync issues"
+            />
+          </span>
 
-      <div class="flex items-center gap-3">
-        <Button onclick={submit}>{editingId ? 'Update repository' : 'Add repository'}</Button>
-        <Button variant="outline" onclick={clearForm}>{editingId ? 'Cancel' : 'Clear'}</Button>
-      </div>
+          <!-- Name + details. -->
+          <div class="min-w-0 flex-1">
+            <div
+              class="truncate font-medium {repo.enabled ? '' : 'text-muted-foreground'}"
+              title={repo.clone_url}
+            >
+              {repo.full_name}
+            </div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+              <span class="inline-flex items-center gap-1">
+                <GitBranch class="size-3 flex-none" />
+                {repo.default_branch}
+              </span>
+              <span>{repo.review_policy ? repo.review_policy.replace(/_/g, ' ') : 'inherit review'}</span>
+              <span>branch: {repo.branch_template || 'inherits global'}</span>
+              {#if repo.issue_labels.length}
+                <span>labels: {repo.issue_labels.join(', ')}</span>
+              {/if}
+              {#if repo.setup_script.trim()}<span>setup script</span>{/if}
+              {#if !repo.sync_issues}<span class="text-muted-foreground/70">sync off</span>{/if}
+            </div>
+          </div>
+
+          <!-- Actions. -->
+          <div class="flex flex-none gap-1">
+            <a
+              href={`/repos/${repo.id}/edit`}
+              title="Edit"
+              aria-label="Edit"
+              class={buttonVariants({ variant: 'ghost', size: 'icon' })}
+            >
+              <Pencil class="size-4" />
+            </a>
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Delete"
+              aria-label="Delete"
+              class="text-destructive hover:text-destructive"
+              onclick={() => askDelete(repo)}
+            >
+              <Trash2 class="size-4" />
+            </Button>
+          </div>
+        </div>
+      {/each}
     </Card.Content>
   </Card.Root>
 </div>
