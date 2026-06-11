@@ -4,14 +4,26 @@
 
   import { onMount, onDestroy } from 'svelte'
   import { dndzone } from 'svelte-dnd-action'
-  import { RefreshCw, Pause, Play } from '@lucide/svelte'
+  import { NotebookPen, RefreshCw, Pause, Play } from '@lucide/svelte'
+  import { PaneGroup } from 'paneforge'
 
   import { COLUMNS } from '$lib/types'
-  import { getBoard, listRepos, moveTask, provisionWorkspace, setPaused, syncNow } from '$lib/api'
+  import {
+    getBoard,
+    getNotepad,
+    listRepos,
+    moveTask,
+    provisionWorkspace,
+    setNotepad,
+    setPaused,
+    syncNow
+  } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
   import Card from '$lib/components/Card.svelte'
   import { Button } from '$lib/components/ui/button'
+  import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
+  import * as Resizable from '$lib/components/ui/resizable'
 
   const FLIP_MS = 150
 
@@ -30,6 +42,49 @@
   let eventSource: EventSource | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
   let repoNames = $state<Record<string, string>>({})
+
+  // --- Global notepad --------------------------------------------------------
+  // A scratchpad in a resizable pane beside the board. Default collapsed; the
+  // user's open/closed choice and the text both persist.
+  const NOTEPAD_OPEN_KEY = 'seraphim.notepadOpen'
+
+  function readNotepadOpen(): boolean {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(NOTEPAD_OPEN_KEY) === 'true'
+  }
+
+  let notesOpen = $state(readNotepadOpen())
+  let notepad = $state('')
+  let notepadStatus = $state<'idle' | 'saving' | 'saved'>('idle')
+  let notepadTimer: ReturnType<typeof setTimeout> | null = null
+
+  function setNotesOpen(open: boolean) {
+    notesOpen = open
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(NOTEPAD_OPEN_KEY, String(open))
+    }
+  }
+
+  function scheduleNotepadSave() {
+    notepadStatus = 'saving'
+    if (notepadTimer) {
+      clearTimeout(notepadTimer)
+    }
+    notepadTimer = setTimeout(saveNotepad, 700)
+  }
+
+  async function saveNotepad() {
+    if (notepadTimer) {
+      clearTimeout(notepadTimer)
+      notepadTimer = null
+    }
+    try {
+      await setNotepad(notepad)
+      notepadStatus = 'saved'
+    } catch (error) {
+      console.debug('failed to save notepad', error)
+      notepadStatus = 'idle'
+    }
+  }
 
   async function load() {
     const [board, repos] = await Promise.all([getBoard(), listRepos()])
@@ -131,12 +186,23 @@
 
   onMount(() => {
     load()
+    // The notepad loads once, separately from the board: the board stream below
+    // reloads on every change, which must never clobber an in-progress edit.
+    getNotepad()
+      .then((result) => (notepad = result.content))
+      .catch((error) => console.debug('failed to load notepad', error))
     // Live board: the API ticks this stream whenever anything changes.
     eventSource = new EventSource('/api/v1/board/stream')
     eventSource.addEventListener('board', () => load())
   })
 
-  onDestroy(() => eventSource?.close())
+  onDestroy(() => {
+    eventSource?.close()
+    // Flush a pending notepad edit so leaving the page doesn't drop it.
+    if (notepadTimer) {
+      void saveNotepad()
+    }
+  })
 </script>
 
 <!--
@@ -187,6 +253,15 @@
       {/if}
     </div>
     <div class="flex gap-2">
+      <Button
+        variant={notesOpen ? 'default' : 'outline'}
+        size="icon"
+        title={notesOpen ? 'Close notes' : 'Show notes'}
+        aria-label={notesOpen ? 'Close notes' : 'Show notes'}
+        onclick={() => setNotesOpen(!notesOpen)}
+      >
+        <NotebookPen class="size-4" />
+      </Button>
       <Button variant="outline" size="sm" disabled={checking} onclick={checkIssues}>
         <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" />
         {checking ? 'Checking…' : 'Check issues'}
@@ -207,9 +282,7 @@
     </div>
   </div>
 
-  <div
-    class="grid grid-cols-1 items-start gap-3 p-4 lg:min-h-0 lg:flex-1 lg:grid-cols-6 lg:px-6 lg:pb-6"
-  >
+  {#snippet kanbanColumns()}
     {#each COLUMNS as column}
       <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
         <header
@@ -242,5 +315,65 @@
         </div>
       </section>
     {/each}
-  </div>
+  {/snippet}
+
+  {#if notesOpen}
+    <!--
+      Board + notepad, split by a drag bar. Dragging the notepad fully to the
+      right collapses it past its min size, which hides it entirely and hands the
+      whole width back to the board (same as clicking "Close notes").
+    -->
+    <PaneGroup
+      direction="horizontal"
+      class="flex h-[70vh] w-full overflow-hidden lg:h-auto lg:min-h-0 lg:flex-1"
+    >
+      <Resizable.Pane defaultSize={72} minSize={40} class="min-w-0">
+        <div
+          class="grid h-full min-h-0 grid-cols-1 items-start gap-3 p-4 lg:grid-cols-6 lg:px-6 lg:pb-6"
+        >
+          {@render kanbanColumns()}
+        </div>
+      </Resizable.Pane>
+
+      <Resizable.Handle
+        withHandle
+        class="w-1.5 bg-border transition-colors hover:bg-primary data-[active]:bg-primary"
+      />
+
+      <Resizable.Pane
+        defaultSize={28}
+        minSize={18}
+        collapsible
+        collapsedSize={0}
+        onCollapse={() => setNotesOpen(false)}
+        class="min-w-0"
+      >
+        <div class="h-full py-4 pl-2 pr-6">
+          <div class="flex h-full min-w-0 flex-col rounded-lg border border-border bg-card">
+            <header
+              class="flex flex-none items-center justify-between gap-2 border-b border-border px-4 py-2.5"
+            >
+              <span class="text-xs uppercase tracking-wide text-muted-foreground">Notepad</span>
+              <span class="text-xs text-muted-foreground">
+                {#if notepadStatus === 'saving'}Saving…{:else if notepadStatus === 'saved'}Saved{/if}
+              </span>
+            </header>
+            <Textarea
+              bind:value={notepad}
+              oninput={scheduleNotepadSave}
+              onblur={saveNotepad}
+              placeholder="A global scratchpad for anything…"
+              class="min-h-0 flex-1 resize-none rounded-none rounded-b-lg border-0 bg-transparent text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+            />
+          </div>
+        </div>
+      </Resizable.Pane>
+    </PaneGroup>
+  {:else}
+    <div
+      class="grid grid-cols-1 items-start gap-3 p-4 lg:min-h-0 lg:flex-1 lg:grid-cols-6 lg:px-6 lg:pb-6"
+    >
+      {@render kanbanColumns()}
+    </div>
+  {/if}
 </div>

@@ -35,6 +35,16 @@ export function getBoard() {
   return apiClient.get('board').json<BoardResponse>()
 }
 
+// The global scratchpad shown beside the board. Read/saved on its own so the
+// text never rides along with every board poll.
+export function getNotepad() {
+  return apiClient.get('notepad').json<{ content: string }>()
+}
+
+export function setNotepad(content: string) {
+  return apiClient.put('notepad', { json: { content } }).json<{ content: string }>()
+}
+
 export function getTask(taskId: string) {
   return apiClient.get(`tasks/${taskId}`).json<TaskDetail>()
 }
