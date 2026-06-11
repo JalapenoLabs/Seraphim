@@ -827,6 +827,22 @@ async fn review_once(state: &AppState) -> Result<()> {
             // This applies regardless of review policy, so PRs are greened before
             // a human ever looks at them.
             git::CiStatus::Failing(checks) => {
+                // Absorb a transient infrastructure flake before spending an
+                // agent fix turn (or a human) on it: re-run a failed, first-
+                // attempt workflow once and judge the retry on a later tick. A
+                // run already retried sits at attempt >= 2, so this fires at most
+                // once per commit and then lets the real verdict through.
+                match git::rerun_failed_runs(&github, owner, repo_name, &pull.head_sha).await {
+                    Ok(reran) if reran > 0 => {
+                        info!(task_id = %task.id, reran, "re-ran failed CI once for a possible flake");
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(error = %error, task_id = %task.id, "could not re-run CI; treating as failed");
+                    }
+                }
+
                 if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
                     queries::set_task_status(&state.db, task.id, TaskStatus::CiFailing).await?;
                 } else {
