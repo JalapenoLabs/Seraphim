@@ -20,6 +20,8 @@
   import IssueView from '$lib/components/IssueView.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
   import JsonHighlight from '$lib/components/JsonHighlight.svelte'
+  import DiffView from '$lib/components/DiffView.svelte'
+  import { editDiff } from '$lib/diff'
 
   const taskId = $page.params.id ?? ''
 
@@ -133,15 +135,18 @@
     return MARKER_COLORS[type as keyof typeof MARKER_COLORS] ?? 'text-foreground'
   }
 
-  // Read(...) results dump the whole file into the activity log, but the
-  // `Read(path)` tool-use line above already says which file was read. Collect
-  // the ids of Read tool calls so we can hide just their result bodies.
-  const readToolUseIds = $derived.by(() => {
+  // Some tool results are noise once the tool-use line above is shown: Read
+  // dumps the whole file, and Write/Edit just echo "file updated" while the diff
+  // we render says far more. Collect the ids of those calls so we can hide their
+  // (successful) result bodies. Errors always stay visible.
+  const QUIET_RESULT_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit'])
+
+  const quietResultToolIds = $derived.by(() => {
     const ids = new Set<string>()
     for (const event of events) {
       if (event.type === 'tool_use') {
         const payload = event.payload as Record<string, unknown>
-        if (payload?.name === 'Read' && typeof payload?.id === 'string') {
+        if (QUIET_RESULT_TOOLS.has(String(payload?.name)) && typeof payload?.id === 'string') {
           ids.add(payload.id)
         }
       }
@@ -149,18 +154,17 @@
     return ids
   })
 
-  function isHiddenReadResult(event: StreamEvent): boolean {
+  function isHiddenToolResult(event: StreamEvent): boolean {
     if (event.type !== 'tool_result') {
       return false
     }
     const payload = event.payload as Record<string, unknown>
-    // Keep failed reads visible (e.g. "file not found"); only hide the noisy
-    // successful file dumps.
+    // Keep failures visible (e.g. "file not found", a rejected edit).
     if (payload?.is_error === true) {
       return false
     }
     const toolUseId = payload?.tool_use_id
-    return typeof toolUseId === 'string' && readToolUseIds.has(toolUseId)
+    return typeof toolUseId === 'string' && quietResultToolIds.has(toolUseId)
   }
 
   function isCollapsible(type: string): boolean {
@@ -525,11 +529,24 @@
               <p class="text-muted-foreground">No activity yet.</p>
             {/if}
             {#each events as event, index (index)}
-              {#if !isHiddenReadResult(event)}
+              {#if !isHiddenToolResult(event)}
                 {@const collapsible = isCollapsible(event.type)}
                 {@const open = expanded[index] ?? false}
                 {@const indent = event.type === 'tool_result' || event.type === 'system' ? 'pl-4' : ''}
-                {#if collapsible}
+                {@const diff =
+                  event.type === 'tool_use'
+                    ? editDiff(event.payload as Record<string, unknown>)
+                    : null}
+                {#if diff}
+                  <!-- Write/Edit calls render as a red/green patch, not a bare summary line. -->
+                  <div class="flex items-start gap-2 py-0.5">
+                    <span class="w-[1ch] flex-none text-primary">●</span>
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate text-primary">{diff.verb}({diff.path})</div>
+                      <DiffView lines={diff.lines} added={diff.added} removed={diff.removed} />
+                    </div>
+                  </div>
+                {:else if collapsible}
                   <button
                     type="button"
                     onclick={() => toggle(index)}
