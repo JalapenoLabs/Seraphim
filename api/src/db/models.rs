@@ -281,6 +281,19 @@ pub struct RepoDeletionImpact {
     pub suggestions: i64,
 }
 
+/// Aggregated agent usage (for a task or globally) over turns since the reset
+/// marker. Cost and tokens sum the turns; `worked_ms` sums their elapsed time.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StatsAggregate {
+    pub cost_usd: f64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub worked_ms: i64,
+    pub turns: i64,
+}
+
 /// One comment on an internal ticket. `author` is `"user"` (the operator) or
 /// `"agent"` (Seraphim).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -345,6 +358,9 @@ pub struct Task {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// When the task's live stats were last reset (a hard re-queue). Turns before
+    /// this are excluded from its cost/tokens/time. `None` = count everything.
+    pub stats_reset_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

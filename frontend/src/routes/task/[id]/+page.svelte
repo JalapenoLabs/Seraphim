@@ -23,6 +23,7 @@
   import * as Resizable from '$lib/components/ui/resizable'
   import { buttonVariants } from '$lib/components/ui/button'
   import IssueView from '$lib/components/IssueView.svelte'
+  import Stats from '$lib/components/Stats.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
   import JsonHighlight from '$lib/components/JsonHighlight.svelte'
   import DiffView from '$lib/components/DiffView.svelte'
@@ -392,6 +393,8 @@
   <a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Board</a>
 
   {#if task}
+    <Stats taskId={taskId} />
+
     {#if suggestions.length}
       <!-- Loud on the task too: the checkboxes here are what clear the board badge. -->
       <section class="rounded-lg border border-warning/50 bg-card p-3">

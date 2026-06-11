@@ -297,6 +297,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             last_activity_at: None,
+            stats_reset_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

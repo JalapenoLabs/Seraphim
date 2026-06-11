@@ -12,6 +12,7 @@ mod questions;
 mod repos;
 mod settings;
 mod sse;
+mod stats;
 mod suggestions;
 mod tasks;
 mod workspace;
@@ -67,6 +68,9 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/move", post(board::move_task))
         .route("/tasks/:id/hold", post(board::set_hold))
         .route("/tasks/:id/notes", axum::routing::put(tasks::set_notes))
+        .route("/tasks/:id/stats", get(stats::task))
+        .route("/stats", get(stats::global))
+        .route("/stats/reset", post(stats::reset))
         .route("/agent/suggestions", post(suggestions::create))
         .route("/suggestions/:id/ack", post(suggestions::acknowledge))
         .route("/agent/questions", post(questions::ask))

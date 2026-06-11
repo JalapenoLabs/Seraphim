@@ -22,6 +22,7 @@ import type {
   Repository,
   ReviewPolicy,
   Settings,
+  Stats,
   Task,
   TaskColumn,
   TaskDetail
@@ -52,6 +53,20 @@ export function getTask(taskId: string) {
 // Create an internal ticket (no GitHub/Jira backing). Returns the new task.
 export function createInternalTask(body: { title: string; body: string; state: 'open' | 'closed' }) {
   return apiClient.post('tasks', { json: body }).json<Task>()
+}
+
+// --- Live statistics ---------------------------------------------------------
+
+export function getGlobalStats() {
+  return apiClient.get('stats').json<Stats>()
+}
+
+export function getTaskStats(taskId: string) {
+  return apiClient.get(`tasks/${taskId}/stats`).json<Stats>()
+}
+
+export function resetStats() {
+  return apiClient.post('stats/reset').json<{ reset: boolean }>()
 }
 
 export function getIssueThread(taskId: string) {

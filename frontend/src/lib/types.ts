@@ -207,6 +207,28 @@ export type RepoDeletionImpact = {
   suggestions: number
 }
 
+// Live agent statistics (per task or global). Several fields are session/global
+// totals; Seraphim runs one shared Claude session, so they are not split per task.
+export type Stats = {
+  cost_usd: number
+  // Total input tokens (includes cache creation + reads).
+  input_tokens: number
+  // Total output tokens (includes reasoning).
+  output_tokens: number
+  total_tokens: number
+  // Time worked, summed over completed turns (does not reset across re-work).
+  worked_ms: number
+  // If a turn is in progress, when it started, so the UI ticks live.
+  running_since: string | null
+  // Latest turn's context size, and the active model's window (the denominator).
+  context_tokens: number
+  context_window: number
+  // Subscription usage-limit utilization (0-100), or null when unknown.
+  usage_utilization: number | null
+  usage_resets_at: number | null
+  turns: number
+}
+
 export type AgentEvent = {
   id: number
   turn_id: string

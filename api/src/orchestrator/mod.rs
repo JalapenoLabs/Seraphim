@@ -660,6 +660,9 @@ async fn stream_turn(
     let mut session_id = settings.current_session_id.clone();
     let mut result_text: Option<String> = None;
     let mut total_cost: Option<f64> = None;
+    // The terminal `result` event's `usage` block (input/output/cache tokens),
+    // persisted on the turn so the stats endpoints can aggregate it.
+    let mut token_usage: Option<serde_json::Value> = None;
     let mut error_message: Option<String> = None;
     // The reset time of the last usage pause we applied this turn, so repeated
     // rate-limit notices don't re-write the same value.
@@ -688,6 +691,7 @@ async fn stream_turn(
         } = &event.kind
         {
             total_cost = *total_cost_usd;
+            token_usage = event.raw.get("usage").cloned();
             result_text = text.as_deref().map(|text| scrubber.scrub_text(text));
             if *is_error {
                 let message = text
@@ -758,6 +762,7 @@ async fn stream_turn(
         status,
         result_text.as_deref(),
         total_cost,
+        token_usage,
         session_id.as_deref(),
     )
     .await?;
@@ -1018,6 +1023,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             last_activity_at: None,
+            stats_reset_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
