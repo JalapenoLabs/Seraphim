@@ -12,6 +12,7 @@
   import { buttonVariants } from '$lib/components/ui/button'
 
   import Notifications from '$lib/components/Notifications.svelte'
+  import SearchBar from '$lib/components/SearchBar.svelte'
 
   let { children } = $props()
 
@@ -93,7 +94,7 @@
 </script>
 
 <div class="flex h-screen flex-col">
-  <header class="flex items-center gap-8 border-b border-border bg-card px-6 py-3">
+  <header class="flex items-center gap-4 border-b border-border bg-card px-6 py-3">
     <a href="/" class="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
       <img
         src="/favicon.png"
@@ -115,7 +116,13 @@
         </a>
       {/each}
     </nav>
-    <div class="ml-auto flex items-center gap-3">
+
+    <!-- Middle: fuzzy issue search over the live board. -->
+    <div class="flex flex-1 justify-center px-2">
+      <SearchBar tasks={board?.tasks ?? []} />
+    </div>
+
+    <div class="flex flex-none items-center gap-3">
       {#if status}
         <span
           class="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold {PILLS[
