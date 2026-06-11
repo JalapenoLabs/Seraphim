@@ -9,10 +9,42 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
-use crate::db::models::{EnvSuggestion, Event, Question, SourceKind, Task};
+use crate::db::models::{EnvSuggestion, Event, Question, SourceKind, Task, TaskColumn};
 use crate::db::queries;
 use crate::git;
+use crate::git::{IssueComment, IssueDetail, IssueThread, IssueUser};
 use crate::state::AppState;
+
+/// The display login for an internal-comment author ("user" -> the operator,
+/// "agent" -> Seraphim).
+fn internal_login(author: &str) -> String {
+    if author == "agent" { "Seraphim" } else { "You" }.to_string()
+}
+
+/// An `IssueUser` with no GitHub backing, for the internal conversation view.
+fn internal_user(login: String) -> IssueUser {
+    IssueUser {
+        login,
+        avatar_url: String::new(),
+        html_url: String::new(),
+    }
+}
+
+/// The synthetic issue header for an internal ticket, built from the task row.
+fn internal_issue_detail(task: &Task, state: &str) -> IssueDetail {
+    IssueDetail {
+        number: task.external_id.parse().unwrap_or(0),
+        title: task.title.clone(),
+        state: state.to_string(),
+        user: internal_user("You".to_string()),
+        body: Some(task.body_snapshot.clone()),
+        created_at: task.created_at.to_rfc3339(),
+        author_association: String::new(),
+        labels: Vec::new(),
+        assignees: Vec::new(),
+        milestone: None,
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct TaskDetail {
@@ -110,9 +142,70 @@ async fn issue_coords(
     Ok(Ok((owner.to_string(), name.to_string(), task.external_id)))
 }
 
-/// `GET /api/v1/tasks/:id/issue` - the GitHub issue thread (body + comments +
-/// labels/assignees) for the GitHub-style conversation view.
+#[derive(Debug, Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    /// `"open"` (default) or `"closed"`.
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+/// `POST /api/v1/tasks` - create an internal ticket (no external tracker). Lands
+/// in `Available` for the operator to triage onto the board.
+pub async fn create(
+    State(state): State<AppState>,
+    Json(body): Json<CreateTaskRequest>,
+) -> ApiResult<Response> {
+    let title = body.title.trim();
+    if title.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "title is required" })),
+        )
+            .into_response());
+    }
+    let ticket_state = if body.state.as_deref() == Some("closed") {
+        "closed"
+    } else {
+        "open"
+    };
+    let position = queries::max_position_in_column(&state.db, TaskColumn::Available)
+        .await?
+        .unwrap_or(0.0)
+        + 1.0;
+    let task =
+        queries::create_internal_task(&state.db, title, body.body.trim(), ticket_state, position)
+            .await?;
+    state.notify_board();
+    Ok(Json(task).into_response())
+}
+
+/// `GET /api/v1/tasks/:id/issue` - the conversation view: a real GitHub issue
+/// thread, or a synthetic one (body + DB comments + state) for an internal ticket.
 pub async fn get_issue(State(state): State<AppState>, Path(id): Path<Uuid>) -> ApiResult<Response> {
+    if let Some(task) = queries::get_task(&state.db, id).await? {
+        if task.source_kind == SourceKind::Internal {
+            let comments = queries::list_internal_comments(&state.db, id)
+                .await?
+                .into_iter()
+                .map(|comment| IssueComment {
+                    user: internal_user(internal_login(&comment.author)),
+                    body: Some(comment.body),
+                    created_at: comment.created_at.to_rfc3339(),
+                    author_association: String::new(),
+                })
+                .collect();
+            let state_str = task.external_state.clone().unwrap_or_else(|| "open".into());
+            let thread = IssueThread {
+                issue: internal_issue_detail(&task, &state_str),
+                comments,
+            };
+            return Ok(Json(thread).into_response());
+        }
+    }
+
     let (owner, name, number) = match issue_coords(&state, id).await? {
         Ok(coords) => coords,
         Err(response) => return Ok(response),
@@ -133,6 +226,9 @@ pub async fn get_issue(State(state): State<AppState>, Path(id): Path<Uuid>) -> A
 #[derive(Debug, Deserialize)]
 pub struct CommentRequest {
     pub body: String,
+    /// For internal tickets: "user" (default) or "agent". Ignored for GitHub.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +252,16 @@ pub async fn set_issue_state(
         )
             .into_response());
     }
+
+    // Internal tickets have no external service; toggle the state in our DB.
+    if let Some(task) = queries::get_task(&state.db, id).await? {
+        if task.source_kind == SourceKind::Internal {
+            queries::set_task_external_state(&state.db, id, &payload.state).await?;
+            state.notify_board();
+            return Ok(Json(internal_issue_detail(&task, &payload.state)).into_response());
+        }
+    }
+
     let (owner, name, number) = match issue_coords(&state, id).await? {
         Ok(coords) => coords,
         Err(response) => return Ok(response),
@@ -192,6 +298,26 @@ pub async fn add_comment(
         )
             .into_response());
     }
+
+    // Internal tickets store comments in our DB rather than on a service.
+    if let Some(task) = queries::get_task(&state.db, id).await? {
+        if task.source_kind == SourceKind::Internal {
+            let author = match payload.author.as_deref() {
+                Some("agent") => "agent",
+                _ => "user",
+            };
+            let comment =
+                queries::add_internal_comment(&state.db, id, author, &payload.body).await?;
+            let view = IssueComment {
+                user: internal_user(internal_login(&comment.author)),
+                body: Some(comment.body),
+                created_at: comment.created_at.to_rfc3339(),
+                author_association: String::new(),
+            };
+            return Ok(Json(view).into_response());
+        }
+    }
+
     let (owner, name, number) = match issue_coords(&state, id).await? {
         Ok(coords) => coords,
         Err(response) => return Ok(response),

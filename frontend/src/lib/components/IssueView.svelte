@@ -57,6 +57,9 @@
   let posting = $state(false)
 
   const isGithub = $derived(task.source_kind === 'github')
+  // GitHub and internal tickets both render the conversation view (the backend
+  // synthesizes a thread for internal tickets from our DB). Jira stays body-only.
+  const hasThread = $derived(task.source_kind === 'github' || task.source_kind === 'internal')
 
   // Everyone who appears in the thread, de-duplicated, for the Participants list.
   const participants = $derived.by(() => {
@@ -89,13 +92,13 @@
   }
 
   async function load() {
-    if (!isGithub) {
+    if (!hasThread) {
       return
     }
     try {
       thread = await getIssueThread(task.id)
     } catch (error) {
-      loadError = error instanceof Error ? error.message : 'Failed to load the issue from GitHub.'
+      loadError = error instanceof Error ? error.message : 'Failed to load the issue.'
     }
   }
 
@@ -146,12 +149,24 @@
 
 {#snippet commentCard(user: IssueUser, createdAt: string, assoc: string, body: string | null)}
   <div class="flex gap-3">
-    <img src={user.avatar_url} alt={user.login} class="size-10 flex-none rounded-full" />
+    {#if user.avatar_url}
+      <img src={user.avatar_url} alt={user.login} class="size-10 flex-none rounded-full" />
+    {:else}
+      <div
+        class="flex size-10 flex-none items-center justify-center rounded-full bg-secondary text-sm font-semibold text-muted-foreground"
+      >
+        {user.login.slice(0, 1).toUpperCase()}
+      </div>
+    {/if}
     <div class="min-w-0 flex-1 rounded-lg border border-border">
       <div class="flex items-center gap-2 rounded-t-lg border-b border-border bg-secondary px-4 py-2 text-sm">
-        <a href={user.html_url} target="_blank" rel="noreferrer" class="font-semibold hover:text-primary">
-          {user.login}
-        </a>
+        {#if user.html_url}
+          <a href={user.html_url} target="_blank" rel="noreferrer" class="font-semibold hover:text-primary">
+            {user.login}
+          </a>
+        {:else}
+          <span class="font-semibold">{user.login}</span>
+        {/if}
         <span class="text-muted-foreground">commented on {formatDate(createdAt)}</span>
         {#if association(assoc)}
           <span class="ml-auto rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
@@ -247,7 +262,17 @@
             class="resize-y font-mono text-sm"
           />
           <div class="mt-2 flex flex-wrap items-center justify-end gap-2">
-            {#if thread.issue.state === 'open'}
+            {#if thread.issue.state === 'open' && !isGithub}
+              <!-- Internal tickets close plainly; no GitHub "reason" choices. -->
+              <Button
+                variant="outline"
+                disabled={updatingState}
+                onclick={() => changeState('closed')}
+              >
+                <CircleCheck class="size-4" />
+                {hasComment ? 'Close with comment' : 'Close issue'}
+              </Button>
+            {:else if thread.issue.state === 'open'}
               <!-- Split button: close (completed) + a dropdown of close reasons. -->
               <div class="flex">
                 <Button
@@ -296,8 +321,8 @@
             </Button>
           </div>
         </div>
-      {:else if !isGithub}
-        <!-- Non-GitHub source: render what the card holds, GitHub-styled. -->
+      {:else if !hasThread}
+        <!-- Jira (no thread fetch): render what the card holds, GitHub-styled. -->
         <div class="rounded-lg border border-border p-4">
           <Markdown source={task.body_snapshot} />
         </div>
@@ -307,8 +332,8 @@
       {/if}
     </div>
 
-    <!-- Sidebar -->
-    {#if thread}
+    <!-- Sidebar: GitHub-only (labels/assignees/milestone/participants). -->
+    {#if thread && isGithub}
       <aside class="hidden w-56 flex-none space-y-5 text-sm lg:block">
         <section>
           <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Assignees</h3>
