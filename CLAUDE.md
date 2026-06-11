@@ -163,8 +163,13 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 
 ### The three orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
-   them into **Available** (never clobbers human-set column/position). Tasks are
-   unique per `(repo_id, source_kind, external_id)`. Callable via `POST /sync`.
+   them into the **top** of **Available** (never clobbers human-set
+   column/position). Tasks are unique per `(repo_id, source_kind, external_id)`.
+   Callable via `POST /sync`. Realtime alternative: inbound webhooks
+   (`POST /api/v1/webhooks/{github,jira}`, in `http/webhooks.rs`) apply the same
+   upsert the instant an issue changes, authenticated by a per-provider shared
+   secret on the settings row (GitHub HMAC-signs the body; Jira signs or carries
+   `?secret=`). Both poll and webhook share `orchestrator::upsert_{github,jira}_issue`.
 2. **agent** — single-threaded: when not paused, the config repo is healthy, and
    inside the availability schedule, it picks work by priority — (a) **resume** a
    task whose question the user just answered (`waiting_for_input` → deliver the

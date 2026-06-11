@@ -34,7 +34,9 @@ const SETTINGS_COLUMNS: &str =
      network_access_include_defaults, usage_limit_pause_enabled, \
      usage_limit_threshold, usage_paused_until, post_thoughts_enabled, \
      jira_enabled, jira_deployment, jira_base_url, jira_email, \
-     (jira_api_token <> '') AS jira_token_set";
+     (jira_api_token <> '') AS jira_token_set, \
+     (github_webhook_secret <> '') AS github_webhook_secret_set, \
+     (jira_webhook_secret <> '') AS jira_webhook_secret_set";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -204,24 +206,44 @@ pub async fn get_jira_token(pool: &PgPool) -> sqlx::Result<String> {
         .await
 }
 
-/// Writes the app tokens; `None` leaves the existing value untouched (so the UI
-/// can update one without resending the others).
+/// The shared secret GitHub signs its issue webhooks with (empty if unset).
+pub async fn get_github_webhook_secret(pool: &PgPool) -> sqlx::Result<String> {
+    sqlx::query_scalar("SELECT github_webhook_secret FROM settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+}
+
+/// The shared secret presented by Jira's issue webhooks (empty if unset).
+pub async fn get_jira_webhook_secret(pool: &PgPool) -> sqlx::Result<String> {
+    sqlx::query_scalar("SELECT jira_webhook_secret FROM settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+}
+
+/// Writes the app tokens and webhook secrets; `None` leaves the existing value
+/// untouched (so the UI can update one without resending the others).
 pub async fn set_tokens(
     pool: &PgPool,
     claude_oauth_token: Option<String>,
     github_token: Option<String>,
     jira_api_token: Option<String>,
+    github_webhook_secret: Option<String>,
+    jira_webhook_secret: Option<String>,
 ) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE settings SET \
          claude_oauth_token = COALESCE($1, claude_oauth_token), \
          github_token = COALESCE($2, github_token), \
          jira_api_token = COALESCE($3, jira_api_token), \
+         github_webhook_secret = COALESCE($4, github_webhook_secret), \
+         jira_webhook_secret = COALESCE($5, jira_webhook_secret), \
          updated_at = now() WHERE id = 1",
     )
     .bind(claude_oauth_token)
     .bind(github_token)
     .bind(jira_api_token)
+    .bind(github_webhook_secret)
+    .bind(jira_webhook_secret)
     .execute(pool)
     .await?;
     Ok(())
@@ -725,6 +747,72 @@ pub async fn max_position_in_column(
         .bind(column)
         .fetch_one(pool)
         .await
+}
+
+/// The lowest (topmost) position currently in a column, so a brand-new card can
+/// be placed above everything else with `min - 1`.
+pub async fn min_position_in_column(
+    pool: &PgPool,
+    column: TaskColumn,
+) -> sqlx::Result<Option<f64>> {
+    sqlx::query_scalar::<_, Option<f64>>("SELECT MIN(position) FROM tasks WHERE board_column = $1")
+        .bind(column)
+        .fetch_one(pool)
+        .await
+}
+
+/// Refreshes the source-ticket state (e.g. `open` -> `closed`) of an already
+/// tracked issue, identified the way sync dedupes it. Returns whether a row
+/// changed; never inserts, so a webhook for an untracked issue is a no-op.
+pub async fn refresh_issue_external_state(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    repo_id: Option<Uuid>,
+    external_id: &str,
+    external_state: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE tasks SET external_state = $4, updated_at = now() \
+         WHERE source_kind = $1 AND repo_id IS NOT DISTINCT FROM $2 AND external_id = $3 \
+         AND external_state IS DISTINCT FROM $4",
+    )
+    .bind(source_kind)
+    .bind(repo_id)
+    .bind(external_id)
+    .bind(external_state)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Removes a tracked issue when its source issue is deleted upstream. Returns
+/// whether a row was removed.
+pub async fn delete_issue_task(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    repo_id: Option<Uuid>,
+    external_id: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "DELETE FROM tasks \
+         WHERE source_kind = $1 AND repo_id IS NOT DISTINCT FROM $2 AND external_id = $3",
+    )
+    .bind(source_kind)
+    .bind(repo_id)
+    .bind(external_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Removes a tracked Jira ticket (deduped on its key alone) when it is deleted
+/// upstream. Returns whether a row was removed.
+pub async fn delete_jira_task(pool: &PgPool, external_id: &str) -> sqlx::Result<bool> {
+    let result = sqlx::query("DELETE FROM tasks WHERE source_kind = 'jira' AND external_id = $1")
+        .bind(external_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn move_task(

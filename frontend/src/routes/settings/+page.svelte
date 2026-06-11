@@ -88,6 +88,8 @@
   // Write-only secret inputs; never populated from the server.
   let claudeTokenInput = $state('')
   let githubTokenInput = $state('')
+  let githubWebhookSecretInput = $state('')
+  let jiraWebhookSecretInput = $state('')
   let tokensMessage = $state<string | null>(null)
 
   // Model picker: a dropdown of known ids plus a custom free-text fallback.
@@ -444,15 +446,24 @@
   }
 
   async function saveTokens() {
-    if (!claudeTokenInput.trim() && !githubTokenInput.trim()) {
+    if (
+      !claudeTokenInput.trim() &&
+      !githubTokenInput.trim() &&
+      !githubWebhookSecretInput.trim() &&
+      !jiraWebhookSecretInput.trim()
+    ) {
       return
     }
     settings = await setTokens({
       claude_oauth_token: claudeTokenInput.trim() || undefined,
-      github_token: githubTokenInput.trim() || undefined
+      github_token: githubTokenInput.trim() || undefined,
+      github_webhook_secret: githubWebhookSecretInput.trim() || undefined,
+      jira_webhook_secret: jiraWebhookSecretInput.trim() || undefined
     })
     claudeTokenInput = ''
     githubTokenInput = ''
+    githubWebhookSecretInput = ''
+    jiraWebhookSecretInput = ''
     tokensMessage = 'Saved to the database.'
   }
 
@@ -671,6 +682,58 @@
             placeholder="PAT with repo + issues scope"
             bind:value={githubTokenInput}
           />
+        </div>
+
+        <!-- Realtime issue webhooks: set the shared secret here, then point the
+             provider's webhook at the matching endpoint so new issues appear at
+             once instead of waiting for the next poll. -->
+        <div class="border-t border-border pt-5">
+          <h3 class="text-sm font-semibold text-foreground">Realtime issue webhooks</h3>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Optional. Set a secret, then add a webhook in the provider pointed at this server so new
+            issues show up instantly. Without one, issues still sync on the regular poll.
+          </p>
+        </div>
+        <div class="space-y-1.5">
+          <Label for="gh-webhook-secret" class="flex items-center gap-2">
+            GitHub webhook secret
+            <Badge variant="outline" class={settings.github_webhook_secret_set ? 'border-success/40 text-success' : 'text-muted-foreground'}>
+              {settings.github_webhook_secret_set ? 'configured' : 'not set'}
+            </Badge>
+          </Label>
+          <Input
+            id="gh-webhook-secret"
+            type="password"
+            autocomplete="off"
+            placeholder="shared secret for the GitHub webhook"
+            bind:value={githubWebhookSecretInput}
+          />
+          <p class="text-xs text-muted-foreground">
+            Add a repo (or org) webhook for the <strong>Issues</strong> event with content type
+            <code class="rounded bg-secondary px-1 py-0.5">application/json</code>, this same secret, and the
+            URL <code class="rounded bg-secondary px-1 py-0.5">&lt;this-server&gt;/api/v1/webhooks/github</code>.
+          </p>
+        </div>
+        <div class="space-y-1.5">
+          <Label for="jira-webhook-secret" class="flex items-center gap-2">
+            Jira webhook secret
+            <Badge variant="outline" class={settings.jira_webhook_secret_set ? 'border-success/40 text-success' : 'text-muted-foreground'}>
+              {settings.jira_webhook_secret_set ? 'configured' : 'not set'}
+            </Badge>
+          </Label>
+          <Input
+            id="jira-webhook-secret"
+            type="password"
+            autocomplete="off"
+            placeholder="shared secret for the Jira webhook"
+            bind:value={jiraWebhookSecretInput}
+          />
+          <p class="text-xs text-muted-foreground">
+            Add a Jira webhook for the issue <strong>created / updated / deleted</strong> events to
+            <code class="rounded bg-secondary px-1 py-0.5">&lt;this-server&gt;/api/v1/webhooks/jira</code>.
+            Cloud signs with the secret; on Server / Data Center append
+            <code class="rounded bg-secondary px-1 py-0.5">?secret=&lt;value&gt;</code> to the URL.
+          </p>
         </div>
         <div class="flex items-center gap-3">
           <Button onclick={saveTokens}>Save secrets</Button>

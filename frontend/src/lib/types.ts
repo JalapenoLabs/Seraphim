@@ -168,6 +168,10 @@ export type Settings = {
   jira_base_url: string
   jira_email: string
   jira_token_set: boolean
+  // Whether the realtime issue-webhook secrets are stored (booleans only; the
+  // raw secrets are never sent back).
+  github_webhook_secret_set: boolean
+  jira_webhook_secret_set: boolean
   // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null

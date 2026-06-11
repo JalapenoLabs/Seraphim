@@ -156,28 +156,11 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
             }
         };
 
-        for issue in issues {
-            // New issues land at the end of Available; existing ones refresh.
-            let next_position = queries::max_position_in_column(&state.db, TaskColumn::Available)
-                .await?
-                .unwrap_or(0.0)
-                + 1.0;
-
-            queries::upsert_issue_task(
-                &state.db,
-                SourceKind::Github,
-                &issue.number.to_string(),
-                Some(repo.id),
-                &issue.title,
-                &issue.body,
-                &issue.url,
-                // Sync only ever lists open issues, so any issue we see here is open.
-                "open",
-                &issue.author_login,
-                &issue.author_avatar_url,
-                next_position,
-            )
-            .await?;
+        // GitHub lists newest first; insert oldest first so the newest issue ends
+        // up at the very top of Available (each new card is placed above the last).
+        for issue in issues.into_iter().rev() {
+            // Sync only ever lists open issues, so any issue we see here is open.
+            upsert_github_issue(state, repo.id, &issue, "open").await?;
             changed = true;
         }
     }
@@ -194,28 +177,8 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
                     continue;
                 }
             };
-            // A ticket can target several repos; the first is the primary one the
-            // agent would branch in (multi-repo execution is a follow-up).
-            let primary_repo = board.repo_ids.0.first().copied();
-            for issue in issues {
-                let column = crate::jira::column_for_status(&board.status_map.0, &issue.status);
-                let next_position = queries::max_position_in_column(&state.db, column)
-                    .await?
-                    .unwrap_or(0.0)
-                    + 1.0;
-                queries::upsert_jira_task(
-                    &state.db,
-                    &issue.key,
-                    primary_repo,
-                    board.id,
-                    &issue.summary,
-                    &issue.description,
-                    &issue.url,
-                    &issue.status,
-                    column,
-                    next_position,
-                )
-                .await?;
+            for issue in issues.into_iter().rev() {
+                upsert_jira_issue(state, &board, &issue).await?;
                 changed = true;
             }
         }
@@ -224,6 +187,71 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
     if changed {
         state.notify_board();
     }
+    Ok(())
+}
+
+/// The position that places a brand-new card at the top of `column` (just above
+/// the current topmost). New issues go to the top so the freshest work leads.
+async fn top_of_column_position(state: &AppState, column: TaskColumn) -> Result<f64> {
+    Ok(queries::min_position_in_column(&state.db, column)
+        .await?
+        .unwrap_or(0.0)
+        - 1.0)
+}
+
+/// Upserts a GitHub issue as a task: a brand-new one lands at the top of
+/// Available; an existing one only refreshes its cached fields, keeping its
+/// human-curated column and position. Shared by the poll sync and the realtime
+/// webhook so both place and dedupe issues identically.
+pub async fn upsert_github_issue(
+    state: &AppState,
+    repo_id: uuid::Uuid,
+    issue: &git::OpenIssue,
+    external_state: &str,
+) -> Result<()> {
+    let position = top_of_column_position(state, TaskColumn::Available).await?;
+    queries::upsert_issue_task(
+        &state.db,
+        SourceKind::Github,
+        &issue.number.to_string(),
+        Some(repo_id),
+        &issue.title,
+        &issue.body,
+        &issue.url,
+        external_state,
+        &issue.author_login,
+        &issue.author_avatar_url,
+        position,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Upserts a Jira ticket as a task, placing a brand-new one at the top of the
+/// column its mapped status implies. Shared by the poll sync and the webhook.
+pub async fn upsert_jira_issue(
+    state: &AppState,
+    board: &crate::db::models::JiraBoard,
+    issue: &crate::jira::JiraIssue,
+) -> Result<()> {
+    let column = crate::jira::column_for_status(&board.status_map.0, &issue.status);
+    let position = top_of_column_position(state, column).await?;
+    // A ticket can target several repos; the first is the primary one the agent
+    // would branch in (multi-repo execution is a follow-up).
+    let primary_repo = board.repo_ids.0.first().copied();
+    queries::upsert_jira_task(
+        &state.db,
+        &issue.key,
+        primary_repo,
+        board.id,
+        &issue.summary,
+        &issue.description,
+        &issue.url,
+        &issue.status,
+        column,
+        position,
+    )
+    .await?;
     Ok(())
 }
 

@@ -258,6 +258,8 @@ mod tests {
             jira_base_url: String::new(),
             jira_email: String::new(),
             jira_token_set: false,
+            github_webhook_secret_set: false,
+            jira_webhook_secret_set: false,
             jira_token_preview: None,
             claude_token_preview: None,
             github_token_preview: None,

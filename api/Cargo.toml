@@ -49,6 +49,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Encodes instruction-file contents so they cross the docker exec boundary
 # without any shell-quoting hazards.
 base64 = "0.22"
+# HMAC-SHA256 verification of inbound GitHub / Jira issue webhooks. `verify_slice`
+# does the comparison in constant time, so a forged signature can't be timed out.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 # Errors, logging, config
 eyre = "0.6"

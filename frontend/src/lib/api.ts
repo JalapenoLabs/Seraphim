@@ -217,6 +217,8 @@ export type TokensRequest = {
   claude_oauth_token?: string
   github_token?: string
   jira_api_token?: string
+  github_webhook_secret?: string
+  jira_webhook_secret?: string
 }
 
 export function setTokens(body: TokensRequest) {
