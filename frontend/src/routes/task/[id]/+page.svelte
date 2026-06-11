@@ -11,8 +11,6 @@
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
   import { Badge } from '$lib/components/ui/badge'
-  import { Button } from '$lib/components/ui/button'
-  import { Input } from '$lib/components/ui/input'
   import * as Alert from '$lib/components/ui/alert'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import * as Resizable from '$lib/components/ui/resizable'
@@ -42,13 +40,6 @@
   // Show the live timer only while the agent is mid-turn, i.e. its latest event
   // isn't the turn's terminal `result`.
   const running = $derived(task?.status === 'working' && !!lastEvent && lastEvent.type !== 'result')
-
-  // Per-question free-text inputs for the "something else" and "decline" choices.
-  let customText = $state<Record<string, string>>({})
-  let declineText = $state<Record<string, string>>({})
-
-  const pendingQuestions = $derived(questions.filter((question) => question.status === 'pending'))
-  const answeredQuestions = $derived(questions.filter((question) => question.status !== 'pending'))
 
   async function toggleSuggestion(suggestion: EnvSuggestion) {
     // Optimistically flip so the checkbox feels instant, then persist; revert on
@@ -388,71 +379,6 @@
       </section>
     {/if}
 
-    {#if pendingQuestions.length}
-      <div class="rounded-lg border border-warning/40 bg-card p-4">
-        <h2 class="mb-3 text-sm font-semibold">The agent needs your input</h2>
-        {#each pendingQuestions as question (question.id)}
-          <div class="mb-3 rounded-md border border-border p-3 last:mb-0">
-            <p class="mb-3 font-medium">{question.prompt}</p>
-            <div class="mb-3 flex flex-col gap-2">
-              {#each question.options as option}
-                <Button
-                  variant="outline"
-                  class="h-auto flex-col items-start whitespace-normal py-2 text-left"
-                  onclick={() => submitAnswer(question.id, 'option', option.title)}
-                >
-                  <span class="font-semibold">{option.title}</span>
-                  {#if option.description}
-                    <span class="text-xs font-normal text-muted-foreground">{option.description}</span>
-                  {/if}
-                </Button>
-              {/each}
-            </div>
-            <div class="mb-2">
-              <label class="mb-1 block text-xs text-muted-foreground" for={`custom-${question.id}`}>
-                Something else
-              </label>
-              <div class="flex gap-2">
-                <Input id={`custom-${question.id}`} placeholder="Type your own answer" bind:value={customText[question.id]} />
-                <Button
-                  disabled={!customText[question.id]?.trim()}
-                  onclick={() => submitAnswer(question.id, 'custom', customText[question.id]?.trim() ?? '')}
-                >
-                  Send
-                </Button>
-              </div>
-            </div>
-            <div>
-              <label class="mb-1 block text-xs text-muted-foreground" for={`decline-${question.id}`}>
-                Decline and chat about this
-              </label>
-              <div class="flex gap-2">
-                <Input id={`decline-${question.id}`} placeholder="Optional note for the agent" bind:value={declineText[question.id]} />
-                <Button variant="secondary" onclick={() => submitAnswer(question.id, 'declined', declineText[question.id]?.trim() ?? '')}>
-                  Decline
-                </Button>
-              </div>
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
-    {#if answeredQuestions.length}
-      <div class="rounded-lg border border-border bg-card p-4">
-        <h2 class="mb-2 text-sm font-semibold">Decisions</h2>
-        {#each answeredQuestions as question (question.id)}
-          <div class="mb-2 border-l-2 border-border pl-3 last:mb-0">
-            <p class="text-sm font-medium">{question.prompt}</p>
-            <p class="flex items-center gap-2 text-sm text-muted-foreground">
-              <Badge variant="outline">{question.status}</Badge>
-              {question.answer || (question.status === 'declined' ? 'Declined to choose' : '')}
-            </p>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
     <PaneGroup
       bind:this={paneGroup}
       direction="horizontal"
@@ -461,7 +387,7 @@
     >
       <Resizable.Pane defaultSize={55} minSize={30} class="min-w-0">
         <div class="h-full min-w-0 pr-3">
-          <IssueView {task} />
+          <IssueView {task} {questions} onAnswer={submitAnswer} />
         </div>
       </Resizable.Pane>
 

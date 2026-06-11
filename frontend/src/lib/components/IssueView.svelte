@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { IssueThread, IssueUser, Task } from '../types'
+  import type { AnswerKind, IssueThread, IssueUser, Question, Task } from '../types'
 
   import { onMount } from 'svelte'
   import { toast } from 'svelte-sonner'
@@ -18,11 +18,21 @@
   import { addIssueComment, getIssueThread, setIssueState } from '../api'
   import Markdown from './Markdown.svelte'
   import SourceIcon from './SourceIcon.svelte'
+  import DecisionsFeed from './DecisionsFeed.svelte'
   import { Button, buttonVariants } from './ui/button'
   import { Textarea } from './ui/textarea'
   import * as DropdownMenu from './ui/dropdown-menu'
 
-  let { task }: { task: Task } = $props()
+  let {
+    task,
+    questions,
+    onAnswer
+  }: {
+    task: Task
+    // The agent's escalated decisions, rendered inline in the conversation feed.
+    questions: Question[]
+    onAnswer: (questionId: string, kind: AnswerKind, text: string) => void | Promise<void>
+  } = $props()
 
   // GitHub URLs derived from the issue link: the repo root and its "new issue"
   // chooser, so the header can link out without the repo full name on hand.
@@ -225,6 +235,9 @@
           {@render commentCard(comment.user, comment.created_at, comment.author_association, comment.body)}
         {/each}
 
+        <!-- The agent's decisions, inline in the feed below the conversation. -->
+        <DecisionsFeed {questions} {onAnswer} />
+
         <!-- Add a comment / change state -->
         <div class="rounded-lg border border-border p-3">
           <Textarea
@@ -288,6 +301,7 @@
         <div class="rounded-lg border border-border p-4">
           <Markdown source={task.body_snapshot} />
         </div>
+        <DecisionsFeed {questions} {onAnswer} />
       {:else if !loadError}
         <p class="text-sm text-muted-foreground">Loading issue…</p>
       {/if}
