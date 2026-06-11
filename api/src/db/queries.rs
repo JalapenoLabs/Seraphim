@@ -13,8 +13,9 @@ use uuid::Uuid;
 
 use super::models::{
     AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, JiraBoard, JiraDeployment,
-    NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus, Repository,
-    ReviewPolicy, Settings, SourceKind, Task, TaskColumn, TaskStatus, Turn,
+    NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus,
+    RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn,
+    TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -445,11 +446,46 @@ pub async fn create_repository_if_absent(
     .await
 }
 
+/// Counts everything a delete of this repo would purge: its tasks and the
+/// turns, events, questions, and suggestions that cascade from them.
+pub async fn repo_deletion_impact(pool: &PgPool, id: Uuid) -> sqlx::Result<RepoDeletionImpact> {
+    sqlx::query_as::<_, RepoDeletionImpact>(
+        "SELECT \
+           (SELECT COUNT(*) FROM tasks WHERE repo_id = $1) AS tasks, \
+           (SELECT COUNT(*) FROM turns t \
+              JOIN tasks k ON t.task_id = k.id WHERE k.repo_id = $1) AS turns, \
+           (SELECT COUNT(*) FROM events e \
+              JOIN turns t ON e.turn_id = t.id \
+              JOIN tasks k ON t.task_id = k.id WHERE k.repo_id = $1) AS events, \
+           (SELECT COUNT(*) FROM questions q \
+              JOIN tasks k ON q.task_id = k.id WHERE k.repo_id = $1) AS questions, \
+           (SELECT COUNT(*) FROM environment_suggestions s \
+              JOIN tasks k ON s.task_id = k.id WHERE k.repo_id = $1) AS suggestions",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Deletes a repository and everything synced from it. The `tasks.repo_id` FK
+/// cascades to the repo's tasks, and tasks cascade to their turns/events/
+/// questions/suggestions, so the whole subtree goes in one statement. The Jira
+/// board association is a JSON array (no FK), so we strip the repo id from it in
+/// the same transaction to avoid a dangling reference on the next sync.
 pub async fn delete_repository(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE jira_boards SET repo_ids = repo_ids - $1, updated_at = now() \
+         WHERE jsonb_exists(repo_ids, $1)",
+    )
+    .bind(id.to_string())
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM repositories WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

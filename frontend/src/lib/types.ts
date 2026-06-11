@@ -196,6 +196,15 @@ export type Repository = {
   updated_at: string
 }
 
+// What deleting a repository will purge, shown in the delete confirmation.
+export type RepoDeletionImpact = {
+  tasks: number
+  turns: number
+  events: number
+  questions: number
+  suggestions: number
+}
+
 export type AgentEvent = {
   id: number
   turn_id: string

@@ -268,6 +268,17 @@ pub struct Repository {
     pub updated_at: DateTime<Utc>,
 }
 
+/// What a repository delete will purge, so the UI can spell it out before the
+/// user confirms. Counts the repo's tasks and everything that cascades from them.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct RepoDeletionImpact {
+    pub tasks: i64,
+    pub turns: i64,
+    pub events: i64,
+    pub questions: i64,
+    pub suggestions: i64,
+}
+
 /// A Jira board we follow for tickets.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct JiraBoard {
