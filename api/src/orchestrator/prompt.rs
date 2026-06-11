@@ -23,7 +23,10 @@ pub fn build(settings: &Settings, repo: &Repository, task: &Task, branch: &str) 
          - Implement the change, then run the project's build/tests/linters and make them pass.\n\
          - Commit your work and push the branch.\n\
          - Open a pull request against `{default}` with `gh pr create`, referencing issue #{number}.\n\
-         - When done, finish with a short summary of what you changed.\n",
+         - After the PR is open, stop. Do not poll, watch, or wait for CI to finish: Seraphim \
+         watches every PR's checks for you and automatically brings you back to fix anything that \
+         fails, so a long `gh pr checks` wait only blocks the queue behind you.\n\
+         - Finish with a short summary of what you changed.\n",
         repo = repo.full_name,
         repo_path = repo_path,
         branch = branch,
@@ -39,8 +42,8 @@ pub fn build(settings: &Settings, repo: &Repository, task: &Task, branch: &str) 
 ///
 /// `failing_checks` names the checks that failed (may be empty if they couldn't
 /// be enumerated). The agent works the existing `branch` and is told to stay in
-/// scope: if the failures aren't this issue's doing, comment and stop rather
-/// than force unrelated changes.
+/// scope: re-run a transient infrastructure flake once, and for failures that
+/// aren't this issue's doing comment and stop rather than force unrelated changes.
 pub fn build_ci_fix(
     settings: &Settings,
     repo: &Repository,
@@ -65,10 +68,14 @@ pub fn build_ci_fix(
          open the PR's checks) to read the actual errors before changing anything.\n\
          - Fix the failures on this branch, then run the project's build/tests/linters, commit, and \
          push. Do not open a new pull request; the existing one updates automatically.\n\
-         - Stay in scope: if the failures are pre-existing on `{default}`, flaky, or otherwise \
-         unrelated to this issue, do not force unrelated changes. Instead leave a brief comment on \
-         the PR explaining why, and stop without committing.\n\
-         - Aim to get the PR as green as you reasonably can, then finish with a short summary.\n",
+         - If a failure is a transient infrastructure flake (a runner hiccup, a network blip, a \
+         known base-image pull failure) rather than a real problem with the code, re-run just the \
+         failed jobs once with `gh run rerun --failed` and then stop without committing.\n\
+         - Stay in scope: if the failures are pre-existing on `{default}` or otherwise unrelated to \
+         this issue, do not force unrelated changes. Leave a brief comment on the PR explaining why, \
+         and stop without committing.\n\
+         - After pushing a fix (or re-running a flake), stop and finish with a short summary. Do not \
+         watch or wait for CI; Seraphim re-checks the PR and brings you back if it is still failing.\n",
         checks = checks,
         repo = repo.full_name,
         repo_path = repo_path,
