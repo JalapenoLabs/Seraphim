@@ -187,6 +187,12 @@ pub struct Settings {
     /// [`Self::claude_token_preview`].
     #[sqlx(default)]
     pub github_token_preview: Option<String>,
+    /// Runtime UI signal: while set and in the future, the agent is in a brief
+    /// global cooldown after a transient rate limit, about to retry the current
+    /// turn. Not a DB column; the board handler fills it from the live in-memory
+    /// value on [`crate::state::AppState`].
+    #[sqlx(default)]
+    pub cooldown_until: Option<DateTime<Utc>>,
 }
 
 /// A user-defined environment variable injected into the agent's execs.

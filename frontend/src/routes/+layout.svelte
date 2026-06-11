@@ -4,7 +4,7 @@
   import '../app.css'
   import { onMount, onDestroy } from 'svelte'
   import { page } from '$app/stores'
-  import { Pause, TriangleAlert } from '@lucide/svelte'
+  import { Pause, TriangleAlert, Timer } from '@lucide/svelte'
 
   import { getBoard } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
@@ -46,6 +46,11 @@
     if (settings.config_repo_url && settings.config_repo_error) {
       return { key: 'halted', label: 'Agent halted' } as const
     }
+    // A transient rate-limit cooldown: the agent is mid-turn, waiting a few
+    // seconds before retrying. Takes the place of the working badge while it lasts.
+    if (settings.cooldown_until && new Date(settings.cooldown_until) > new Date()) {
+      return { key: 'cooldown', label: 'Cooling down' } as const
+    }
     const working = board?.tasks.some(
       (task) =>
         task.board_column === 'in_progress' ||
@@ -65,6 +70,7 @@
   const PILLS = {
     paused: 'bg-warning text-warning-foreground',
     halted: 'bg-destructive text-white',
+    cooldown: 'bg-warning text-warning-foreground',
     working: 'border border-border text-foreground',
     offhours: 'border border-border text-muted-foreground',
     idle: 'border border-border text-muted-foreground'
@@ -119,6 +125,8 @@
           <Pause class="size-3.5" />
         {:else if status.key === 'halted'}
           <TriangleAlert class="size-3.5" />
+        {:else if status.key === 'cooldown'}
+          <Timer class="size-3.5" />
         {:else}
           <span class="size-2 rounded-full {DOTS[status.key as keyof typeof DOTS]}"></span>
         {/if}

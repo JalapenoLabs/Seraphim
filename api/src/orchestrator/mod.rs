@@ -56,6 +56,16 @@ const MAX_CI_FIX_ATTEMPTS: i32 = 3;
 /// so a genuinely stuck PR is revisited periodically rather than in a tight loop.
 const REVISIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
+/// How long the agent waits after a transient (server-side) rate limit before
+/// retrying the same turn. Anthropic's "temporarily limiting requests" throttle
+/// clears within a few seconds, so this mirrors the human reflex of waiting a
+/// moment and resending; short enough that work resumes promptly.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(8);
+/// How many times a single turn is retried through the cooldown before the
+/// transient rate limit is treated as a real failure and surfaced on the card.
+/// Bounds the wait at roughly `RATE_LIMIT_COOLDOWN * RATE_LIMIT_RETRY_MAX`.
+const RATE_LIMIT_RETRY_MAX: u32 = 5;
+
 /// What kind of work a pulled card needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkMode {
@@ -479,9 +489,73 @@ struct TurnOutcome {
     error: Option<String>,
 }
 
+/// Runs one Claude turn, transparently retrying through a brief cooldown when it
+/// fails with a transient (server-side) rate limit.
+///
+/// Anthropic occasionally throttles requests ("Server is temporarily limiting
+/// requests", distinct from the subscription usage limit); the throttle clears
+/// within seconds. Rather than fail the task, the agent waits
+/// [`RATE_LIMIT_COOLDOWN`] and resends the same turn, up to
+/// [`RATE_LIMIT_RETRY_MAX`] times, surfacing the cooldown in the navbar while it
+/// waits. Any other outcome (success, a different error) returns immediately.
+async fn run_agent_turn(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+    task: &Task,
+    prompt: String,
+) -> Result<TurnOutcome> {
+    let mut attempt = 0_u32;
+    loop {
+        attempt += 1;
+        let outcome = stream_turn(state, settings, task, prompt.clone()).await?;
+
+        let throttled = outcome
+            .error
+            .as_deref()
+            .is_some_and(is_transient_rate_limit);
+        if throttled && attempt < RATE_LIMIT_RETRY_MAX {
+            let resume_at = Utc::now()
+                + chrono::Duration::from_std(RATE_LIMIT_COOLDOWN)
+                    .expect("cooldown is a small, valid duration");
+            state.set_cooldown_until(Some(resume_at));
+            state.notify_board();
+            warn!(
+                task_id = %task.id,
+                attempt,
+                "transient rate limit; cooling down before retrying the turn"
+            );
+            sleep(RATE_LIMIT_COOLDOWN).await;
+            continue;
+        }
+
+        // Settled (succeeded, or failed for some other reason): clear any
+        // cooldown we raised so the navbar stops showing it.
+        if state.cooldown_until().is_some() {
+            state.set_cooldown_until(None);
+            state.notify_board();
+        }
+        return Ok(outcome);
+    }
+}
+
+/// Whether a turn's error message is Anthropic's transient, server-side request
+/// throttle rather than a genuine failure or the subscription usage limit.
+///
+/// Claude Code surfaces it as e.g. "API Error: Server is temporarily limiting
+/// requests (not your usage limit) · Rate limited". The subscription usage limit
+/// is handled separately (via `rate_limit_event` notices), so it is deliberately
+/// excluded here.
+fn is_transient_rate_limit(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("temporarily limiting requests")
+        || lower.contains("overloaded")
+        || lower.contains("rate_limit_error")
+        || (lower.contains("rate limited") && lower.contains("api error"))
+}
+
 /// Streams one Claude turn for `prompt`, persisting every event and pushing it
 /// to the UI. The caller composes the prompt (fresh work or a CI fix).
-async fn run_agent_turn(
+async fn stream_turn(
     state: &AppState,
     settings: &crate::db::models::Settings,
     task: &Task,
@@ -844,6 +918,28 @@ mod tests {
     fn slugify_is_branch_safe() {
         assert_eq!(slugify("Fix the Login Bug!"), "fix-the-login-bug");
         assert_eq!(slugify("   spaces   "), "spaces");
+    }
+
+    #[test]
+    fn transient_rate_limit_matches_server_throttle_only() {
+        // The exact wording Claude Code emits for the server-side throttle.
+        assert!(is_transient_rate_limit(
+            "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"
+        ));
+        assert!(is_transient_rate_limit("API Error: Overloaded"));
+        assert!(is_transient_rate_limit(
+            "{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}"
+        ));
+
+        // The subscription usage limit (handled elsewhere) must not match, nor
+        // should ordinary failures.
+        assert!(!is_transient_rate_limit(
+            "Usage limit reached. Your limit resets at 5pm."
+        ));
+        assert!(!is_transient_rate_limit("Not logged in"));
+        assert!(!is_transient_rate_limit(
+            "the agent finished without opening a pull request"
+        ));
     }
 
     #[test]

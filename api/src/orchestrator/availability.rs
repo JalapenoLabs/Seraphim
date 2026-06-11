@@ -112,6 +112,7 @@ mod tests {
             post_thoughts_enabled: false,
             claude_token_preview: None,
             github_token_preview: None,
+            cooldown_until: None,
         }
     }
 

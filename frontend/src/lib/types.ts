@@ -124,6 +124,9 @@ export type Settings = {
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null
   github_token_preview: string | null
+  // Runtime signal: while set and in the future, the agent is in a brief global
+  // cooldown after a transient rate limit, auto-retrying the current turn.
+  cooldown_until: string | null
 }
 
 // A user-defined environment variable as the UI sees it. For a secret, `value`
