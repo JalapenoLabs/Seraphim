@@ -143,6 +143,7 @@
   // Leading glyph per event type, modeled on Claude Code's transcript: a filled
   // dot for the agent's own actions, a corner connector for their output.
   const MARKERS = {
+    prompt: '●',
     assistant_text: '●',
     tool_use: '●',
     result: '●',
@@ -153,6 +154,7 @@
   } as const satisfies Record<string, string>
 
   const MARKER_COLORS = {
+    prompt: 'text-prompt',
     assistant_text: 'text-foreground',
     tool_use: 'text-primary',
     result: 'text-success',
@@ -352,6 +354,9 @@
 
   function describe(event: StreamEvent): string {
     const payload = event.payload as Record<string, unknown>
+    if (event.type === 'prompt') {
+      return String(payload?.text ?? '')
+    }
     if (event.type === 'thinking') {
       return String(payload?.thinking ?? '')
     }
@@ -593,6 +598,25 @@
                       <DiffView lines={diff.lines} added={diff.added} removed={diff.removed} />
                     </div>
                   </div>
+                {:else if event.type === 'prompt'}
+                  <!-- Our own brief to the agent: a violet dot + light wash, with
+                       up to ~3 lines shown until clicked open, for transparency. -->
+                  <button
+                    type="button"
+                    onclick={() => toggle(index)}
+                    title={open ? 'Click to collapse' : 'Click to expand'}
+                    class="my-0.5 flex w-full gap-2 rounded-md border border-prompt/30 bg-prompt/5 px-2 py-1.5 text-left transition-colors hover:bg-prompt/10"
+                  >
+                    <span class="w-[1ch] flex-none text-prompt">●</span>
+                    <span class="min-w-0 flex-1">
+                      <span class="mb-0.5 block text-[10px] font-semibold uppercase tracking-wide text-prompt">
+                        Seraphim prompt
+                      </span>
+                      <span
+                        class="block whitespace-pre-wrap break-words text-foreground/90 {open ? '' : 'line-clamp-3'}"
+                      >{describe(event)}</span>
+                    </span>
+                  </button>
                 {:else if collapsible}
                   <button
                     type="button"
