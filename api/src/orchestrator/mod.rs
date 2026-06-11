@@ -331,6 +331,58 @@ pub async fn upsert_jira_issue(
     Ok(())
 }
 
+/// Hard-resets the agent to a clean slate: stops any running turn, wipes the
+/// conversation history and the persisted Claude session, requeues whatever task
+/// was being worked, and (when `purge_memories`) deletes the agent's memory files.
+/// The next turn the loop runs then spawns a brand-new, context-free session.
+pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
+    info!(purge_memories, "hard reset requested");
+
+    // Bump first, so an in-flight turn (about to be killed) abandons its post-turn
+    // handling and never revives the session or its task after we wipe them.
+    state.bump_reset_epoch();
+
+    // Stop the running Claude process and wipe its on-disk session (and memories,
+    // when asked). Best-effort: workspace cleanup must not abort the reset.
+    let mut script = String::from(
+        ": \"${CLAUDE_CONFIG_DIR:=/workspace/.claude}\"\n\
+         pkill -9 -f '[c]laude -p' || true\n\
+         find \"$CLAUDE_CONFIG_DIR/projects\" -type f -name '*.jsonl' -delete 2>/dev/null || true\n",
+    );
+    if purge_memories {
+        script.push_str(
+            "find \"$CLAUDE_CONFIG_DIR/projects\" -type d -name memory -exec rm -rf {} + 2>/dev/null || true\n\
+             find \"$CLAUDE_CONFIG_DIR/projects\" -type f -name 'MEMORY.md' -delete 2>/dev/null || true\n",
+        );
+    }
+    if let Err(error) = state
+        .workspace
+        .exec_capture(
+            "/workspace",
+            vec!["bash".to_string(), "-lc".to_string(), script],
+            vec![],
+        )
+        .await
+    {
+        warn!(error = %error, "hard reset: workspace cleanup failed (continuing)");
+    }
+
+    // Clear the shared session so the next turn starts blank, purge the recorded
+    // history (which also zeroes the turn-derived stats), and requeue the task the
+    // agent was mid-work on so a fresh session can redo it cleanly.
+    queries::set_current_session_id(&state.db, None).await?;
+    let turns_purged = queries::purge_history(&state.db).await?;
+    let tasks_requeued = queries::reclaim_orphaned_tasks(&state.db).await?;
+
+    // Drop the ephemeral in-memory signals so the UI doesn't show stale gauges.
+    state.set_live_usage(None);
+    state.set_cooldown_until(None);
+
+    state.notify_board();
+    info!(turns_purged, tasks_requeued, "agent hard reset complete");
+    Ok(())
+}
+
 // --- Agent loop --------------------------------------------------------------
 
 async fn agent_loop(state: AppState) {
@@ -474,6 +526,12 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
     };
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
+    // A hard reset during the turn has already reclaimed this task and wiped the
+    // session; don't fail it or move it, just yield to the reset.
+    if state.reset_epoch() != outcome.epoch {
+        info!(task_id = %task.id, "hard reset during turn; leaving the task to the reset");
+        return Ok(());
+    }
     // Surface a turn failure (e.g. "Not logged in") on the task itself, instead
     // of letting it fall through to the generic "no pull request" message.
     if let Some(message) = outcome.error {
@@ -589,6 +647,11 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
     let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
+    // A hard reset during the turn owns this task now; yield to it.
+    if state.reset_epoch() != outcome.epoch {
+        info!(task_id = %task.id, "hard reset during turn; leaving the task to the reset");
+        return Ok(());
+    }
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
     }
@@ -622,12 +685,16 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
     Ok(())
 }
 
-/// Persists a turn's session id when it differs from the stored one.
+/// Persists a turn's session id when it differs from the stored one. Skipped if a
+/// hard reset happened during the turn, so the just-cleared session isn't revived.
 async fn persist_session(
     state: &AppState,
     settings: &crate::db::models::Settings,
     outcome: &TurnOutcome,
 ) -> Result<()> {
+    if state.reset_epoch() != outcome.epoch {
+        return Ok(());
+    }
     if let Some(session_id) = &outcome.session_id {
         if settings.current_session_id.as_deref() != Some(session_id.as_str()) {
             queries::set_current_session_id(&state.db, Some(session_id)).await?;
@@ -642,6 +709,9 @@ struct TurnOutcome {
     session_id: Option<String>,
     /// A failure message to surface on the task, if the turn errored.
     error: Option<String>,
+    /// The hard-reset epoch captured when the turn started, so the caller can tell
+    /// whether a reset interrupted it.
+    epoch: u64,
 }
 
 /// Runs one Claude turn, transparently retrying through a brief cooldown when it
@@ -716,6 +786,10 @@ async fn stream_turn(
     task: &Task,
     prompt: String,
 ) -> Result<TurnOutcome> {
+    // Snapshot the hard-reset epoch so the caller can tell if a reset lands while
+    // this turn runs (and then skip reviving its session / moving its task).
+    let reset_epoch = state.reset_epoch();
+
     // Claude runs at the workspace root so it can work across all cloned repos.
     let working_dir = "/workspace".to_string();
 
@@ -943,6 +1017,7 @@ async fn stream_turn(
     Ok(TurnOutcome {
         session_id,
         error: error_message,
+        epoch: reset_epoch,
     })
 }
 

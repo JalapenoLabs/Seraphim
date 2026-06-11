@@ -254,6 +254,12 @@ fail-fast) on every PR and on `main`/`develop`.
   so the crate builds without a live DB. Keep it that way.
 - **Claude must run as non-root** for `bypassPermissions`; both exec sites set
   `user: "codespace"`. Don't remove that.
+- **Hard reset** (`POST /api/v1/agent/reset`, `orchestrator::hard_reset`) wipes
+  history + the Claude session and requeues the in-progress task for a clean-slate
+  restart. It bumps an in-memory `AppState::reset_epoch`; a turn snapshots that
+  epoch at its start and abandons its post-turn handling (session persist, task
+  move) if it changed, so a reset landing mid-turn is never undone by the turn it
+  interrupted. Keep that guard if you touch the turn-completion path.
 - **stream-json schema can drift** across Claude Code versions; the parser keeps
   unknown shapes as `Other` rather than failing. Verify against the installed
   version when touching `claude/events.rs`.
