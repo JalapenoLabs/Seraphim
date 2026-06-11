@@ -46,6 +46,25 @@
 
   const CUSTOM_MODEL = '__custom__'
 
+  // The settings subpages, in left-menu order. Each id matches one card's
+  // {#if active === '...'} wrapper; only the selected subpage is rendered.
+  const SECTIONS = [
+    { id: 'profile', label: 'Profile' },
+    { id: 'secrets', label: 'Secrets' },
+    { id: 'config', label: 'Config repo' },
+    { id: 'jira', label: 'Jira' },
+    { id: 'availability', label: 'Availability' },
+    { id: 'network', label: 'Network access' },
+    { id: 'usage', label: 'Usage limits' },
+    { id: 'issue-updates', label: 'Issue updates' },
+    { id: 'statistics', label: 'Statistics' },
+    { id: 'env', label: 'Environment variables' },
+    { id: 'workspace', label: 'Workspace' },
+    { id: 'backup', label: 'Backup & restore' }
+  ] as const
+
+  let active = $state<(typeof SECTIONS)[number]['id']>('profile')
+
   // One editable row per weekday for the working-hours grid. The data model
   // allows several windows per day, but a single contiguous shift covers the
   // common "9 to 5" case and keeps the UI legible.
@@ -491,10 +510,31 @@
   onMount(load)
 </script>
 
-<div class="mx-auto max-w-3xl space-y-5 px-6 py-6">
-  <h1 class="text-2xl font-semibold">Settings</h1>
+<div class="mx-auto flex max-w-5xl gap-6 px-6 py-6">
+  <!-- Left sub-menu: each item is a subpage; only the selected one renders. -->
+  <nav class="sticky top-6 w-52 flex-none self-start">
+    <h1 class="mb-3 text-2xl font-semibold">Settings</h1>
+    <ul class="space-y-0.5">
+      {#each SECTIONS as section}
+        <li>
+          <button
+            type="button"
+            onclick={() => (active = section.id)}
+            class="w-full rounded-md px-3 py-1.5 text-left text-sm transition-colors {active ===
+            section.id
+              ? 'bg-secondary font-medium text-foreground'
+              : 'text-muted-foreground hover:bg-secondary hover:text-foreground'}"
+          >
+            {section.label}
+          </button>
+        </li>
+      {/each}
+    </ul>
+  </nav>
 
-  {#if settings}
+  <div class="min-w-0 flex-1 space-y-5">
+    {#if settings}
+    {#if active === 'profile'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Environment profile</Card.Title>
@@ -589,7 +629,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'secrets'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Secrets</Card.Title>
@@ -636,7 +678,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'config'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Agent config repo (~/.claude)</Card.Title>
@@ -655,7 +699,9 @@
         <Button onclick={save}>Save</Button>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'backup'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Backup & transfer</Card.Title>
@@ -675,7 +721,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'availability'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Availability schedule</Card.Title>
@@ -774,7 +822,9 @@
         {/if}
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'network'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Network access</Card.Title>
@@ -834,7 +884,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'usage'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Usage limits</Card.Title>
@@ -885,7 +937,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'issue-updates'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Issue updates</Card.Title>
@@ -906,7 +960,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'jira'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Jira</Card.Title>
@@ -1066,7 +1122,9 @@
         {/each}
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'env'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Environment variables</Card.Title>
@@ -1108,7 +1166,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'statistics'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Statistics</Card.Title>
@@ -1123,7 +1183,9 @@
         {#if statsMessage}<span class="text-sm text-muted-foreground">{statsMessage}</span>{/if}
       </Card.Content>
     </Card.Root>
+    {/if}
 
+    {#if active === 'workspace'}
     <Card.Root>
       <Card.Header>
         <Card.Title>Workspace</Card.Title>
@@ -1141,7 +1203,9 @@
         </div>
       </Card.Content>
     </Card.Root>
+    {/if}
   {:else}
     <p class="text-muted-foreground">Loading…</p>
   {/if}
+  </div>
 </div>
