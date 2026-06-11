@@ -18,6 +18,8 @@ use uuid::Uuid;
 pub enum SourceKind {
     Github,
     Jira,
+    /// A ticket that lives only in our database, with no external tracker.
+    Internal,
 }
 
 /// What Seraphim does with a pull request once the agent opens it.
@@ -290,6 +292,17 @@ pub struct StatsAggregate {
     pub cache_read_tokens: i64,
     pub worked_ms: i64,
     pub turns: i64,
+}
+
+/// One comment on an internal ticket. `author` is `"user"` (the operator) or
+/// `"agent"` (Seraphim).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct InternalComment {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub author: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// A Jira board we follow for tickets.

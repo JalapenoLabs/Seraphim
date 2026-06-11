@@ -83,7 +83,7 @@ export type JiraBoard = {
   updated_at: string
 }
 
-export type SourceKind = 'github' | 'jira'
+export type SourceKind = 'github' | 'jira' | 'internal'
 
 export type Task = {
   id: string

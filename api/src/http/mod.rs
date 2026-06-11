@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ping", get(|| async { Json(json!({ "status": "ok" })) }))
         .route("/board", get(board::get_board))
         .route("/board/stream", get(sse::board_stream))
+        .route("/tasks", post(tasks::create))
         .route("/tasks/:id", get(tasks::get_task))
         .route("/tasks/:id/issue", get(tasks::get_issue))
         .route("/tasks/:id/issue/state", post(tasks::set_issue_state))

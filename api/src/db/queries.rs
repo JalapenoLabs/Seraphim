@@ -12,8 +12,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, JiraBoard, JiraDeployment,
-    NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus,
+    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, InternalComment, JiraBoard,
+    JiraDeployment, NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus,
     RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task,
     TaskColumn, TaskStatus, Turn,
 };
@@ -768,6 +768,61 @@ pub async fn set_task_notes(pool: &PgPool, id: Uuid, notes: &str) -> sqlx::Resul
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// --- Internal tickets --------------------------------------------------------
+
+/// Creates an internal ticket (no external tracker). It lands in `Available` at
+/// the given position with a sequential, human-friendly external id.
+pub async fn create_internal_task(
+    pool: &PgPool,
+    title: &str,
+    body: &str,
+    state: &str,
+    initial_position: f64,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "INSERT INTO tasks \
+           (source_kind, external_id, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, '', $3, 'available', $4) \
+         RETURNING *",
+    )
+    .bind(title)
+    .bind(body)
+    .bind(state)
+    .bind(initial_position)
+    .fetch_one(pool)
+    .await
+}
+
+/// An internal ticket's comments, oldest first.
+pub async fn list_internal_comments(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Vec<InternalComment>> {
+    sqlx::query_as::<_, InternalComment>(
+        "SELECT * FROM internal_comments WHERE task_id = $1 ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Posts a comment to an internal ticket. `author` is "user" or "agent".
+pub async fn add_internal_comment(
+    pool: &PgPool,
+    task_id: Uuid,
+    author: &str,
+    body: &str,
+) -> sqlx::Result<InternalComment> {
+    sqlx::query_as::<_, InternalComment>(
+        "INSERT INTO internal_comments (task_id, author, body) VALUES ($1, $2, $3) RETURNING *",
+    )
+    .bind(task_id)
+    .bind(author)
+    .bind(body)
+    .fetch_one(pool)
+    .await
 }
 
 pub async fn set_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> sqlx::Result<Task> {

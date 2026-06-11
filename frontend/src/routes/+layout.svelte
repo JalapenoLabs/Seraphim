@@ -4,11 +4,12 @@
   import '../app.css'
   import { onMount, onDestroy } from 'svelte'
   import { page } from '$app/stores'
-  import { Pause, TriangleAlert, Timer } from '@lucide/svelte'
+  import { Pause, Plus, TriangleAlert, Timer } from '@lucide/svelte'
 
   import { getBoard } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
   import { Toaster } from '$lib/components/ui/sonner'
+  import { buttonVariants } from '$lib/components/ui/button'
 
   import Notifications from '$lib/components/Notifications.svelte'
 
@@ -114,26 +115,31 @@
         </a>
       {/each}
     </nav>
-    {#if status}
-      <span
-        class="ml-auto inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold {PILLS[
-          status.key
-        ]}"
-        title="Agent status"
-      >
-        {#if status.key === 'paused'}
-          <Pause class="size-3.5" />
-        {:else if status.key === 'halted'}
-          <TriangleAlert class="size-3.5" />
-        {:else if status.key === 'cooldown'}
-          <Timer class="size-3.5" />
-        {:else}
-          <span class="size-2 rounded-full {DOTS[status.key as keyof typeof DOTS]}"></span>
-        {/if}
-        {status.label}
-      </span>
-    {/if}
-    <Notifications />
+    <div class="ml-auto flex items-center gap-3">
+      {#if status}
+        <span
+          class="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold {PILLS[
+            status.key
+          ]}"
+          title="Agent status"
+        >
+          {#if status.key === 'paused'}
+            <Pause class="size-3.5" />
+          {:else if status.key === 'halted'}
+            <TriangleAlert class="size-3.5" />
+          {:else if status.key === 'cooldown'}
+            <Timer class="size-3.5" />
+          {:else}
+            <span class="size-2 rounded-full {DOTS[status.key as keyof typeof DOTS]}"></span>
+          {/if}
+          {status.label}
+        </span>
+      {/if}
+      <a href="/issues/new" class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+        <Plus class="size-4" /> Create issue
+      </a>
+      <Notifications />
+    </div>
   </header>
   <main class="min-h-0 flex-1 overflow-auto">
     {@render children()}

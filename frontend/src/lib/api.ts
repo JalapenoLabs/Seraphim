@@ -50,6 +50,11 @@ export function getTask(taskId: string) {
   return apiClient.get(`tasks/${taskId}`).json<TaskDetail>()
 }
 
+// Create an internal ticket (no GitHub/Jira backing). Returns the new task.
+export function createInternalTask(body: { title: string; body: string; state: 'open' | 'closed' }) {
+  return apiClient.post('tasks', { json: body }).json<Task>()
+}
+
 // --- Live statistics ---------------------------------------------------------
 
 export function getGlobalStats() {
