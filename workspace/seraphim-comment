@@ -1,0 +1,57 @@
+#!/usr/bin/env node
+// seraphim-comment: the agent's way to post a comment on the current task's
+// ticket. The comment routes to wherever the ticket lives: GitHub for a GitHub
+// issue, or the internal database for an internal ticket (it is attributed to
+// the agent there). Use this for internal tickets, which have no `gh` to reach.
+//
+// Usage (text as an argument or on stdin):
+//   seraphim-comment "Implemented the change; tests pass."
+//   echo "..." | seraphim-comment
+
+const API_URL = process.env.SERAPHIM_API_URL
+const TASK_ID = process.env.SERAPHIM_TASK_ID
+
+function fail(message) {
+  console.error(`seraphim-comment: ${message}`)
+  process.exit(1)
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk) => (data += chunk))
+    process.stdin.on('end', () => resolve(data))
+  })
+}
+
+async function main() {
+  if (!API_URL || !TASK_ID) {
+    fail('SERAPHIM_API_URL and SERAPHIM_TASK_ID must be set (they are injected by the orchestrator)')
+  }
+
+  const body = (process.argv[2] ?? (await readStdin())).trim()
+  if (!body) {
+    fail('no comment text provided (pass it as an argument or on stdin)')
+  }
+
+  let response
+  try {
+    response = await fetch(`${API_URL}/api/v1/tasks/${TASK_ID}/comment`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body, author: 'agent' })
+    })
+  } catch (error) {
+    fail(`could not reach the Seraphim API at ${API_URL}: ${error.message}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    fail(`the API rejected the comment (HTTP ${response.status}): ${detail}`)
+  }
+
+  console.log('Comment posted to the task.')
+}
+
+main().catch((error) => fail(error.message))

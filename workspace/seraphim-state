@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+// seraphim-state: the agent's way to open or close the current task's ticket.
+// Routes to wherever the ticket lives: GitHub for a GitHub issue, or the internal
+// database for an internal ticket. Use this for internal tickets, which have no
+// `gh` to reach.
+//
+// Usage:
+//   seraphim-state open
+//   seraphim-state closed
+
+const API_URL = process.env.SERAPHIM_API_URL
+const TASK_ID = process.env.SERAPHIM_TASK_ID
+
+function fail(message) {
+  console.error(`seraphim-state: ${message}`)
+  process.exit(1)
+}
+
+async function main() {
+  if (!API_URL || !TASK_ID) {
+    fail('SERAPHIM_API_URL and SERAPHIM_TASK_ID must be set (they are injected by the orchestrator)')
+  }
+
+  const state = String(process.argv[2] ?? '')
+    .trim()
+    .toLowerCase()
+  if (state !== 'open' && state !== 'closed') {
+    fail('usage: seraphim-state open|closed')
+  }
+
+  let response
+  try {
+    response = await fetch(`${API_URL}/api/v1/tasks/${TASK_ID}/issue/state`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state })
+    })
+  } catch (error) {
+    fail(`could not reach the Seraphim API at ${API_URL}: ${error.message}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    fail(`the API rejected the state change (HTTP ${response.status}): ${detail}`)
+  }
+
+  console.log(`Ticket marked ${state}.`)
+}
+
+main().catch((error) => fail(error.message))

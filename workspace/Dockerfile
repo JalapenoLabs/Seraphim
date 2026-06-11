@@ -87,7 +87,10 @@ RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
 # --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest
 COPY seraphim-ask /usr/local/bin/seraphim-ask
-RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask
+COPY seraphim-comment /usr/local/bin/seraphim-comment
+COPY seraphim-state /usr/local/bin/seraphim-state
+RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask \
+    /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
