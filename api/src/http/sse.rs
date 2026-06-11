@@ -22,6 +22,11 @@ pub async fn board_stream(
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("board").data("{}"));
                 }
+                // A throttled nudge that the in-progress turn's usage advanced, so
+                // the global stats banner refetches and the counter ticks live.
+                Ok(ServerEvent::Usage { .. }) => {
+                    yield Ok(Event::default().event("usage").data("{}"));
+                }
                 Ok(ServerEvent::Task { .. } | ServerEvent::Notification { .. }) => {}
                 // A lagged consumer just resyncs; a closed channel ends the stream.
                 Err(RecvError::Lagged(_)) => continue,
@@ -55,7 +60,7 @@ pub async fn notification_stream(
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("refresh").data("{}"));
                 }
-                Ok(ServerEvent::Task { .. }) => {}
+                Ok(ServerEvent::Task { .. } | ServerEvent::Usage { .. }) => {}
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             }
@@ -76,6 +81,11 @@ pub async fn task_stream(
                 Ok(ServerEvent::Task { task_id, payload }) if task_id == id => {
                     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                     yield Ok(Event::default().event("task").data(data));
+                }
+                // A throttled tick that this task's live token usage advanced; the
+                // Stats panel refetches without the partials reaching the feed.
+                Ok(ServerEvent::Usage { task_id }) if task_id == id => {
+                    yield Ok(Event::default().event("usage").data("{}"));
                 }
                 Ok(_) => {}
                 Err(RecvError::Lagged(_)) => continue,

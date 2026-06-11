@@ -35,6 +35,28 @@ pub enum ServerEvent {
         task_title: String,
         prompt: String,
     },
+    /// A throttled tick that the in-progress turn's token usage advanced, so the
+    /// stats gauges refetch and the counter ticks live mid-turn. Carries no
+    /// numbers; the live values live on [`AppState::live_usage`] and are read by
+    /// the stats endpoints, keeping one source of truth.
+    Usage { task_id: Uuid },
+}
+
+/// The token usage of the turn currently generating, surfaced so the stats
+/// gauges advance smoothly mid-turn instead of only at message/turn boundaries.
+/// It is a live UI affordance, not the billing record (the `result` event remains
+/// the source of truth for persisted cost/usage).
+#[derive(Debug, Clone, Copy)]
+pub struct LiveUsage {
+    /// The task whose turn is generating.
+    pub task_id: Uuid,
+    /// Turn-cumulative output tokens so far: the finalized output of completed
+    /// assistant messages this turn plus the current message's live count.
+    pub output_tokens: i64,
+    /// The current assistant message's prompt size (input + cache), for the
+    /// context gauge. Input recurs per round-trip, so this is the latest message's
+    /// value, not a turn sum.
+    pub context_tokens: i64,
 }
 
 /// Clonable, shared state handed to every request handler and background task.
@@ -50,6 +72,10 @@ pub struct AppState {
     /// current turn. Purely an ephemeral UI signal, so it lives in memory rather
     /// than the database; the board handler reads it into the settings payload.
     cooldown_until: Arc<RwLock<Option<DateTime<Utc>>>>,
+    /// Live token usage of the turn currently generating, or `None` between turns.
+    /// Ephemeral (like [`Self::cooldown_until`]); the stats endpoints overlay it on
+    /// the persisted totals so the counter ticks during generation.
+    live_usage: Arc<RwLock<Option<LiveUsage>>>,
 }
 
 impl AppState {
@@ -61,6 +87,7 @@ impl AppState {
             events,
             internal_api_url,
             cooldown_until: Arc::new(RwLock::new(None)),
+            live_usage: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -73,6 +100,18 @@ impl AppState {
     /// follow this with [`Self::notify_board`] so the navbar status updates live.
     pub fn set_cooldown_until(&self, until: Option<DateTime<Utc>>) {
         *self.cooldown_until.write().expect("cooldown lock poisoned") = until;
+    }
+
+    /// The live token usage of the in-progress turn, if one is generating.
+    pub fn live_usage(&self) -> Option<LiveUsage> {
+        *self.live_usage.read().expect("live usage lock poisoned")
+    }
+
+    /// Sets (or clears with `None`) the in-progress turn's live token usage.
+    /// Cheap and called often; pair with the throttled [`Self::notify_usage`] for
+    /// the SSE tick rather than emitting on every update.
+    pub fn set_live_usage(&self, usage: Option<LiveUsage>) {
+        *self.live_usage.write().expect("live usage lock poisoned") = usage;
     }
 
     /// Builds a GitHub client from the token stored in the database. Built on
@@ -107,6 +146,12 @@ impl AppState {
     /// Pushes an agent event onto a task's live stream.
     pub fn notify_task(&self, task_id: Uuid, payload: serde_json::Value) {
         let _ = self.events.send(ServerEvent::Task { task_id, payload });
+    }
+
+    /// Ticks the stats gauges that the in-progress turn's usage advanced. Throttled
+    /// by the caller; carries no numbers (clients refetch the stats endpoint).
+    pub fn notify_usage(&self, task_id: Uuid) {
+        let _ = self.events.send(ServerEvent::Usage { task_id });
     }
 
     /// Announces a new question so the UI can toast and notify the user.

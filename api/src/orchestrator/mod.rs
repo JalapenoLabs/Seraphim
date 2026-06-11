@@ -18,7 +18,7 @@ mod usage;
 
 pub use provision::provision_workspace;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use eyre::{eyre, Result};
@@ -65,6 +65,11 @@ const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(8);
 /// transient rate limit is treated as a real failure and surfaced on the card.
 /// Bounds the wait at roughly `RATE_LIMIT_COOLDOWN * RATE_LIMIT_RETRY_MAX`.
 const RATE_LIMIT_RETRY_MAX: u32 = 5;
+/// Minimum spacing between live token-usage SSE ticks during a turn. The partial
+/// stream updates the in-memory counter on every chunk; this throttles only the
+/// "refetch the gauges" nudge so a smooth-but-not-flooding ~3 ticks/second reach
+/// the UI.
+const LIVE_USAGE_TICK: Duration = Duration::from_millis(350);
 
 /// What kind of work a pulled card needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -709,6 +714,14 @@ async fn stream_turn(
     // collected for an optional summary comment on the source issue.
     let mut thoughts: Vec<String> = Vec::new();
 
+    // Live token usage from the partial-message stream: the in-memory counter is
+    // updated on every chunk, but the SSE tick that refetches the gauges is
+    // throttled to `LIVE_USAGE_TICK` so the UI stays smooth without flooding.
+    let mut usage = crate::claude::UsageTracker::default();
+    let mut last_usage_tick: Option<Instant> = None;
+    // A stale overlay from a prior turn would otherwise show until the first tick.
+    state.set_live_usage(None);
+
     while let Some(item) = stream.next().await {
         let event = match item {
             Ok(event) => event,
@@ -718,6 +731,35 @@ async fn stream_turn(
                 break;
             }
         };
+
+        // Live token usage from a partial-message event. This is a firehose, so it
+        // is never persisted or streamed verbatim: it only updates the in-memory
+        // live counter, with a throttled SSE tick to refetch the gauges.
+        if let AgentEventKind::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        } = &event.kind
+        {
+            usage.apply(
+                *input_tokens,
+                *output_tokens,
+                *cache_read_input_tokens,
+                *cache_creation_input_tokens,
+            );
+            state.set_live_usage(Some(crate::state::LiveUsage {
+                task_id: task.id,
+                output_tokens: usage.output_tokens(),
+                context_tokens: usage.context_tokens(),
+            }));
+            let now = Instant::now();
+            if last_usage_tick.is_none_or(|last| now.duration_since(last) >= LIVE_USAGE_TICK) {
+                state.notify_usage(task.id);
+                last_usage_tick = Some(now);
+            }
+            continue;
+        }
 
         if let Some(found) = &event.session_id {
             session_id = Some(found.clone());
@@ -804,6 +846,11 @@ async fn stream_turn(
         session_id.as_deref(),
     )
     .await?;
+
+    // The turn's usage is now persisted (the source of truth). Drop the live
+    // overlay and tick once more so the gauges settle on the final total.
+    state.set_live_usage(None);
+    state.notify_usage(task.id);
 
     // Optionally summarize this turn's reasoning back onto the source issue.
     // Best-effort: a failure here never affects the task's own outcome.

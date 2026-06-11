@@ -12,6 +12,11 @@
 //! - `{"type":"user","message":{content:[{type:"tool_result",...}]}}`
 //! - `{"type":"result","subtype":"success","result":...,"session_id":...,"total_cost_usd":...}`
 //! - `{"type":"rate_limit_event","rate_limit_info":{...},"session_id":...}`
+//!
+//! With `--include-partial-messages` Claude Code also emits a firehose of
+//! `stream_event` lines (the raw Messages-API streaming protocol). We mine only
+//! the live token usage from `message_start` / `message_delta` and drop the rest,
+//! so the partial stream feeds the live counter without bloating the event log.
 
 use serde_json::Value;
 
@@ -48,8 +53,73 @@ pub enum AgentEventKind {
     /// along in the event payload (`raw`) for the UI to render; we only classify
     /// the line here so it can be styled instead of dumped as raw JSON.
     RateLimit,
+    /// Live token usage from a partial-message stream event (opted in with
+    /// `--include-partial-messages`). `message_start` carries the prompt cost
+    /// (`input_tokens` + cache fields); `message_delta` carries the live, rising
+    /// `output_tokens` for the current message. Used only to tick the stats
+    /// gauges, never persisted to the event log. `input_tokens.is_some()` marks a
+    /// `message_start` (a new assistant message), which restarts the per-message
+    /// output count.
+    Usage {
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        cache_read_input_tokens: Option<i64>,
+        cache_creation_input_tokens: Option<i64>,
+    },
     /// Any other line, preserved as-is.
     Other,
+}
+
+/// Accumulates the turn-level live token usage from the partial-message stream.
+///
+/// `message_delta.usage.output_tokens` is cumulative *per assistant message* and
+/// restarts at each `message_start` (every tool round-trip is a new message), so
+/// a turn total must sum each completed message's output and add the current
+/// message's live value. Input/cache recur per round-trip, so the context size is
+/// the latest message's prompt, not a sum.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UsageTracker {
+    /// Finalized output of the assistant messages completed so far this turn.
+    output_base: i64,
+    /// The current message's live (monotonically rising) output count.
+    current_output: i64,
+    /// The current message's prompt size (input + cache reads + cache creation).
+    context: i64,
+}
+
+impl UsageTracker {
+    /// Folds one [`AgentEventKind::Usage`] event in, given its four token fields.
+    /// `input_tokens.is_some()` marks a `message_start` (a new assistant message).
+    pub fn apply(
+        &mut self,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        cache_read_input_tokens: Option<i64>,
+        cache_creation_input_tokens: Option<i64>,
+    ) {
+        if input_tokens.is_some() {
+            // A new assistant message: bank the previous message's output and
+            // restart the per-message count and the prompt size.
+            self.output_base += self.current_output;
+            self.current_output = output_tokens.unwrap_or(0);
+            self.context = input_tokens.unwrap_or(0)
+                + cache_read_input_tokens.unwrap_or(0)
+                + cache_creation_input_tokens.unwrap_or(0);
+        } else if let Some(output) = output_tokens {
+            // A `message_delta`: the live output count for the current message.
+            self.current_output = output;
+        }
+    }
+
+    /// Turn-cumulative output tokens generated so far.
+    pub fn output_tokens(&self) -> i64 {
+        self.output_base + self.current_output
+    }
+
+    /// The current assistant message's prompt size, for the context gauge.
+    pub fn context_tokens(&self) -> i64 {
+        self.context
+    }
 }
 
 impl AgentEvent {
@@ -63,6 +133,7 @@ impl AgentEvent {
             AgentEventKind::ToolResult { .. } => "tool_result",
             AgentEventKind::Result { .. } => "result",
             AgentEventKind::RateLimit => "rate_limit",
+            AgentEventKind::Usage { .. } => "usage",
             AgentEventKind::Other => "other",
         }
     }
@@ -143,6 +214,20 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
             session_id,
             raw: value,
         }],
+        // Partial-message stream events (`--include-partial-messages`): a firehose
+        // wrapped as `stream_event`. We extract only the live token usage from
+        // `message_start` / `message_delta` and drop every other partial
+        // (`content_block_delta`, `ping`, `message_stop`, ...) so they never reach
+        // the event log or the live feed.
+        Some("stream_event") => {
+            let inner = value.get("event").cloned().unwrap_or(Value::Null);
+            parse_stream_event(&inner, session_id, value)
+        }
+        // Defensive: some Claude Code versions may surface the raw partial type at
+        // the top level rather than wrapped in `stream_event`.
+        Some("message_start" | "message_delta") => {
+            parse_stream_event(&value, session_id, value.clone())
+        }
         _ => vec![AgentEvent {
             kind: AgentEventKind::Other,
             session_id,
@@ -237,6 +322,48 @@ fn parse_user(value: &Value, session_id: Option<&str>) -> Vec<AgentEvent> {
         }
     }
     events
+}
+
+/// Extracts the live token usage from a partial-message stream event, dropping
+/// everything else. `message_start` carries the prompt cost on `message.usage`;
+/// `message_delta` carries the rising output count on `usage`.
+fn parse_stream_event(inner: &Value, session_id: Option<String>, raw: Value) -> Vec<AgentEvent> {
+    let usage = match inner.get("type").and_then(Value::as_str) {
+        Some("message_start") => inner.pointer("/message/usage"),
+        Some("message_delta") => inner.get("usage"),
+        // content_block_delta, content_block_start/stop, message_stop, ping, ...
+        _ => None,
+    };
+    usage_event(usage, session_id, raw)
+        .map(|event| vec![event])
+        .unwrap_or_default()
+}
+
+/// Builds a [`AgentEventKind::Usage`] event from a Messages-API `usage` object,
+/// or `None` when there is nothing countable to report.
+fn usage_event(
+    usage: Option<&Value>,
+    session_id: Option<String>,
+    raw: Value,
+) -> Option<AgentEvent> {
+    let usage = usage?;
+    let field = |key: &str| usage.get(key).and_then(Value::as_i64);
+    let input_tokens = field("input_tokens");
+    let output_tokens = field("output_tokens");
+    // A usage block with neither an input nor an output count carries no signal.
+    if input_tokens.is_none() && output_tokens.is_none() {
+        return None;
+    }
+    Some(AgentEvent {
+        kind: AgentEventKind::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens: field("cache_read_input_tokens"),
+            cache_creation_input_tokens: field("cache_creation_input_tokens"),
+        },
+        session_id,
+        raw,
+    })
 }
 
 /// Tool-result content may be a bare string or an array of content blocks.
@@ -391,6 +518,89 @@ mod tests {
                 assert_eq!(result_text.as_deref(), Some("Not logged in"));
             }
             other => panic!("expected result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_start_partial_yields_input_and_cache_usage() {
+        // The prompt-cost snapshot at the start of an assistant message.
+        let line = r#"{"type":"stream_event","session_id":"s1","event":{"type":"message_start","message":{"usage":{"input_tokens":1325,"cache_read_input_tokens":40000,"cache_creation_input_tokens":12,"output_tokens":3}}}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].type_label(), "usage");
+        assert_eq!(
+            events[0].kind,
+            AgentEventKind::Usage {
+                input_tokens: Some(1325),
+                output_tokens: Some(3),
+                cache_read_input_tokens: Some(40000),
+                cache_creation_input_tokens: Some(12),
+            }
+        );
+    }
+
+    #[test]
+    fn message_delta_partial_yields_live_output_only() {
+        // The live, rising output count mid-generation (the example from the issue).
+        let line = r#"{"type":"stream_event","session_id":"s1","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":128}}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            AgentEventKind::Usage {
+                input_tokens: None,
+                output_tokens: Some(128),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }
+        );
+    }
+
+    #[test]
+    fn bare_top_level_partial_is_also_parsed() {
+        // Defensive path: a partial surfaced without the `stream_event` wrapper.
+        let line = r#"{"type":"message_delta","usage":{"output_tokens":7}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            AgentEventKind::Usage { output_tokens, .. } => assert_eq!(*output_tokens, Some(7)),
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_tracker_accumulates_output_across_message_boundaries() {
+        let mut tracker = UsageTracker::default();
+
+        // First assistant message: prompt cost, then output rises to 40.
+        tracker.apply(Some(1000), Some(2), Some(30000), Some(0));
+        assert_eq!(tracker.context_tokens(), 31000);
+        tracker.apply(None, Some(12), None, None);
+        tracker.apply(None, Some(40), None, None);
+        assert_eq!(tracker.output_tokens(), 40);
+
+        // A tool round-trip starts a new message: output resets per message, but
+        // the turn total keeps the prior 40 and the context reflects the new
+        // (larger, re-sent) prompt.
+        tracker.apply(Some(1500), Some(1), Some(32000), Some(8));
+        assert_eq!(tracker.context_tokens(), 33508);
+        assert_eq!(tracker.output_tokens(), 41); // 40 banked + 1 initial
+        tracker.apply(None, Some(25), None, None);
+        assert_eq!(tracker.output_tokens(), 65); // 40 banked + 25 live
+    }
+
+    #[test]
+    fn other_partial_events_are_dropped() {
+        // The firehose (content deltas, pings, stops) must not reach the event log.
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+            r#"{"type":"stream_event","event":{"type":"ping"}}"#,
+            // A message_delta with no usage block carries no countable signal.
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}}}"#,
+        ] {
+            assert!(parse_line(line).is_empty(), "should drop: {line}");
         }
     }
 

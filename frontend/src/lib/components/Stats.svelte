@@ -1,7 +1,9 @@
 <script lang="ts">
   // Live agent statistics, shown per task (a `taskId` is given) or globally (the
-  // board banner). Polls the stats endpoint and ticks the time display every
-  // second so a running turn counts up live.
+  // board banner). Polls the stats endpoint as a baseline and ticks the time
+  // display every second; during a turn it also refetches on the throttled
+  // `usage` SSE tick, so the token counter ticks up live mid-generation instead
+  // of only at message/turn boundaries.
   import type { Stats } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
@@ -16,6 +18,7 @@
   let now = $state(Date.now())
   let poll: ReturnType<typeof setInterval> | null = null
   let ticker: ReturnType<typeof setInterval> | null = null
+  let usageStream: EventSource | null = null
 
   async function refresh() {
     try {
@@ -27,13 +30,22 @@
 
   onMount(() => {
     refresh()
+    // A slow baseline poll reconciles with the persisted totals; the live ticking
+    // comes from the SSE `usage` nudges below.
     poll = setInterval(refresh, 5000)
     ticker = setInterval(() => (now = Date.now()), 1000)
+
+    // The board stream carries global usage ticks; a task's stream carries its
+    // own. The server already throttles these, so refetching on each is smooth.
+    const streamUrl = taskId ? `/api/v1/tasks/${taskId}/stream` : '/api/v1/board/stream'
+    usageStream = new EventSource(streamUrl)
+    usageStream.addEventListener('usage', () => refresh())
   })
 
   onDestroy(() => {
     if (poll) clearInterval(poll)
     if (ticker) clearInterval(ticker)
+    usageStream?.close()
   })
 
   // Worked time counts up live: the persisted total plus the elapsed time of any

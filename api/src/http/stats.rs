@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::ApiResult;
 use crate::db::models::{Settings, StatsAggregate};
 use crate::db::queries;
-use crate::state::AppState;
+use crate::state::{AppState, LiveUsage};
 
 #[derive(Debug, Serialize)]
 pub struct StatsResponse {
@@ -83,16 +83,27 @@ fn build_response(
     running_since: Option<DateTime<Utc>>,
     latest_usage: Option<&Value>,
     rate_limit: Option<&Value>,
+    live_usage: Option<LiveUsage>,
 ) -> StatsResponse {
     let input_total = agg.input_tokens + agg.cache_creation_tokens + agg.cache_read_tokens;
-    let context = latest_usage.map_or(0, context_tokens);
     let (usage_utilization, usage_resets_at) = rate_limit.map_or((None, None), rate_limit_fields);
+
+    // Overlay the in-progress turn's live usage (if any) on top of the persisted,
+    // completed-turn totals so the counter ticks mid-turn. Only output is added to
+    // the totals (output is turn-cumulative); input recurs per round-trip, so the
+    // live input feeds only the context gauge, not the cumulative input total. The
+    // persisted `result` event remains the source of truth once the turn lands.
+    let live_output = live_usage.map_or(0, |usage| usage.output_tokens);
+    let context = live_usage
+        .map(|usage| usage.context_tokens)
+        .filter(|&tokens| tokens > 0)
+        .unwrap_or_else(|| latest_usage.map_or(0, context_tokens));
 
     StatsResponse {
         cost_usd: agg.cost_usd,
         input_tokens: input_total,
-        output_tokens: agg.output_tokens,
-        total_tokens: input_total + agg.output_tokens,
+        output_tokens: agg.output_tokens + live_output,
+        total_tokens: input_total + agg.output_tokens + live_output,
         worked_ms: agg.worked_ms,
         running_since,
         context_tokens: context,
@@ -116,6 +127,8 @@ pub async fn global(State(state): State<AppState>) -> ApiResult<Json<StatsRespon
         running_since,
         latest_usage.as_ref(),
         rate_limit.as_ref(),
+        // One shared agent, so any in-progress turn's live usage counts globally.
+        state.live_usage(),
     )))
 }
 
@@ -135,6 +148,8 @@ pub async fn task(
         running_since,
         latest_usage.as_ref(),
         rate_limit.as_ref(),
+        // Only overlay the live counter when the running turn is this task's.
+        state.live_usage().filter(|usage| usage.task_id == id),
     )))
 }
 
