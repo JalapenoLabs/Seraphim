@@ -21,24 +21,22 @@ jobs:
 
   api:
     name: API (Rust)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fedora]
     defaults:
       run:
         working-directory: api
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins the channel (1.88) and components; rustup
-      # installs it automatically on the first cargo invocation.
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            api/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('api/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      # The runner is self-hosted, so $HOME survives between jobs while the
+      # checked-out tree does not: actions/checkout runs `git clean -ffdx`, which
+      # deletes the gitignored api/target every run. Point Cargo's build output at
+      # a stable path under $HOME so incremental compiles persist locally, with no
+      # multi-hundred-MB cache upload/download per run. ~/.cargo/{registry,git}
+      # already live in $HOME and persist for free. rust-toolchain.toml pins the
+      # channel (1.88); rustup installs it on the first cargo invocation.
+      - name: Persist Cargo build output outside the workspace
+        run: echo "CARGO_TARGET_DIR=$HOME/.cache/seraphim/cargo-target" >> "$GITHUB_ENV"
 
       - name: Format
         if: ${{ !cancelled() }}
@@ -54,7 +52,7 @@ jobs:
 
   frontend:
     name: Frontend (SvelteKit)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fedora]
     defaults:
       run:
         working-directory: frontend
@@ -83,7 +81,7 @@ jobs:
 
   images:
     name: Docker images
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fedora]
     steps:
       - uses: actions/checkout@v4
 
