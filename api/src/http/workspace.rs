@@ -1,7 +1,9 @@
-//! Workspace container control: restart and full recreate.
+//! Workspace container control: restart and full recreate, plus the agent's
+//! hard reset.
 
 use axum::extract::State;
 use axum::Json;
+use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
@@ -32,4 +34,22 @@ pub async fn provision(State(state): State<AppState>) -> ApiResult<Json<serde_js
     info!("provisioning workspace");
     crate::orchestrator::provision_workspace(&state).await?;
     Ok(Json(json!({ "status": "provisioned" })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ResetRequest {
+    /// Also delete the agent's accumulated memory files. Off by default.
+    #[serde(default)]
+    pub purge_memories: bool,
+}
+
+/// `POST /api/v1/agent/reset` - hard-reset the agent: stop the current turn, wipe
+/// its history and session, requeue the in-progress task, and optionally purge
+/// memories. The next turn spawns a brand-new, context-free Claude session.
+pub async fn reset(
+    State(state): State<AppState>,
+    Json(body): Json<ResetRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::orchestrator::hard_reset(&state, body.purge_memories).await?;
+    Ok(Json(json!({ "status": "reset" })))
 }

@@ -110,6 +110,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspace/restart", post(workspace::restart))
         .route("/workspace/recreate", post(workspace::recreate))
         .route("/workspace/provision", post(workspace::provision))
+        .route("/agent/reset", post(workspace::reset))
         .route(
             "/automation/rules",
             get(automation::list).post(automation::create),

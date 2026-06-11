@@ -1447,6 +1447,14 @@ pub async fn reset_global_stats(pool: &PgPool) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// Purges all conversation history: every turn and its events (events cascade
+/// from turns). Used by the hard reset to wipe the agent's recorded history,
+/// which also zeroes the turn-derived statistics.
+pub async fn purge_history(pool: &PgPool) -> sqlx::Result<u64> {
+    let result = sqlx::query("DELETE FROM turns").execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
 // --- Events ------------------------------------------------------------------
 
 pub async fn append_event(

@@ -238,6 +238,8 @@ export type Stats = {
   // Subscription usage-limit utilization (0-100), or null when unknown.
   usage_utilization: number | null
   usage_resets_at: number | null
+  // Rate-limit status (e.g. "allowed") shown when the stream reports no number.
+  usage_status: string | null
   turns: number
 }
 

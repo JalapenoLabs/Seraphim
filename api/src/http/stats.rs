@@ -3,10 +3,11 @@
 //!
 //! Several pieces lean on what we actually capture: cost and per-turn token usage
 //! (which also drive cost) come from each turn's terminal `result` event, time is
-//! summed turn elapsed time, the context gauge measures the latest turn's tokens
-//! against the model's window, and the usage gauge reads the latest rate-limit
-//! notice's global utilization. These are session/global totals; Seraphim runs
-//! one shared Claude session, so they are not split per task or per source.
+//! summed turn elapsed time, the context gauge measures the latest turn's largest
+//! single-request prompt against the model's window, and the usage gauge reads the
+//! latest rate-limit notice's utilization when present, otherwise its categorical
+//! status. These are session/global totals; Seraphim runs one shared Claude
+//! session, so they are not split per task or per source.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -42,6 +43,9 @@ pub struct StatsResponse {
     pub usage_utilization: Option<f64>,
     /// When the usage window resets (unix seconds), if known.
     pub usage_resets_at: Option<i64>,
+    /// The rate-limit status (e.g. "allowed") when the stream reports no numeric
+    /// utilization, so the UI can show a status instead of a misleading 0%.
+    pub usage_status: Option<String>,
     pub turns: i64,
 }
 
@@ -55,16 +59,37 @@ fn context_window(model: &str) -> i64 {
     }
 }
 
-/// The context size a turn's `usage` block implies: the input it sent, cached or
-/// not, which is the conversation currently in the window.
-fn context_tokens(usage: &Value) -> i64 {
+/// The prompt size of a single API request: its fresh input plus cached tokens.
+fn request_total(usage: &Value) -> i64 {
     let field = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
     field("input_tokens") + field("cache_creation_input_tokens") + field("cache_read_input_tokens")
 }
 
-/// Pulls `(utilization 0-100, resetsAt)` from a rate-limit event payload. The
-/// utilization may arrive as a fraction (0-1) or a percentage (0-100).
-fn rate_limit_fields(payload: &Value) -> (Option<f64>, Option<i64>) {
+/// The context-window occupancy a turn's `usage` block implies: a single API
+/// request's prompt size (input + cache), not the whole turn's total.
+///
+/// A turn is one `claude -p` run that makes many internal API requests; the
+/// top-level `usage` sums them, and `cache_read_input_tokens` re-counts the
+/// cached context on every request, so the total runs to many times the window.
+/// The real occupancy is one request's prompt, so take the largest per-request
+/// total from the `iterations` breakdown, falling back to the top-level totals
+/// only for a single-request turn that carries no `iterations`.
+fn context_tokens(usage: &Value) -> i64 {
+    usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .and_then(|requests| requests.iter().map(request_total).max())
+        .filter(|&largest| largest > 0)
+        .unwrap_or_else(|| request_total(usage))
+}
+
+/// Pulls `(utilization 0-100, resetsAt, status)` from a rate-limit event payload.
+///
+/// The headless `claude -p` stream reports a categorical `status` and a reset
+/// time but usually no numeric `utilization`, so the percentage is often `None`
+/// and the UI falls back to the status. When utilization is present it may arrive
+/// as a fraction (0-1) or a percentage (0-100).
+fn rate_limit_fields(payload: &Value) -> (Option<f64>, Option<i64>, Option<String>) {
     let info = payload.get("rate_limit_info").unwrap_or(payload);
     let utilization = info
         .get("utilization")
@@ -74,7 +99,11 @@ fn rate_limit_fields(payload: &Value) -> (Option<f64>, Option<i64>) {
             percent.clamp(0.0, 100.0)
         });
     let resets_at = info.get("resetsAt").and_then(Value::as_i64);
-    (utilization, resets_at)
+    let status = info
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (utilization, resets_at, status)
 }
 
 fn build_response(
@@ -86,7 +115,8 @@ fn build_response(
     live_usage: Option<LiveUsage>,
 ) -> StatsResponse {
     let input_total = agg.input_tokens + agg.cache_creation_tokens + agg.cache_read_tokens;
-    let (usage_utilization, usage_resets_at) = rate_limit.map_or((None, None), rate_limit_fields);
+    let (usage_utilization, usage_resets_at, usage_status) =
+        rate_limit.map_or((None, None, None), rate_limit_fields);
 
     // Overlay the in-progress turn's live usage (if any) on top of the persisted,
     // completed-turn totals so the counter ticks mid-turn. Only output is added to
@@ -110,6 +140,7 @@ fn build_response(
         context_window: context_window(&settings.claude_model),
         usage_utilization,
         usage_resets_at,
+        usage_status,
         turns: agg.turns,
     }
 }

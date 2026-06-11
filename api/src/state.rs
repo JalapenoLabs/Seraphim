@@ -1,5 +1,6 @@
 //! Shared application state and the server-sent-event broadcast bus.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
@@ -76,6 +77,10 @@ pub struct AppState {
     /// Ephemeral (like [`Self::cooldown_until`]); the stats endpoints overlay it on
     /// the persisted totals so the counter ticks during generation.
     live_usage: Arc<RwLock<Option<LiveUsage>>>,
+    /// Bumped by a hard reset. A turn captures it at the start and abandons its
+    /// post-turn handling (session persist, task move) if it changed, so a reset
+    /// that lands mid-turn is never undone by the turn it interrupted.
+    reset_epoch: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -88,7 +93,19 @@ impl AppState {
             internal_api_url,
             cooldown_until: Arc::new(RwLock::new(None)),
             live_usage: Arc::new(RwLock::new(None)),
+            reset_epoch: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// The current hard-reset generation. A turn captures this at its start and
+    /// compares it later; a change means a reset happened during the turn.
+    pub fn reset_epoch(&self) -> u64 {
+        self.reset_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Marks a hard reset, so any in-flight turn yields its post-turn handling.
+    pub fn bump_reset_epoch(&self) {
+        self.reset_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The active rate-limit cooldown deadline, if one is set.

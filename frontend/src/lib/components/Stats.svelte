@@ -60,9 +60,14 @@
   })
 
   const contextPct = $derived(
-    stats && stats.context_window > 0 ? (stats.context_tokens / stats.context_window) * 100 : 0
+    stats && stats.context_window > 0
+      ? Math.min(100, Math.max(0, (stats.context_tokens / stats.context_window) * 100))
+      : 0
   )
   const usagePct = $derived(stats?.usage_utilization ?? 0)
+  // When the headless stream reports no numeric utilization, fall back to its
+  // categorical status (e.g. "allowed") rather than a misleading 0%.
+  const usageStatusLabel = $derived(stats?.usage_status?.replace(/_/g, ' ') ?? 'Unknown')
 
   // SVG donut geometry (radius 42 in a 0..100 viewBox).
   const RADIUS = 42
@@ -152,12 +157,27 @@
     <div
       class="flex flex-wrap items-center justify-around gap-x-8 gap-y-4 border-t border-border px-4 py-4"
     >
-      {@render gauge(
-        usagePct,
-        'Usage limit',
-        usageColor(usagePct),
-        `Subscription usage limit: ${pctLabel(usagePct)} used${resetsLabel(stats.usage_resets_at)}. This is the whole subscription (all terminals), not just Seraphim.`
-      )}
+      {#if stats.usage_utilization != null}
+        {@render gauge(
+          usagePct,
+          'Usage limit',
+          usageColor(usagePct),
+          `Subscription usage limit: ${pctLabel(usagePct)} used${resetsLabel(stats.usage_resets_at)}. This is the whole subscription (all terminals), not just Seraphim.`
+        )}
+      {:else}
+        <!-- The headless agent stream reports a status, not a percentage. -->
+        <div
+          class="flex flex-col items-center gap-1.5"
+          title={`Subscription rate-limit status from the agent stream${resetsLabel(stats.usage_resets_at)}. The headless stream reports a status, not a percentage.`}
+        >
+          <div class="flex size-20 items-center justify-center rounded-full border-[9px] border-border">
+            <span class="px-1 text-center text-xs font-semibold capitalize leading-tight">
+              {usageStatusLabel}
+            </span>
+          </div>
+          <span class="text-xs text-muted-foreground">Usage limit</span>
+        </div>
+      {/if}
 
       {@render gauge(
         contextPct,

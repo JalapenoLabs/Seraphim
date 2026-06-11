@@ -27,6 +27,7 @@
     listJiraBoards,
     listRepos,
     recreateWorkspace,
+    resetAgent,
     resetStats,
     restartWorkspace,
     setEnvVars,
@@ -37,6 +38,7 @@
   } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
   import * as Select from '$lib/components/ui/select'
+  import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Label } from '$lib/components/ui/label'
@@ -486,6 +488,26 @@
     workspaceMessage = 'Recreating + provisioning…'
     await recreateWorkspace()
     workspaceMessage = 'Workspace recreated; repos + config reprovisioned.'
+  }
+
+  // Hard reset: purge the agent's history/session (and optionally memories), then
+  // it spins up a brand-new, context-free session on its next turn.
+  let resetDialogOpen = $state(false)
+  let resetMemories = $state(false)
+  let resetting = $state(false)
+  async function runReset() {
+    resetting = true
+    try {
+      await resetAgent(resetMemories)
+      resetDialogOpen = false
+      // Everything (history, session, stats) is gone; reload to a clean slate.
+      window.location.reload()
+    } catch (error) {
+      console.error('hard reset failed', error)
+      workspaceMessage = 'Hard reset failed; see logs.'
+    } finally {
+      resetting = false
+    }
   }
 
   let statsMessage = $state<string | null>(null)
@@ -1289,6 +1311,48 @@
           <Button variant="outline" onclick={runRecreate}>Recreate</Button>
           {#if workspaceMessage}<span class="text-sm text-muted-foreground">{workspaceMessage}</span>{/if}
         </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root class="mt-6 border-destructive/40">
+      <Card.Header>
+        <Card.Title class="text-destructive">Hard reset the agent</Card.Title>
+        <Card.Description>
+          Wipes the agent's conversation history, statistics, and the current Claude session, and
+          requeues whatever it was working on. The next turn starts a brand-new, context-free
+          session. This cannot be undone.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content>
+        <AlertDialog.Root bind:open={resetDialogOpen}>
+          <AlertDialog.Trigger class={buttonVariants({ variant: 'destructive' })}>
+            Hard reset
+          </AlertDialog.Trigger>
+          <AlertDialog.Content>
+            <AlertDialog.Header>
+              <AlertDialog.Title>Hard reset the agent?</AlertDialog.Title>
+              <AlertDialog.Description>
+                This purges the agent's history and current session and requeues its in-progress
+                task, then starts a fresh session with no context. This cannot be undone.
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            <label class="flex items-center gap-3 rounded-md border border-border p-3">
+              <Switch id="reset-memories" bind:checked={resetMemories} />
+              <span class="text-sm">
+                <span class="font-medium">Also purge memories</span>
+                <span class="block text-muted-foreground">
+                  Delete the agent's accumulated memory files too.
+                </span>
+              </span>
+            </label>
+            <AlertDialog.Footer>
+              <AlertDialog.Cancel disabled={resetting}>Cancel</AlertDialog.Cancel>
+              <Button variant="destructive" disabled={resetting} onclick={runReset}>
+                {resetting ? 'Resetting…' : resetMemories ? 'Reset + purge memories' : 'Reset'}
+              </Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Content>
+        </AlertDialog.Root>
       </Card.Content>
     </Card.Root>
     {/if}
