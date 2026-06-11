@@ -338,6 +338,9 @@ pub struct Task {
     /// Fix turns already spent on this task's failing CI (bounds retry thrash).
     pub ci_fix_attempts: i32,
     pub hold: bool,
+    /// When true, while this task is in progress the agent pulls no new work, so
+    /// dependent tasks wait until it finishes (queue serialization).
+    pub blocking: bool,
     /// The operator's private scratchpad for this task. Stored only here and
     /// never written back to the source ticket.
     pub notes: String,

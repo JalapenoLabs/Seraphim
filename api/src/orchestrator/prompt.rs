@@ -292,6 +292,7 @@ mod tests {
             error: None,
             ci_fix_attempts: 0,
             hold: false,
+            blocking: false,
             notes: String::new(),
             session_id: None,
             started_at: None,

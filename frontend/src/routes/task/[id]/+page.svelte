@@ -4,12 +4,13 @@
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
-  import { ChevronDown, NotebookPen, Pause, Play } from '@lucide/svelte'
+  import { Ban, ChevronDown, NotebookPen, Pause, Play } from '@lucide/svelte'
 
   import {
     acknowledgeSuggestion,
     answerQuestion,
     getTask,
+    setTaskBlocking,
     setTaskHold,
     setTaskNotes
   } from '$lib/api'
@@ -257,6 +258,21 @@
     toast.success(held ? 'Task held — the agent will skip it' : 'Hold released')
   }
 
+  // Blocking toggle: a quick, reversible flag, so no confirmation dialog.
+  async function toggleBlocking() {
+    if (!task) {
+      return
+    }
+    const blocking = !task.blocking
+    await setTaskBlocking(task.id, blocking)
+    await load()
+    toast.success(
+      blocking
+        ? 'Marked blocking — the agent starts nothing new while this is in progress'
+        : 'No longer blocking'
+    )
+  }
+
   // Human labels for the rate-limit window and status codes Claude emits.
   const RATE_LIMIT_WINDOWS: Record<string, string> = {
     five_hour: '5-hour limit',
@@ -496,6 +512,18 @@
               <Badge variant="outline" class={STATUS_BADGE[task.status]}>
                 {STATUS_LABELS[task.status] ?? task.status}
               </Badge>
+              <button
+                type="button"
+                onclick={toggleBlocking}
+                title="While in progress, the agent starts no new work until this task finishes"
+                class={buttonVariants({
+                  variant: task.blocking ? 'default' : 'outline',
+                  size: 'sm'
+                })}
+              >
+                <Ban class="size-3.5" />
+                {task.blocking ? 'Blocking' : 'Block'}
+              </button>
               <AlertDialog.Root>
                 <AlertDialog.Trigger class={buttonVariants({ variant: 'outline', size: 'sm' })}>
                   {#if task.hold}
