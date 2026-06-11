@@ -25,7 +25,9 @@ pub struct BoardResponse {
 /// counts of open environment suggestions.
 pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardResponse>> {
     let tasks = queries::list_tasks(&state.db).await?;
-    let settings = queries::get_settings(&state.db).await?;
+    let mut settings = queries::get_settings(&state.db).await?;
+    // Overlay the live, in-memory rate-limit cooldown (not a stored column).
+    settings.cooldown_until = state.cooldown_until();
     let suggestion_counts = queries::unacknowledged_suggestion_counts(&state.db)
         .await?
         .into_iter()

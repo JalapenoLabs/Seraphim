@@ -1,5 +1,8 @@
 //! Shared application state and the server-sent-event broadcast bus.
 
+use std::sync::{Arc, RwLock};
+
+use chrono::{DateTime, Utc};
 use eyre::Result;
 use octocrab::Octocrab;
 use serde::Serialize;
@@ -41,6 +44,11 @@ pub struct AppState {
     pub events: broadcast::Sender<ServerEvent>,
     /// URL the workspace uses to reach this API (for the agent's helpers).
     pub internal_api_url: String,
+    /// When set and still in the future, the agent is in a brief global cooldown
+    /// after a transient (server-side) rate limit and is about to retry the
+    /// current turn. Purely an ephemeral UI signal, so it lives in memory rather
+    /// than the database; the board handler reads it into the settings payload.
+    cooldown_until: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
 impl AppState {
@@ -51,7 +59,19 @@ impl AppState {
             workspace,
             events,
             internal_api_url,
+            cooldown_until: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// The active rate-limit cooldown deadline, if one is set.
+    pub fn cooldown_until(&self) -> Option<DateTime<Utc>> {
+        *self.cooldown_until.read().expect("cooldown lock poisoned")
+    }
+
+    /// Sets (or clears with `None`) the rate-limit cooldown deadline. Callers
+    /// follow this with [`Self::notify_board`] so the navbar status updates live.
+    pub fn set_cooldown_until(&self, until: Option<DateTime<Utc>>) {
+        *self.cooldown_until.write().expect("cooldown lock poisoned") = until;
     }
 
     /// Builds a GitHub client from the token stored in the database. Built on
