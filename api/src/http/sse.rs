@@ -69,6 +69,30 @@ pub async fn notification_stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// `GET /api/v1/activity/stream` - the live agent event feed across *every* task,
+/// each line tagged with its `task_id`. Powers the full-screen watch page's
+/// combined activity view.
+pub async fn activity_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut receiver = state.events.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            match receiver.recv().await {
+                Ok(ServerEvent::Task { task_id, payload }) => {
+                    let envelope = serde_json::json!({ "task_id": task_id, "event": payload });
+                    let data = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("activity").data(data));
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 /// `GET /api/v1/tasks/:id/stream` - the live agent event feed for one task.
 pub async fn task_stream(
     State(state): State<AppState>,

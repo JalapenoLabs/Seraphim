@@ -18,9 +18,14 @@
 
   const links = [
     { href: '/', label: 'Board' },
+    { href: '/watch', label: 'Watch' },
     { href: '/repos', label: 'Repositories' },
     { href: '/settings', label: 'Settings' }
   ]
+
+  // The watch page is a full-screen, kiosk-style monitor: it owns the whole
+  // viewport, so the app chrome (navbar) gets out of its way.
+  const fullscreen = $derived($page.url.pathname === '/watch')
 
   // The board (settings + tasks) drives the navbar status. The board SSE stream
   // ticks on every change (including pause/resume), keeping the badge live.
@@ -93,6 +98,11 @@
   onDestroy(() => eventSource?.close())
 </script>
 
+{#if fullscreen}
+  <main class="h-screen w-screen overflow-hidden">
+    {@render children()}
+  </main>
+{:else}
 <div class="flex h-screen flex-col">
   <header class="flex items-center gap-4 border-b border-border bg-card px-6 py-3">
     <a href="/" class="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
@@ -152,5 +162,6 @@
     {@render children()}
   </main>
 </div>
+{/if}
 
 <Toaster theme="dark" richColors />
