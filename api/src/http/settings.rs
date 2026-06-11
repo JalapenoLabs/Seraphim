@@ -97,11 +97,13 @@ pub struct TokensRequest {
     pub claude_oauth_token: Option<String>,
     pub github_token: Option<String>,
     pub jira_api_token: Option<String>,
+    pub github_webhook_secret: Option<String>,
+    pub jira_webhook_secret: Option<String>,
 }
 
-/// `POST /api/v1/settings/tokens` - store the app tokens (write-only). Empty
-/// values are ignored so you can set one without resending the others, and the
-/// raw tokens are never returned by the API.
+/// `POST /api/v1/settings/tokens` - store the app tokens and webhook secrets
+/// (write-only). Empty values are ignored so you can set one without resending
+/// the others, and the raw secrets are never returned by the API.
 pub async fn set_tokens(
     State(state): State<AppState>,
     Json(body): Json<TokensRequest>,
@@ -111,6 +113,9 @@ pub async fn set_tokens(
         body.claude_oauth_token.filter(|token| !token.is_empty()),
         body.github_token.filter(|token| !token.is_empty()),
         body.jira_api_token.filter(|token| !token.is_empty()),
+        body.github_webhook_secret
+            .filter(|secret| !secret.is_empty()),
+        body.jira_webhook_secret.filter(|secret| !secret.is_empty()),
     )
     .await?;
     Ok(Json(settings_view(&state).await?))

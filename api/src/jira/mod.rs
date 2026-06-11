@@ -110,6 +110,46 @@ pub fn status_for_column(
     matches.into_iter().next().cloned()
 }
 
+/// The project key a webhook's `issue` object belongs to, used to match it to a
+/// followed board (boards are keyed by project). `None` if the shape is missing.
+pub fn project_key_from_webhook(issue: &serde_json::Value) -> Option<String> {
+    issue
+        .get("fields")?
+        .get("project")?
+        .get("key")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Builds a [`JiraIssue`] from a webhook payload's `issue` object. The webhook
+/// carries the same issue resource the REST sync reads, so this mirrors
+/// [`JiraClient::list_board_issues`]'s field extraction. `base_url` builds the
+/// browse URL. `None` when the payload has no issue key.
+pub fn issue_from_webhook(issue: &serde_json::Value, base_url: &str) -> Option<JiraIssue> {
+    let key = issue.get("key")?.as_str()?.to_string();
+    let fields = issue.get("fields");
+    let summary = fields
+        .and_then(|fields| fields.get("summary"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let status = fields
+        .and_then(|fields| fields.get("status"))
+        .and_then(|status| status.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let description = description_to_text(fields.and_then(|fields| fields.get("description")));
+    let url = format!("{}/browse/{}", base_url.trim_end_matches('/'), key);
+    Some(JiraIssue {
+        key,
+        summary,
+        status,
+        url,
+        description,
+    })
+}
+
 // --- Public DTOs -------------------------------------------------------------
 
 /// The current account, returned by a connection test.
@@ -535,6 +575,8 @@ mod tests {
             jira_base_url: "https://acme.atlassian.net".to_string(),
             jira_email: "bot@acme.com".to_string(),
             jira_token_set: true,
+            github_webhook_secret_set: false,
+            jira_webhook_secret_set: false,
             jira_token_preview: None,
             claude_token_preview: None,
             github_token_preview: None,

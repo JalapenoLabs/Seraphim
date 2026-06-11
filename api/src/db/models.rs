@@ -203,6 +203,11 @@ pub struct Settings {
     pub jira_email: String,
     /// Whether a Jira API token / PAT is stored (the token itself is never sent).
     pub jira_token_set: bool,
+    /// Whether a GitHub webhook secret is stored. With it set, inbound GitHub
+    /// issue hooks are verified and applied to the board in realtime.
+    pub github_webhook_secret_set: bool,
+    /// Whether a Jira webhook secret is stored (the realtime equivalent for Jira).
+    pub jira_webhook_secret_set: bool,
     /// Masked preview of the stored Jira API token. Filled like
     /// [`Self::claude_token_preview`].
     #[sqlx(default)]

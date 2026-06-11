@@ -15,6 +15,7 @@ mod sse;
 mod stats;
 mod suggestions;
 mod tasks;
+mod webhooks;
 mod workspace;
 
 use axum::http::StatusCode;
@@ -86,6 +87,9 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/:id/deletion-impact", get(repos::deletion_impact))
         .route("/repos/import-org", post(repos::import_org))
         .route("/sync", post(repos::sync))
+        // Inbound realtime issue webhooks (authenticated by their shared secret).
+        .route("/webhooks/github", post(webhooks::github))
+        .route("/webhooks/jira", post(webhooks::jira))
         .route("/jira/test", post(jira::test))
         .route("/jira/discover", post(jira::discover))
         .route("/jira/boards", get(jira::list))
