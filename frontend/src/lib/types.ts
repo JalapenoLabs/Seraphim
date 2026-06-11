@@ -45,6 +45,21 @@ export const STATUS_BADGE = {
   failed: 'border-destructive/40 text-destructive'
 } as const satisfies Record<TaskStatus, string>
 
+// The label and badge classes for a task's *source ticket* state (the card's
+// second badge, distinct from the agent `status` above). GitHub issues are
+// always "open"/"closed"; Jira (when wired up) reports project-defined workflow
+// names, so those are shown verbatim. Returns null when the state is unknown.
+export function ticketStateBadge(task: Task): { label: string; class: string } | null {
+  const state = task.external_state
+  if (!state) return null
+  if (task.source_kind === 'github') {
+    return state === 'closed'
+      ? { label: 'Closed', class: 'border-muted-foreground/40 text-muted-foreground' }
+      : { label: 'Open', class: 'border-success/40 text-success' }
+  }
+  return { label: state, class: 'border-border text-muted-foreground' }
+}
+
 export type ReviewPolicy = 'auto_squash_merge' | 'human_review' | 'none'
 
 // How much of the internet the agent's workspace may reach (modeled on Claude
@@ -61,6 +76,9 @@ export type Task = {
   title: string
   body_snapshot: string
   url: string
+  // The source ticket's own state, separate from the agent `status` below: for
+  // GitHub "open"/"closed", for Jira the workflow status name. Null until known.
+  external_state: string | null
   board_column: TaskColumn
   position: number
   status: TaskStatus

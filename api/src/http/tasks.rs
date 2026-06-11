@@ -102,6 +102,14 @@ pub async fn get_issue(State(state): State<AppState>, Path(id): Path<Uuid>) -> A
     };
     let github = state.github().await?;
     let thread = git::get_issue_thread(&github, &owner, &name, &number).await?;
+
+    // Reconcile the card's cached state with what GitHub reports now; the issue
+    // may have changed outside our close/reopen control (e.g. a merged PR that
+    // closed it via a keyword). Only refresh the board when it actually moved.
+    if queries::reconcile_task_external_state(&state.db, id, &thread.issue.state).await? {
+        state.notify_board();
+    }
+
     Ok(Json(thread).into_response())
 }
 
@@ -145,6 +153,12 @@ pub async fn set_issue_state(
         payload.reason.as_deref(),
     )
     .await?;
+
+    // Mirror the new state onto the task so the board card reflects it without a
+    // round-trip to GitHub, and nudge the board to refresh live.
+    queries::set_task_external_state(&state.db, id, &payload.state).await?;
+    state.notify_board();
+
     Ok(Json(issue).into_response())
 }
 

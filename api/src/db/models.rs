@@ -251,6 +251,10 @@ pub struct Task {
     pub title: String,
     pub body_snapshot: String,
     pub url: String,
+    /// The source ticket's own state, distinct from the agent's `status`: for
+    /// GitHub "open" / "closed", for Jira the workflow status name. `None` until
+    /// a sync or state change records it.
+    pub external_state: Option<String>,
     pub board_column: TaskColumn,
     pub position: f64,
     pub status: TaskStatus,

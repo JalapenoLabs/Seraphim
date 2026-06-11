@@ -453,15 +453,17 @@ pub async fn upsert_issue_task(
     title: &str,
     body: &str,
     url: &str,
+    external_state: &str,
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
-        "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, board_column, position) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'available', $7) \
+        "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'available', $8) \
          ON CONFLICT (repo_id, source_kind, external_id) DO UPDATE SET \
          title = EXCLUDED.title, \
          body_snapshot = EXCLUDED.body_snapshot, \
          url = EXCLUDED.url, \
+         external_state = EXCLUDED.external_state, \
          updated_at = now() \
          RETURNING *",
     )
@@ -471,9 +473,46 @@ pub async fn upsert_issue_task(
     .bind(title)
     .bind(body)
     .bind(url)
+    .bind(external_state)
     .bind(initial_position)
     .fetch_one(pool)
     .await
+}
+
+/// Records the source ticket's state on a task (e.g. "open"/"closed" after a
+/// close or reopen from the task view). Returns the refreshed task.
+pub async fn set_task_external_state(
+    pool: &PgPool,
+    id: Uuid,
+    external_state: &str,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET external_state = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(external_state)
+    .fetch_one(pool)
+    .await
+}
+
+/// Reconciles a task's cached `external_state` with a freshly observed value,
+/// writing (and reporting `true`) only when it actually differs. Used when we
+/// fetch the live issue thread, so the badge catches state changes made outside
+/// Seraphim, e.g. a PR that closed the issue via a "Closes #N" keyword.
+pub async fn reconcile_task_external_state(
+    pool: &PgPool,
+    id: Uuid,
+    external_state: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE tasks SET external_state = $2, updated_at = now() \
+         WHERE id = $1 AND external_state IS DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(external_state)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn max_position_in_column(
