@@ -139,96 +139,108 @@
   onDestroy(() => eventSource?.close())
 </script>
 
-{#if settings?.config_repo_error}
-  <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-center justify-between gap-4">
-    <div>
-      <Alert.Title>Config repo (~/.claude) failed to set up — the agent is halted.</Alert.Title>
-      <Alert.Description class="font-mono text-xs break-words">
-        {settings.config_repo_error}
-      </Alert.Description>
-    </div>
-    <Button variant="outline" size="sm" disabled={retrying} onclick={retryProvision}>
-      {retrying ? 'Retrying…' : 'Retry'}
-    </Button>
-  </Alert.Root>
-{/if}
-
-{#if settings?.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
-  <Alert.Root class="mx-6 mt-4 border-warning/40">
-    <Alert.Title>Paused: subscription usage limit reached.</Alert.Title>
-    <Alert.Description>
-      New work is on hold until the usage window resets at
-      {new Date(settings.usage_paused_until).toLocaleString()}. The agent resumes automatically.
-    </Alert.Description>
-  </Alert.Root>
-{/if}
-
-<div class="flex items-center justify-between px-6 pb-1 pt-4">
-  <div class="flex items-baseline gap-2">
-    {#if settings}
-      <strong class="text-base">{settings.org_name}</strong>
-      {#if outsideSchedule}
-        <span
-          class="rounded-full border border-warning/40 px-2 py-0.5 text-xs text-warning"
-          title="Outside the availability schedule"
-        >
-          ⏰ Outside scheduled hours
-        </span>
-      {/if}
-    {/if}
-  </div>
-  <div class="flex gap-2">
-    <Button variant="outline" size="sm" disabled={checking} onclick={checkIssues}>
-      <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" />
-      {checking ? 'Checking…' : 'Check issues'}
-    </Button>
-    {#if settings}
-      <Button
-        variant={settings.agent_paused ? 'default' : 'outline'}
-        size="sm"
-        onclick={togglePause}
-      >
-        {#if settings.agent_paused}
-          <Play class="size-4" /> Resume agent
-        {:else}
-          <Pause class="size-4" /> Pause agent
-        {/if}
-      </Button>
-    {/if}
-  </div>
-</div>
-
-<div class="grid grid-cols-1 items-start gap-3 p-4 lg:h-full lg:grid-cols-6 lg:px-6 lg:pb-6">
-  {#each COLUMNS as column}
-    <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
-      <header
-        class="flex items-center justify-between border-b border-border px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-      >
-        <span>{column.label}</span>
-        <span>{columns[column.key].length}</span>
-      </header>
-      <div
-        class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
-        use:dndzone={{
-          items: columns[column.key],
-          flipDurationMs: FLIP_MS,
-          dropTargetStyle: {},
-          dropTargetClasses: ['drop-active']
-        }}
-        onconsider={(event) => handleConsider(column.key, event)}
-        onfinalize={(event) => handleFinalize(column.key, event)}
-      >
-        {#each columns[column.key] as task (task.id)}
-          <div>
-            <Card
-              {task}
-              onchange={load}
-              repoName={task.repo_id ? repoNames[task.repo_id] : undefined}
-              suggestionCount={suggestionCounts[task.id] ?? 0}
-            />
-          </div>
-        {/each}
+<!--
+  Fill the available height (viewport minus the topbar, supplied by `<main>`) as a
+  single flex column: the banners and the env-name/action row size to content,
+  while the kanban grid takes the remaining space and scrolls within each lane.
+  This keeps the page itself from scrolling on desktop, so there is one scrollbar
+  (the lanes) instead of the page and the lanes both scrolling. The height cap is
+  `lg`-only; on narrow screens the lanes stack and the page scrolls normally.
+-->
+<div class="flex flex-col lg:h-full lg:min-h-0">
+  {#if settings?.config_repo_error}
+    <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-center justify-between gap-4">
+      <div>
+        <Alert.Title>Config repo (~/.claude) failed to set up — the agent is halted.</Alert.Title>
+        <Alert.Description class="font-mono text-xs break-words">
+          {settings.config_repo_error}
+        </Alert.Description>
       </div>
-    </section>
-  {/each}
+      <Button variant="outline" size="sm" disabled={retrying} onclick={retryProvision}>
+        {retrying ? 'Retrying…' : 'Retry'}
+      </Button>
+    </Alert.Root>
+  {/if}
+
+  {#if settings?.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
+    <Alert.Root class="mx-6 mt-4 border-warning/40">
+      <Alert.Title>Paused: subscription usage limit reached.</Alert.Title>
+      <Alert.Description>
+        New work is on hold until the usage window resets at
+        {new Date(settings.usage_paused_until).toLocaleString()}. The agent resumes automatically.
+      </Alert.Description>
+    </Alert.Root>
+  {/if}
+
+  <div class="flex items-center justify-between px-6 pb-1 pt-4">
+    <div class="flex items-baseline gap-2">
+      {#if settings}
+        <strong class="text-base">{settings.org_name}</strong>
+        {#if outsideSchedule}
+          <span
+            class="rounded-full border border-warning/40 px-2 py-0.5 text-xs text-warning"
+            title="Outside the availability schedule"
+          >
+            ⏰ Outside scheduled hours
+          </span>
+        {/if}
+      {/if}
+    </div>
+    <div class="flex gap-2">
+      <Button variant="outline" size="sm" disabled={checking} onclick={checkIssues}>
+        <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" />
+        {checking ? 'Checking…' : 'Check issues'}
+      </Button>
+      {#if settings}
+        <Button
+          variant={settings.agent_paused ? 'default' : 'outline'}
+          size="sm"
+          onclick={togglePause}
+        >
+          {#if settings.agent_paused}
+            <Play class="size-4" /> Resume agent
+          {:else}
+            <Pause class="size-4" /> Pause agent
+          {/if}
+        </Button>
+      {/if}
+    </div>
+  </div>
+
+  <div
+    class="grid grid-cols-1 items-start gap-3 p-4 lg:min-h-0 lg:flex-1 lg:grid-cols-6 lg:px-6 lg:pb-6"
+  >
+    {#each COLUMNS as column}
+      <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
+        <header
+          class="flex items-center justify-between border-b border-border px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          <span>{column.label}</span>
+          <span>{columns[column.key].length}</span>
+        </header>
+        <div
+          class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
+          use:dndzone={{
+            items: columns[column.key],
+            flipDurationMs: FLIP_MS,
+            dropTargetStyle: {},
+            dropTargetClasses: ['drop-active']
+          }}
+          onconsider={(event) => handleConsider(column.key, event)}
+          onfinalize={(event) => handleFinalize(column.key, event)}
+        >
+          {#each columns[column.key] as task (task.id)}
+            <div>
+              <Card
+                {task}
+                onchange={load}
+                repoName={task.repo_id ? repoNames[task.repo_id] : undefined}
+                suggestionCount={suggestionCounts[task.id] ?? 0}
+              />
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/each}
+  </div>
 </div>
