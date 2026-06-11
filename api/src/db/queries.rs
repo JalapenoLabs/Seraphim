@@ -136,6 +136,23 @@ pub async fn set_paused(pool: &PgPool, paused: bool) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// The global scratchpad shown beside the board.
+pub async fn get_notepad(pool: &PgPool) -> sqlx::Result<String> {
+    sqlx::query_scalar("SELECT notepad FROM settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+}
+
+/// Saves the global scratchpad. Does not touch `updated_at`: the notepad is a
+/// scratchpad saved often and orthogonal to the rest of the settings.
+pub async fn set_notepad(pool: &PgPool, content: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET notepad = $1 WHERE id = 1")
+        .bind(content)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Sets (or clears with `None`) the automatic usage-limit pause: the moment the
 /// agent may resume pulling work once the subscription window resets.
 pub async fn set_usage_paused_until(
