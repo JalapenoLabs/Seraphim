@@ -759,6 +759,30 @@ pub async fn set_task_hold(pool: &PgPool, id: Uuid, hold: bool) -> sqlx::Result<
     .await
 }
 
+/// Flags a task as blocking (or clears it). While a blocking task is in progress,
+/// the agent pulls no new work.
+pub async fn set_task_blocking(pool: &PgPool, id: Uuid, blocking: bool) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET blocking = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(blocking)
+    .fetch_one(pool)
+    .await
+}
+
+/// Whether any blocking task is currently in progress. A fresh task that
+/// finishes (success or failure) leaves `in_progress`, so a blocking task still
+/// sitting here is unfinished, being worked or parked waiting for input, and the
+/// agent must not start anything new.
+pub async fn has_active_blocking_task(pool: &PgPool) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE blocking = TRUE AND board_column = 'in_progress')",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Saves the operator's private scratchpad for a task. Does not touch
 /// `updated_at`: notes are orthogonal to the task's lifecycle and saved often.
 pub async fn set_task_notes(pool: &PgPool, id: Uuid, notes: &str) -> sqlx::Result<()> {

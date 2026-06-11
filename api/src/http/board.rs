@@ -108,3 +108,20 @@ pub async fn set_hold(
     state.notify_board();
     Ok(Json(task))
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BlockingRequest {
+    pub blocking: bool,
+}
+
+/// `POST /api/v1/tasks/:id/blocking` - mark a card blocking: while it is in
+/// progress, the agent starts no new work.
+pub async fn set_blocking(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<BlockingRequest>,
+) -> ApiResult<Json<Task>> {
+    let task = queries::set_task_blocking(&state.db, id, body.blocking).await?;
+    state.notify_board();
+    Ok(Json(task))
+}

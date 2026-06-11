@@ -280,8 +280,13 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
     if let Some(task) = queries::pick_next_ci_fix(&state.db).await? {
         return Ok(Some((task, WorkMode::FixCi)));
     }
-    if let Some(task) = queries::pick_next_todo(&state.db).await? {
-        return Ok(Some((task, WorkMode::Fresh)));
+    // A blocking task in progress (being worked or parked waiting for input)
+    // serializes the queue: pull no new To Do work until it finishes. Resumes
+    // and CI fixes above continue existing in-flight work and are not gated.
+    if !queries::has_active_blocking_task(&state.db).await? {
+        if let Some(task) = queries::pick_next_todo(&state.db).await? {
+            return Ok(Some((task, WorkMode::Fresh)));
+        }
     }
     // Idle: circle back to a PR we gave up on and try once more (cooldown-gated).
     if let Some(task) =
@@ -1018,6 +1023,7 @@ mod tests {
             error: None,
             ci_fix_attempts: 0,
             hold: false,
+            blocking: false,
             notes: String::new(),
             session_id: None,
             started_at: None,

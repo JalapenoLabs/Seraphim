@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/stream", get(sse::task_stream))
         .route("/tasks/:id/move", post(board::move_task))
         .route("/tasks/:id/hold", post(board::set_hold))
+        .route("/tasks/:id/blocking", post(board::set_blocking))
         .route("/tasks/:id/notes", axum::routing::put(tasks::set_notes))
         .route("/tasks/:id/stats", get(stats::task))
         .route("/stats", get(stats::global))

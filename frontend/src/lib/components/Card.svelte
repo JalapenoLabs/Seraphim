@@ -2,7 +2,7 @@
   import type { Task } from '../types'
 
   import { goto } from '$app/navigation'
-  import { Pause } from '@lucide/svelte'
+  import { Pause, Ban } from '@lucide/svelte'
 
   import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
   import { Badge } from './ui/badge'
@@ -37,12 +37,18 @@
   onclick={open}
   onkeydown={(event) => event.key === 'Enter' && open()}
   class="cursor-grab rounded-lg border bg-secondary p-3 transition-colors hover:border-primary {task.hold
-    ? 'border-dashed opacity-60'
-    : 'border-border'}"
+    ? 'border-dashed border-border opacity-60'
+    : task.blocking
+      ? 'border-warning'
+      : 'border-border'}"
 >
   <div class="flex items-center justify-between gap-2">
     <span class="flex min-w-0 items-center gap-1 text-xs tabular-nums text-muted-foreground">
       {#if task.hold}<Pause class="size-3 flex-none" aria-label="On hold" />{/if}
+      {#if task.blocking}<Ban
+          class="size-3 flex-none text-warning"
+          aria-label="Blocking: holds the queue until finished"
+        />{/if}
       <SourceIcon source={task.source_kind} class="size-3.5 flex-none" />
       {#if repoShort}<span class="truncate font-semibold text-primary" title={repoName}>{repoShort}</span>{/if}
       <span class="flex-none">{#if repoShort} · {/if}#{task.external_id}</span>

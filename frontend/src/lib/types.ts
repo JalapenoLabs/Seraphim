@@ -104,6 +104,8 @@ export type Task = {
   error: string | null
   ci_fix_attempts: number
   hold: boolean
+  // While in progress, the agent pulls no new work until this task finishes.
+  blocking: boolean
   // The operator's private scratchpad; stored only here, never sent to the ticket.
   notes: string
   session_id: string | null

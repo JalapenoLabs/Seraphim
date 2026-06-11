@@ -93,6 +93,11 @@ export function setTaskHold(taskId: string, hold: boolean) {
   return apiClient.post(`tasks/${taskId}/hold`, { json: { hold } }).json<Task>()
 }
 
+// Mark a task blocking: while it is in progress, the agent starts no new work.
+export function setTaskBlocking(taskId: string, blocking: boolean) {
+  return apiClient.post(`tasks/${taskId}/blocking`, { json: { blocking } }).json<Task>()
+}
+
 // Save the private per-task notepad. Stored only in our DB, never sent to the ticket.
 export function setTaskNotes(taskId: string, notes: string) {
   return apiClient.put(`tasks/${taskId}/notes`, { json: { notes } }).json<{ saved: boolean }>()
