@@ -75,6 +75,7 @@ pub fn router(state: AppState) -> Router {
             "/repos/:id",
             axum::routing::put(repos::update).delete(repos::delete),
         )
+        .route("/repos/:id/deletion-impact", get(repos::deletion_impact))
         .route("/repos/import-org", post(repos::import_org))
         .route("/sync", post(repos::sync))
         .route("/jira/test", post(jira::test))

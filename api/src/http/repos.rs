@@ -7,7 +7,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
-use crate::db::models::{Repository, ReviewPolicy};
+use crate::db::models::{RepoDeletionImpact, Repository, ReviewPolicy};
 use crate::db::queries;
 use crate::git;
 use crate::state::AppState;
@@ -104,12 +104,22 @@ pub async fn update(
     Ok(Json(repo))
 }
 
-/// `DELETE /api/v1/repos/:id`
+/// `GET /api/v1/repos/:id/deletion-impact` - what a delete would purge, so the
+/// UI can spell it out before the user confirms.
+pub async fn deletion_impact(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<RepoDeletionImpact>> {
+    Ok(Json(queries::repo_deletion_impact(&state.db, id).await?))
+}
+
+/// `DELETE /api/v1/repos/:id` - delete the repo and everything synced from it.
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     queries::delete_repository(&state.db, id).await?;
+    state.notify_board();
     Ok(Json(json!({ "deleted": true })))
 }
 

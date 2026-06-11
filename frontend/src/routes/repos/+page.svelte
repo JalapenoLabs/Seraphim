@@ -1,13 +1,22 @@
 <script lang="ts">
-  import type { Repository, ReviewPolicy } from '$lib/types'
+  import type { RepoDeletionImpact, Repository, ReviewPolicy } from '$lib/types'
 
   import { onMount } from 'svelte'
   import { Pencil, Trash2 } from '@lucide/svelte'
 
-  import { deleteRepo, getSettings, importOrg, listRepos, updateRepo, upsertRepo } from '$lib/api'
+  import {
+    deleteRepo,
+    getSettings,
+    importOrg,
+    listRepos,
+    repoDeletionImpact,
+    updateRepo,
+    upsertRepo
+  } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
   import * as Select from '$lib/components/ui/select'
-  import { Button } from '$lib/components/ui/button'
+  import * as AlertDialog from '$lib/components/ui/alert-dialog'
+  import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
@@ -157,9 +166,39 @@
     await load()
   }
 
-  async function remove(repoId: string) {
-    await deleteRepo(repoId)
-    await load()
+  // Deleting a repo cascades to every task synced from it (and their logs,
+  // decisions, and notes), so confirm first and spell out the impact.
+  let deleteTarget = $state<Repository | null>(null)
+  let deleteImpact = $state<RepoDeletionImpact | null>(null)
+  let deleting = $state(false)
+
+  function askDelete(repo: Repository) {
+    deleteTarget = repo
+    deleteImpact = null
+    repoDeletionImpact(repo.id)
+      .then((impact) => {
+        // Ignore a late response if the user has since opened a different repo.
+        if (deleteTarget?.id === repo.id) {
+          deleteImpact = impact
+        }
+      })
+      .catch((error) => console.debug('failed to load deletion impact', error))
+  }
+
+  async function confirmDelete() {
+    const target = deleteTarget
+    if (!target) {
+      return
+    }
+    deleting = true
+    try {
+      await deleteRepo(target.id)
+      deleteTarget = null
+      deleteImpact = null
+      await load()
+    } finally {
+      deleting = false
+    }
   }
 
   async function runImportOrg() {
@@ -227,7 +266,7 @@
                 size="icon"
                 title="Delete"
                 class="text-destructive hover:text-destructive"
-                onclick={() => remove(repo.id)}
+                onclick={() => askDelete(repo)}
               >
                 <Trash2 class="size-4" />
               </Button>
@@ -325,3 +364,60 @@
     </Card.Content>
   </Card.Root>
 </div>
+
+<AlertDialog.Root
+  open={deleteTarget !== null}
+  onOpenChange={(open) => {
+    if (!open) {
+      deleteTarget = null
+    }
+  }}
+>
+  <AlertDialog.Content>
+    {#if deleteTarget}
+      <AlertDialog.Header>
+        <AlertDialog.Title>Delete {deleteTarget.full_name}?</AlertDialog.Title>
+        <AlertDialog.Description>
+          This permanently removes the repository and everything synced from it. This cannot be
+          undone.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+
+      <div class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
+        {#if deleteImpact}
+          <p class="mb-1 font-medium">This will also delete:</p>
+          <ul class="list-disc space-y-0.5 pl-5 text-muted-foreground">
+            <li>
+              {deleteImpact.tasks}
+              {deleteImpact.tasks === 1 ? 'task' : 'tasks'} (issues on the board)
+            </li>
+            <li>
+              {deleteImpact.turns} agent {deleteImpact.turns === 1 ? 'turn' : 'turns'} with
+              {deleteImpact.events} activity log {deleteImpact.events === 1 ? 'event' : 'events'}
+            </li>
+            <li>
+              {deleteImpact.questions}
+              {deleteImpact.questions === 1 ? 'decision' : 'decisions'} and
+              {deleteImpact.suggestions} environment {deleteImpact.suggestions === 1
+                ? 'note'
+                : 'notes'}
+            </li>
+          </ul>
+        {:else}
+          <p class="text-muted-foreground">Counting what will be removed…</p>
+        {/if}
+      </div>
+
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action
+          class={buttonVariants({ variant: 'destructive' })}
+          disabled={deleting}
+          onclick={confirmDelete}
+        >
+          {deleting ? 'Deleting…' : 'Delete repository'}
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    {/if}
+  </AlertDialog.Content>
+</AlertDialog.Root>

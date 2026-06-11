@@ -18,6 +18,7 @@ import type {
   NetworkAccessLevel,
   PendingQuestion,
   Question,
+  RepoDeletionImpact,
   Repository,
   ReviewPolicy,
   Settings,
@@ -112,6 +113,11 @@ export function upsertRepo(body: UpsertRepoRequest) {
 // full_name, would do).
 export function updateRepo(repoId: string, body: UpsertRepoRequest) {
   return apiClient.put(`repos/${repoId}`, { json: body }).json<Repository>()
+}
+
+// What a delete would purge, so the confirmation can spell it out first.
+export function repoDeletionImpact(repoId: string) {
+  return apiClient.get(`repos/${repoId}/deletion-impact`).json<RepoDeletionImpact>()
 }
 
 export function deleteRepo(repoId: string) {
