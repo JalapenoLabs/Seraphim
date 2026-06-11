@@ -52,6 +52,7 @@ pub struct UpdateSettingsRequest {
     pub usage_limit_pause_enabled: Option<bool>,
     pub usage_limit_threshold: Option<i32>,
     pub post_thoughts_enabled: Option<bool>,
+    pub close_issue_on_done: Option<bool>,
     pub jira_enabled: Option<bool>,
     pub jira_deployment: Option<JiraDeployment>,
     pub jira_base_url: Option<String>,
@@ -86,6 +87,7 @@ pub async fn update(
         body.jira_deployment,
         body.jira_base_url,
         body.jira_email,
+        body.close_issue_on_done,
     )
     .await?;
     state.notify_board();

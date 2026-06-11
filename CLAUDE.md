@@ -184,9 +184,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL`. One task awaited to completion before
    the next (no overlap).
 3. **review** — watches every open PR's CI: green → squash-merge
-   (`auto_squash_merge` repos) → **Done**, else wait; red → hand back to the
-   agent, bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for
-   a human. A failed merge (e.g. base conflict) also parks it `ci_blocked` rather
+   (`auto_squash_merge` repos) → **Done** (and, for a GitHub-sourced task, closes
+   the linked issue with `state_reason: "completed"` when `close_issue_on_done` is
+   set, the default; best-effort), else wait; red → hand back to the agent,
+   bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for a
+   human. A failed merge (e.g. base conflict) also parks it `ci_blocked` rather
    than retrying forever.
 
 ## Ports & URLs

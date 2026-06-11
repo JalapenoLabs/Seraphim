@@ -253,6 +253,7 @@ mod tests {
             usage_limit_threshold: 80,
             usage_paused_until: None,
             post_thoughts_enabled: false,
+            close_issue_on_done: true,
             jira_enabled: false,
             jira_deployment: crate::db::models::JiraDeployment::Cloud,
             jira_base_url: String::new(),
