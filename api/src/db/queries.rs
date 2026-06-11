@@ -33,6 +33,7 @@ const SETTINGS_COLUMNS: &str =
      availability_skip_dates, network_access_level, network_access_domains, \
      network_access_include_defaults, usage_limit_pause_enabled, \
      usage_limit_threshold, usage_paused_until, post_thoughts_enabled, \
+     close_issue_on_done, \
      jira_enabled, jira_deployment, jira_base_url, jira_email, \
      (jira_api_token <> '') AS jira_token_set, \
      (github_webhook_secret <> '') AS github_webhook_secret_set, \
@@ -75,6 +76,7 @@ pub async fn update_settings(
     jira_deployment: Option<JiraDeployment>,
     jira_base_url: Option<String>,
     jira_email: Option<String>,
+    close_issue_on_done: Option<bool>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -101,6 +103,7 @@ pub async fn update_settings(
          jira_deployment = COALESCE($19, jira_deployment), \
          jira_base_url = COALESCE($20, jira_base_url), \
          jira_email = COALESCE($21, jira_email), \
+         close_issue_on_done = COALESCE($22, close_issue_on_done), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -126,6 +129,7 @@ pub async fn update_settings(
     .bind(jira_deployment)
     .bind(jira_base_url)
     .bind(jira_email)
+    .bind(close_issue_on_done)
     .fetch_one(pool)
     .await
 }

@@ -162,6 +162,9 @@ export type Settings = {
   usage_paused_until: string | null
   // Post a per-turn summary of the agent's reasoning back to the source issue.
   post_thoughts_enabled: boolean
+  // Close the linked GitHub issue (state_reason "completed") when a task
+  // auto-merges to Done. On by default.
+  close_issue_on_done: boolean
   // Jira connection. Cloud uses email + API token; Server/DC uses a PAT.
   jira_enabled: boolean
   jira_deployment: JiraDeployment

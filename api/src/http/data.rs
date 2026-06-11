@@ -45,6 +45,9 @@ pub struct SettingsExport {
     pub usage_limit_threshold: i32,
     #[serde(default)]
     pub post_thoughts_enabled: bool,
+    // Matches the database default (TRUE) so older bundles keep closing issues.
+    #[serde(default = "default_true")]
+    pub close_issue_on_done: bool,
     // Jira connection (non-secret parts only; the API token is never exported,
     // like the Claude/GitHub tokens). Followed boards are machine-specific (they
     // reference repo ids), so they are not part of the bundle.
@@ -128,6 +131,7 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             usage_limit_pause_enabled: settings.usage_limit_pause_enabled,
             usage_limit_threshold: settings.usage_limit_threshold,
             post_thoughts_enabled: settings.post_thoughts_enabled,
+            close_issue_on_done: settings.close_issue_on_done,
             jira_enabled: settings.jira_enabled,
             jira_deployment: settings.jira_deployment,
             jira_base_url: settings.jira_base_url,
@@ -183,6 +187,7 @@ pub async fn import(
         Some(settings.jira_deployment),
         Some(settings.jira_base_url),
         Some(settings.jira_email),
+        Some(settings.close_issue_on_done),
     )
     .await?;
 

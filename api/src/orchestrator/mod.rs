@@ -907,6 +907,13 @@ async fn review_once(state: &AppState) -> Result<()> {
                         .await?;
                         state.notify_board();
                         info!(task_id = %task.id, "auto-merged and marked done");
+
+                        // Close the linked GitHub issue so Done doesn't leave it
+                        // open. The agent merges into `develop`, so GitHub's own
+                        // keyword-close (default-branch only) never fires. Best-
+                        // effort and idempotent: a failure (or an already-closed
+                        // issue) never affects the completed task.
+                        close_linked_issue(&github, &settings, &task, owner, repo_name).await;
                     }
                     // A merge can fail for reasons retrying won't fix (conflicts
                     // with the base, restricted merge settings). Record it and
@@ -928,6 +935,42 @@ async fn review_once(state: &AppState) -> Result<()> {
 }
 
 // --- Helpers -----------------------------------------------------------------
+
+/// Closes the GitHub issue a finished task came from, with
+/// `state_reason: "completed"`. Best-effort: only for GitHub-sourced tasks with a
+/// real issue number, gated by the `close_issue_on_done` setting, and any failure
+/// is logged and swallowed so it never affects the completed task. Closing an
+/// already-closed issue is harmless.
+async fn close_linked_issue(
+    github: &octocrab::Octocrab,
+    settings: &crate::db::models::Settings,
+    task: &Task,
+    owner: &str,
+    repo_name: &str,
+) {
+    if !settings.close_issue_on_done
+        || task.source_kind != SourceKind::Github
+        || task.external_id.trim().is_empty()
+    {
+        return;
+    }
+
+    match git::set_issue_state(
+        github,
+        owner,
+        repo_name,
+        &task.external_id,
+        "closed",
+        Some("completed"),
+    )
+    .await
+    {
+        Ok(_) => info!(task_id = %task.id, issue = %task.external_id, "closed the linked issue"),
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "failed to close the linked issue");
+        }
+    }
+}
 
 /// Records a task failure: captures the message and surfaces it in `In Review`.
 async fn fail(state: &AppState, task: &Task, message: &str) -> Result<()> {

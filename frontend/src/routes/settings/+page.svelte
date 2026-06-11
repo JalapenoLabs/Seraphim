@@ -119,6 +119,7 @@
   let networkSavedAt = $state<string | null>(null)
   let usageSavedAt = $state<string | null>(null)
   let thoughtsSavedAt = $state<string | null>(null)
+  let closeIssueSavedAt = $state<string | null>(null)
 
   // Order and copy mirror the claude.ai network-access selector.
   const NETWORK_LEVELS: { value: NetworkAccessLevel; title: string; description: string }[] = [
@@ -392,6 +393,14 @@
     }
     settings = await updateSettings({ post_thoughts_enabled: settings.post_thoughts_enabled })
     thoughtsSavedAt = new Date().toLocaleTimeString()
+  }
+
+  async function saveCloseIssue() {
+    if (!settings) {
+      return
+    }
+    settings = await updateSettings({ close_issue_on_done: settings.close_issue_on_done })
+    closeIssueSavedAt = new Date().toLocaleTimeString()
   }
 
   function addEnvRow() {
@@ -1020,6 +1029,22 @@
         <div class="flex items-center gap-3">
           <Button onclick={saveThoughts}>Save</Button>
           {#if thoughtsSavedAt}<span class="text-sm text-muted-foreground">Saved at {thoughtsSavedAt}</span>{/if}
+        </div>
+
+        <div class="border-t border-border pt-5">
+          <div class="flex items-center gap-2">
+            <Switch id="close-issue-on-done" bind:checked={settings.close_issue_on_done} />
+            <Label for="close-issue-on-done">Close the linked issue when a task auto-merges to done</Label>
+          </div>
+          <p class="mt-1.5 text-sm text-muted-foreground">
+            On by default. The agent merges into <code class="rounded bg-secondary px-1 py-0.5">develop</code>, so
+            GitHub's own keyword-close (which fires only on the default branch) never triggers. Turn this off
+            to rely on that instead.
+          </p>
+          <div class="mt-3 flex items-center gap-3">
+            <Button onclick={saveCloseIssue}>Save</Button>
+            {#if closeIssueSavedAt}<span class="text-sm text-muted-foreground">Saved at {closeIssueSavedAt}</span>{/if}
+          </div>
         </div>
       </Card.Content>
     </Card.Root>

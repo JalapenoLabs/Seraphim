@@ -100,6 +100,8 @@ async fn bootstrap_settings(db: &sqlx::PgPool, config: &Config) -> Result<()> {
             None,
             None,
             None,
+            // close_issue_on_done: settings-only, keeps its DB default.
+            None,
         )
         .await?;
     }

@@ -199,6 +199,7 @@ export type UpdateSettingsRequest = {
   usage_limit_pause_enabled?: boolean
   usage_limit_threshold?: number
   post_thoughts_enabled?: boolean
+  close_issue_on_done?: boolean
   jira_enabled?: boolean
   jira_deployment?: JiraDeployment
   jira_base_url?: string

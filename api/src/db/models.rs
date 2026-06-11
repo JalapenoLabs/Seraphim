@@ -193,6 +193,9 @@ pub struct Settings {
     pub usage_paused_until: Option<DateTime<Utc>>,
     /// Post a per-turn summary of the agent's reasoning back to the source issue.
     pub post_thoughts_enabled: bool,
+    /// Close the linked GitHub issue (`state_reason: "completed"`) when a task
+    /// auto-merges to Done. Off lets operators rely on GitHub's keyword-on-main.
+    pub close_issue_on_done: bool,
     /// Whether the Jira integration is turned on (a connection is configured).
     pub jira_enabled: bool,
     /// Cloud vs Server/Data Center, deciding auth scheme and REST version.
