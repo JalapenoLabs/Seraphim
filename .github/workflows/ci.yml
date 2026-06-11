@@ -21,7 +21,7 @@ jobs:
 
   api:
     name: API (Rust)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fedora]
     defaults:
       run:
         working-directory: api
@@ -54,7 +54,7 @@ jobs:
 
   frontend:
     name: Frontend (SvelteKit)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fedora]
     defaults:
       run:
         working-directory: frontend
@@ -83,7 +83,7 @@ jobs:
 
   images:
     name: Docker images
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fedora]
     steps:
       - uses: actions/checkout@v4
 
