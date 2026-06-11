@@ -4,7 +4,7 @@
   import { goto } from '$app/navigation'
   import { Pause } from '@lucide/svelte'
 
-  import { STATUS_BADGE, STATUS_LABELS } from '../types'
+  import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
   import { Badge } from './ui/badge'
   import SourceIcon from './SourceIcon.svelte'
 
@@ -23,6 +23,9 @@
   // Show just the repo name (after the owner); the full owner/repo is on hover.
   const repoShort = $derived(repoName ? repoName.split('/').pop() : null)
 
+  // The source ticket's open/closed (GitHub) or workflow (Jira) state, or null.
+  const ticketState = $derived(ticketStateBadge(task))
+
   function open() {
     goto(`/task/${task.id}`)
   }
@@ -38,10 +41,16 @@
     : 'border-border'}"
 >
   <div class="flex items-center justify-between gap-2">
-    <span class="flex min-w-0 items-center gap-1 truncate text-xs tabular-nums text-muted-foreground">
+    <span class="flex min-w-0 items-center gap-1 text-xs tabular-nums text-muted-foreground">
       {#if task.hold}<Pause class="size-3 flex-none" aria-label="On hold" />{/if}
       <SourceIcon source={task.source_kind} class="size-3.5 flex-none" />
-      {#if repoShort}<span class="font-semibold text-primary" title={repoName}>{repoShort}</span> · {/if}#{task.external_id}
+      {#if repoShort}<span class="truncate font-semibold text-primary" title={repoName}>{repoShort}</span>{/if}
+      <span class="flex-none">{#if repoShort} · {/if}#{task.external_id}</span>
+      {#if ticketState}
+        <Badge variant="outline" class="flex-none px-1.5 py-0 text-[10px] {ticketState.class}">
+          {ticketState.label}
+        </Badge>
+      {/if}
     </span>
     <Badge variant="outline" class={STATUS_BADGE[task.status]}>
       {STATUS_LABELS[task.status] ?? task.status}
