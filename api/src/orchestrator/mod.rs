@@ -27,7 +27,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::claude::{run_turn, AgentEventKind, TurnArgs};
-use crate::db::models::{ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
+use crate::db::models::{Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
 use crate::db::queries;
 use crate::git;
 use crate::secrets::Scrubber;
@@ -365,7 +365,8 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         queries::acknowledge_answers(&state.db, task.id).await?;
         prompt
     } else {
-        prompt::build(&settings, &repo, &task, &branch)
+        let comments = fetch_issue_comments(state, &repo, &task).await;
+        prompt::build(&settings, &repo, &task, &branch, &comments)
     };
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
@@ -468,6 +469,7 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
         None => Vec::new(),
     };
 
+    let comments = fetch_issue_comments(state, &repo, &task).await;
     let prompt = if revisit {
         prompt::build_revisit(
             &settings,
@@ -475,9 +477,10 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
             &task,
             &branch,
             task.error.as_deref().unwrap_or_default(),
+            &comments,
         )
     } else {
-        prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing)
+        prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing, &comments)
     };
     let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
@@ -943,6 +946,37 @@ async fn detect_pr(
         }
     }
     Ok(None)
+}
+
+/// Best-effort fetch of a task's issue comments so the brief carries the full
+/// discussion, not just the description.
+///
+/// Returns empty for non-GitHub sources or when GitHub is unreachable: the agent
+/// then works from the description alone (as it did before), rather than the task
+/// failing over missing comments.
+async fn fetch_issue_comments(
+    state: &AppState,
+    repo: &Repository,
+    task: &Task,
+) -> Vec<git::IssueComment> {
+    if task.source_kind != SourceKind::Github {
+        return Vec::new();
+    }
+
+    let fetched = async {
+        let github = state.github().await?;
+        let (owner, repo_name) = split_full_name(&repo.full_name)?;
+        git::list_issue_comments(&github, owner, repo_name, &task.external_id).await
+    }
+    .await;
+
+    match fetched {
+        Ok(comments) => comments,
+        Err(error) => {
+            warn!(task_id = %task.id, %error, "could not fetch issue comments; using the description only");
+            Vec::new()
+        }
+    }
 }
 
 /// Splits `owner/repo` into its parts.

@@ -1,18 +1,29 @@
 //! Composes the prompts handed to Claude Code for a task.
 //!
 //! Both prompts share the same context header (org and global instructions, the
-//! repo instructions, and the issue itself), then append a task-specific working
-//! agreement: a fresh-work protocol that ends in a PR, or a CI-fix protocol that
-//! re-engages on the PR's existing branch.
+//! repo instructions, and the issue itself with its full comment thread), then
+//! append a task-specific working agreement: a fresh-work protocol that ends in a
+//! PR, or a CI-fix protocol that re-engages on the PR's existing branch.
 
 use crate::db::models::{AnswerKind, Question, Repository, Settings, Task};
+use crate::git::IssueComment;
 
 use super::provision::repo_dir_name;
 
 /// Builds the instruction text for working `task` fresh on a new `branch`.
-pub fn build(settings: &Settings, repo: &Repository, task: &Task, branch: &str) -> String {
+///
+/// `comments` is the issue's discussion thread (empty when there is none or it
+/// could not be fetched); it is rendered into the brief so the agent works from
+/// the full conversation, not just the title and description.
+pub fn build(
+    settings: &Settings,
+    repo: &Repository,
+    task: &Task,
+    branch: &str,
+    comments: &[IssueComment],
+) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
-    let mut prompt = context_header(settings, repo, task);
+    let mut prompt = context_header(settings, repo, task, comments);
 
     prompt.push_str(&format!(
         "# Working agreement\n\
@@ -50,6 +61,7 @@ pub fn build_ci_fix(
     task: &Task,
     branch: &str,
     failing_checks: &[String],
+    comments: &[IssueComment],
 ) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let checks = if failing_checks.is_empty() {
@@ -57,7 +69,7 @@ pub fn build_ci_fix(
     } else {
         failing_checks.join(", ")
     };
-    let mut prompt = context_header(settings, repo, task);
+    let mut prompt = context_header(settings, repo, task, comments);
 
     prompt.push_str(&format!(
         "# Fixing CI\n\
@@ -98,6 +110,7 @@ pub fn build_revisit(
     task: &Task,
     branch: &str,
     reason: &str,
+    comments: &[IssueComment],
 ) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let blocker = if reason.trim().is_empty() {
@@ -105,7 +118,7 @@ pub fn build_revisit(
     } else {
         reason.trim().to_string()
     };
-    let mut prompt = context_header(settings, repo, task);
+    let mut prompt = context_header(settings, repo, task, comments);
 
     prompt.push_str(&format!(
         "# Revisiting a stuck pull request\n\
@@ -133,8 +146,13 @@ pub fn build_revisit(
 }
 
 /// The shared prompt header: who the agent is, the org/global/repo instructions,
-/// and the issue under work.
-fn context_header(settings: &Settings, repo: &Repository, task: &Task) -> String {
+/// the issue under work, and its comment thread.
+fn context_header(
+    settings: &Settings,
+    repo: &Repository,
+    task: &Task,
+    comments: &[IssueComment],
+) -> String {
     let mut prompt = String::new();
 
     prompt.push_str(&format!(
@@ -167,10 +185,63 @@ fn context_header(settings: &Settings, repo: &Repository, task: &Task) -> String
         url = task.url,
     ));
 
+    // The full discussion (when any), so the agent treats comments as part of the
+    // brief rather than only the title and description.
+    prompt.push_str(&render_discussion(comments));
+
     // Shared by every mode: noticing missing tooling can happen on any run, so
     // the recommend-improvements guidance lives in the common header.
     prompt.push_str(ENVIRONMENT_SUGGESTIONS);
     prompt
+}
+
+/// Renders the issue's comment thread for the brief, oldest first.
+///
+/// Comment bodies are kept verbatim (Markdown intact), so any attachments,
+/// which GitHub embeds as image/file links in the issue or comment Markdown,
+/// reach the agent as openable URLs. Returns an empty string when there are no
+/// comments with content, so the header stays unchanged for plain issues.
+fn render_discussion(comments: &[IssueComment]) -> String {
+    // Skip comments with no text (e.g. an attachment-only body GitHub stored
+    // empty); they would add a header with nothing under it.
+    let rendered: Vec<&IssueComment> = comments
+        .iter()
+        .filter(|comment| !comment.body.as_deref().unwrap_or("").trim().is_empty())
+        .collect();
+    if rendered.is_empty() {
+        return String::new();
+    }
+
+    let mut section = format!(
+        "# Issue discussion\n\
+         The issue has {count} comment{plural} below, oldest first. Treat them as part \
+         of the task: they may clarify, refine, correct, or override the description \
+         above. Any images or files attached to the issue or a comment appear as links \
+         in this Markdown; open them with `gh` or `curl` if you need their contents.\n\n",
+        count = rendered.len(),
+        plural = if rendered.len() == 1 { "" } else { "s" },
+    );
+
+    for (index, comment) in rendered.iter().enumerate() {
+        let body = comment.body.as_deref().unwrap_or("").trim();
+        // GitHub's author_association ("OWNER", "MEMBER", "CONTRIBUTOR", ...) helps
+        // the agent weigh a maintainer's note over a passer-by's; omit the noise of
+        // "NONE" and the rare empty value.
+        let association = match comment.author_association.trim() {
+            "" | "NONE" => String::new(),
+            other => format!(", {other}"),
+        };
+        // The created date alone (the leading "YYYY-MM-DD" of the ISO timestamp) is
+        // enough ordering context without the verbose time component.
+        let date = comment.created_at.get(0..10).unwrap_or(&comment.created_at);
+        section.push_str(&format!(
+            "## Comment {n} by {author}{association} ({date})\n{body}\n\n",
+            n = index + 1,
+            author = comment.user.login,
+        ));
+    }
+
+    section
 }
 
 /// Guidance, appended to every task prompt, on recommending setup improvements.
@@ -245,7 +316,26 @@ pub fn build_resume(repo: &Repository, task: &Task, branch: &str, answers: &[Que
 mod tests {
     use super::*;
     use crate::db::models::{QuestionOption, QuestionStatus, SourceKind, TaskColumn, TaskStatus};
+    use crate::git::IssueUser;
     use sqlx::types::Json;
+
+    fn comment(
+        login: &str,
+        association: &str,
+        created_at: &str,
+        body: Option<&str>,
+    ) -> IssueComment {
+        IssueComment {
+            user: IssueUser {
+                login: login.to_string(),
+                avatar_url: String::new(),
+                html_url: String::new(),
+            },
+            body: body.map(str::to_string),
+            created_at: created_at.to_string(),
+            author_association: association.to_string(),
+        }
+    }
 
     fn question(prompt: &str, kind: AnswerKind, answer: &str) -> Question {
         Question {
@@ -341,5 +431,51 @@ mod tests {
         assert!(prompt.contains("declined to choose"));
         assert!(prompt.contains("let's talk it over"));
         assert!(prompt.contains("seraphim-ask"));
+    }
+
+    #[test]
+    fn discussion_renders_every_comment_with_its_attachments() {
+        let comments = [
+            comment(
+                "maintainer",
+                "OWNER",
+                "2026-01-02T10:00:00Z",
+                Some("Use Postgres, not SQLite."),
+            ),
+            comment(
+                "passerby",
+                "NONE",
+                "2026-01-03T11:30:00Z",
+                Some("Here is a screenshot ![shot](https://example.com/a.png)"),
+            ),
+        ];
+        let section = render_discussion(&comments);
+
+        // The section header counts the comments and both render verbatim, oldest
+        // first, so the attachment link survives for the agent to open.
+        assert!(section.starts_with("# Issue discussion"));
+        assert!(section.contains("2 comments below"));
+        assert!(section.contains("## Comment 1 by maintainer, OWNER (2026-01-02)"));
+        assert!(section.contains("Use Postgres, not SQLite."));
+        assert!(section.contains("## Comment 2 by passerby (2026-01-03)"));
+        assert!(section.contains("https://example.com/a.png"));
+        // A "NONE" association is dropped, and the timestamp is trimmed to the day.
+        assert!(!section.contains("NONE"));
+        assert!(!section.contains("T11:30:00Z"));
+    }
+
+    #[test]
+    fn discussion_is_empty_without_substantive_comments() {
+        // Nothing to render for no comments, or a comment whose body is blank.
+        assert!(render_discussion(&[]).is_empty());
+        let blank = [comment(
+            "ghost",
+            "NONE",
+            "2026-01-01T00:00:00Z",
+            Some("   "),
+        )];
+        assert!(render_discussion(&blank).is_empty());
+        let bodiless = [comment("ghost", "NONE", "2026-01-01T00:00:00Z", None)];
+        assert!(render_discussion(&bodiless).is_empty());
     }
 }
