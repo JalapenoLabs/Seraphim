@@ -19,7 +19,9 @@
     syncNow
   } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
+  import { type SortKey, sortTasks, loadSort, saveSort } from '$lib/columnSort'
   import Card from '$lib/components/Card.svelte'
+  import ColumnSort from '$lib/components/ColumnSort.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Textarea } from '$lib/components/ui/textarea'
@@ -43,6 +45,26 @@
   let eventSource: EventSource | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
   let repoNames = $state<Record<string, string>>({})
+
+  // Per-column sort level (default "custom" = the board's manual order). Hydrated
+  // from session storage on mount; the header sort button changes it.
+  let sortState = $state<Record<TaskColumn, SortKey>>({
+    available: 'custom',
+    todo: 'custom',
+    in_progress: 'custom',
+    in_review: 'custom',
+    done: 'custom',
+    ignored: 'custom'
+  })
+
+  // Re-sorts a column when its sort level changes, and persists the choice. The
+  // sort is applied imperatively (here and in `load`), never reactively, so it
+  // never fights svelte-dnd-action mid-drag.
+  function changeSort(column: TaskColumn, next: SortKey) {
+    sortState[column] = next
+    saveSort(column, next)
+    columns[column] = sortTasks(columns[column], next)
+  }
 
   // The Done column hides older items by default so it doesn't grow without
   // bound: only tasks finished today are shown until the user reveals the rest
@@ -122,7 +144,10 @@
       grouped[task.board_column].push(task)
     }
     for (const key of Object.keys(grouped) as TaskColumn[]) {
+      // Base order is the manual (position) order; then apply the column's sort
+      // on top (a no-op for "custom").
       grouped[key].sort((left, right) => left.position - right.position)
+      grouped[key] = sortTasks(grouped[key], sortState[key])
     }
     columns = grouped
   }
@@ -204,6 +229,10 @@
   }
 
   onMount(() => {
+    // Hydrate each column's saved sort before the first load so it applies at once.
+    for (const column of COLUMNS) {
+      sortState[column.key] = loadSort(column.key)
+    }
     load()
     // The notepad loads once, separately from the board: the board stream below
     // reloads on every change, which must never clobber an in-progress edit.
@@ -336,7 +365,14 @@
               </button>
             {/if}
           </div>
-          <span>{collapsed ? doneTodayCount : columns[column.key].length}</span>
+          <div class="flex items-center gap-1.5">
+            <ColumnSort
+              value={sortState[column.key]}
+              onchange={(next) => changeSort(column.key, next)}
+              label={column.label}
+            />
+            <span>{collapsed ? doneTodayCount : columns[column.key].length}</span>
+          </div>
         </header>
         <div
           class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
