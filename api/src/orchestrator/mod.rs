@@ -26,8 +26,11 @@ use futures::StreamExt;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
+use crate::automation::{self, QueuePosition, RuleAction, RuleContext};
 use crate::claude::{run_turn, AgentEventKind, TurnArgs};
-use crate::db::models::{Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus};
+use crate::db::models::{
+    AutomationRule, Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus,
+};
 use crate::db::queries;
 use crate::git;
 use crate::secrets::Scrubber;
@@ -218,6 +221,97 @@ async fn top_of_column_position(state: &AppState, column: TaskColumn) -> Result<
         .await?
         .unwrap_or(0.0)
         - 1.0)
+}
+
+/// The position that places a card at the bottom of `column` (just below the
+/// current lowest).
+async fn bottom_of_column_position(state: &AppState, column: TaskColumn) -> Result<f64> {
+    Ok(queries::max_position_in_column(&state.db, column)
+        .await?
+        .unwrap_or(0.0)
+        + 1.0)
+}
+
+// --- Automation rules --------------------------------------------------------
+
+/// The short source name a rule's `source_kind` is matched against.
+fn source_name(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::Github => "github",
+        SourceKind::Jira => "jira",
+        SourceKind::Internal => "internal",
+    }
+}
+
+/// The action of the first enabled rule (in order) whose source, trigger, and
+/// conditions all match the event, or `None` if nothing matches.
+fn first_matching_action(
+    rules: &[AutomationRule],
+    source: SourceKind,
+    ctx: &RuleContext,
+) -> Option<QueuePosition> {
+    let name = source_name(source);
+    rules
+        .iter()
+        .filter(|rule| rule.source_kind == "any" || rule.source_kind == name)
+        .filter(|rule| rule.triggers.0.contains(&ctx.trigger))
+        .find(|rule| rule.criteria.0.matches(ctx))
+        .map(|rule| match &rule.action.0 {
+            RuleAction::MoveToTodo { position } => *position,
+        })
+}
+
+/// Evaluates the automation rules for a GitHub issue event. If a rule matches,
+/// the issue is ensured-tracked and moved to To Do (top or bottom of the queue),
+/// even if the repo's label filter would otherwise exclude it. Returns whether
+/// the board changed. Only meaningful for open issues.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_github_automation(
+    state: &AppState,
+    repo: &Repository,
+    issue: &git::OpenIssue,
+    labels: &[String],
+    issue_state: &str,
+    trigger: automation::Trigger,
+    comment: &str,
+    comment_author: &str,
+) -> Result<bool> {
+    let rules = queries::list_enabled_automation_rules(&state.db).await?;
+    if rules.is_empty() {
+        return Ok(false);
+    }
+
+    let ctx = RuleContext {
+        trigger,
+        repo: &repo.full_name,
+        author: &issue.author_login,
+        labels,
+        title: &issue.title,
+        body: &issue.body,
+        state: issue_state,
+        comment,
+        comment_author,
+    };
+    let Some(position) = first_matching_action(&rules, SourceKind::Github, &ctx) else {
+        return Ok(false);
+    };
+
+    // A rule matched: ensure the issue is tracked, then move its card to To Do.
+    upsert_github_issue(state, repo.id, issue, "open").await?;
+    let external_id = issue.number.to_string();
+    let Some(task) =
+        queries::find_issue_task(&state.db, SourceKind::Github, Some(repo.id), &external_id)
+            .await?
+    else {
+        return Ok(false);
+    };
+    let target = match position {
+        QueuePosition::Top => top_of_column_position(state, TaskColumn::Todo).await?,
+        QueuePosition::Bottom => bottom_of_column_position(state, TaskColumn::Todo).await?,
+    };
+    queries::move_task(&state.db, task.id, TaskColumn::Todo, target).await?;
+    info!(task_id = %task.id, ?position, "automation matched: moved issue to To Do");
+    Ok(true)
 }
 
 /// Upserts a GitHub issue as a task: a brand-new one lands at the top of

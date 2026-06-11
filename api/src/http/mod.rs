@@ -4,6 +4,7 @@
 //! turns an `eyre` error into a 500 with a JSON body, so the happy path stays
 //! free of error plumbing.
 
+mod automation;
 mod board;
 mod data;
 mod jira;
@@ -109,6 +110,14 @@ pub fn router(state: AppState) -> Router {
         .route("/workspace/restart", post(workspace::restart))
         .route("/workspace/recreate", post(workspace::recreate))
         .route("/workspace/provision", post(workspace::provision))
+        .route(
+            "/automation/rules",
+            get(automation::list).post(automation::create),
+        )
+        .route(
+            "/automation/rules/:id",
+            axum::routing::put(automation::update).delete(automation::delete),
+        )
         .route("/export", get(data::export))
         .route("/import", post(data::import))
         .with_state(state);

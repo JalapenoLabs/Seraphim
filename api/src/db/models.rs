@@ -333,6 +333,25 @@ pub struct JiraBoard {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A user-defined automation rule. When an issue event matches, the action runs.
+/// The trigger list, condition group, and action are stored as JSON, validated
+/// against the typed `automation` structs on read/write.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AutomationRule {
+    pub id: Uuid,
+    pub name: String,
+    pub enabled: bool,
+    /// `github` / `jira` / `internal` / `any`.
+    pub source_kind: String,
+    pub triggers: Json<Vec<crate::automation::Trigger>>,
+    pub criteria: Json<crate::automation::RuleGroup>,
+    pub action: Json<crate::automation::RuleAction>,
+    /// Fractional rank: rules are evaluated in this order and the first match wins.
+    pub position: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A kanban card: one issue the agent may work.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Task {
