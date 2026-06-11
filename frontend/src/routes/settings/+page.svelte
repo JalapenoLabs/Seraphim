@@ -27,6 +27,7 @@
     listJiraBoards,
     listRepos,
     recreateWorkspace,
+    resetStats,
     restartWorkspace,
     setEnvVars,
     setTokens,
@@ -446,6 +447,16 @@
     workspaceMessage = 'Recreating + provisioning…'
     await recreateWorkspace()
     workspaceMessage = 'Workspace recreated; repos + config reprovisioned.'
+  }
+
+  let statsMessage = $state<string | null>(null)
+  async function runResetStats() {
+    if (!confirm('Reset global statistics? Cost, tokens, and time totals start from zero.')) {
+      return
+    }
+    statsMessage = 'Resetting…'
+    await resetStats()
+    statsMessage = 'Global statistics reset.'
   }
 
   async function downloadExport() {
@@ -1095,6 +1106,21 @@
           <Button onclick={saveEnv}>Save variables</Button>
           {#if envMessage}<span class="text-sm text-muted-foreground">{envMessage}</span>{/if}
         </div>
+      </Card.Content>
+    </Card.Root>
+
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Statistics</Card.Title>
+        <Card.Description>
+          The live stats on the board and task pages count cost, tokens, and time. Reset clears the
+          global totals (non-destructive: it just starts counting from now, the history is kept).
+          A hard task reset (re-queuing a card) resets that task's own time.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="flex items-center gap-3">
+        <Button variant="outline" onclick={runResetStats}>Reset global statistics</Button>
+        {#if statsMessage}<span class="text-sm text-muted-foreground">{statsMessage}</span>{/if}
       </Card.Content>
     </Card.Root>
 

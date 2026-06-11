@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::PgPool;
@@ -14,8 +14,8 @@ use uuid::Uuid;
 use super::models::{
     AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, JiraBoard, JiraDeployment,
     NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus,
-    RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, Task, TaskColumn,
-    TaskStatus, Turn,
+    RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task,
+    TaskColumn, TaskStatus, Turn,
 };
 
 // --- Settings ----------------------------------------------------------------
@@ -726,8 +726,9 @@ pub async fn move_task(
     column: TaskColumn,
     position: f64,
 ) -> sqlx::Result<Task> {
-    // Re-queuing a card (into To Do or Available) clears any prior failure and
-    // resets the CI-fix counter so it starts clean, including after a failed run.
+    // Re-queuing a card (into To Do or Available) is a hard reset: it clears any
+    // prior failure, resets the CI-fix counter, and stamps the stats reset marker
+    // so its time/cost/tokens start fresh, all so the task starts clean.
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET board_column = $2, position = $3, \
          status = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
@@ -736,6 +737,8 @@ pub async fn move_task(
                       THEN NULL ELSE error END, \
          ci_fix_attempts = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
                                 THEN 0 ELSE ci_fix_attempts END, \
+         stats_reset_at = CASE WHEN $2 IN ('todo'::task_column, 'available'::task_column) \
+                               THEN now() ELSE stats_reset_at END, \
          updated_at = now() \
          WHERE id = $1 RETURNING *",
     )
@@ -973,21 +976,125 @@ pub async fn finish_turn(
     status: &str,
     result_text: Option<&str>,
     total_cost_usd: Option<f64>,
+    token_usage: Option<Value>,
     session_id: Option<&str>,
 ) -> sqlx::Result<()> {
     // Strip NUL bytes; Postgres TEXT can't store them either.
     let result_text = result_text.map(|text| text.replace('\0', ""));
     sqlx::query(
         "UPDATE turns SET status = $2, result_text = $3, total_cost_usd = $4, \
-         session_id = COALESCE($5, session_id), finished_at = now() WHERE id = $1",
+         token_usage = COALESCE($5, token_usage), \
+         session_id = COALESCE($6, session_id), finished_at = now() WHERE id = $1",
     )
     .bind(id)
     .bind(status)
     .bind(result_text.as_deref())
     .bind(total_cost_usd)
+    .bind(token_usage.map(Json))
     .bind(session_id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+// --- Statistics --------------------------------------------------------------
+
+/// The SELECT list shared by the task and global aggregates. Token fields read
+/// out of the per-turn `token_usage` JSON; `worked_ms` sums elapsed turn time.
+const STATS_SELECT: &str = "\
+    COALESCE(SUM(total_cost_usd), 0)::float8 AS cost_usd, \
+    COALESCE(SUM((token_usage->>'input_tokens')::bigint), 0)::bigint AS input_tokens, \
+    COALESCE(SUM((token_usage->>'output_tokens')::bigint), 0)::bigint AS output_tokens, \
+    COALESCE(SUM((token_usage->>'cache_creation_input_tokens')::bigint), 0)::bigint AS cache_creation_tokens, \
+    COALESCE(SUM((token_usage->>'cache_read_input_tokens')::bigint), 0)::bigint AS cache_read_tokens, \
+    COALESCE(SUM(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000), 0)::bigint AS worked_ms, \
+    COUNT(*)::bigint AS turns";
+
+/// Aggregated usage for one task, over turns since its stats reset.
+pub async fn task_stats(pool: &PgPool, task_id: Uuid) -> sqlx::Result<StatsAggregate> {
+    sqlx::query_as::<_, StatsAggregate>(&format!(
+        "SELECT {STATS_SELECT} FROM turns \
+         WHERE task_id = $1 \
+         AND started_at > COALESCE((SELECT stats_reset_at FROM tasks WHERE id = $1), 'epoch'::timestamptz)"
+    ))
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Aggregated usage across all tasks, over turns since the global stats reset.
+pub async fn global_stats(pool: &PgPool) -> sqlx::Result<StatsAggregate> {
+    sqlx::query_as::<_, StatsAggregate>(&format!(
+        "SELECT {STATS_SELECT} FROM turns \
+         WHERE started_at > COALESCE((SELECT stats_reset_at FROM settings WHERE id = 1), 'epoch'::timestamptz)"
+    ))
+    .fetch_one(pool)
+    .await
+}
+
+/// When the currently-running turn for a task started, for the live time ticker.
+pub async fn task_running_since(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        "SELECT started_at FROM turns WHERE task_id = $1 AND status = 'running' \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// When any currently-running turn started, for the global live time ticker.
+pub async fn global_running_since(pool: &PgPool) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        "SELECT started_at FROM turns WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The latest turn's token usage for a task, approximating its current context.
+pub async fn task_latest_usage(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Option<Value>> {
+    let row: Option<Json<Value>> = sqlx::query_scalar(
+        "SELECT token_usage FROM turns WHERE task_id = $1 AND token_usage IS NOT NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|json| json.0))
+}
+
+/// The latest turn's token usage overall, approximating the session context.
+pub async fn global_latest_usage(pool: &PgPool) -> sqlx::Result<Option<Value>> {
+    let row: Option<Json<Value>> = sqlx::query_scalar(
+        "SELECT token_usage FROM turns WHERE token_usage IS NOT NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|json| json.0))
+}
+
+/// The most recent rate-limit notice payload (its `rate_limit_info` carries the
+/// subscription utilization), for the usage-limit gauge.
+pub async fn latest_rate_limit(pool: &PgPool) -> sqlx::Result<Option<Value>> {
+    let row: Option<Json<Value>> = sqlx::query_scalar(
+        "SELECT payload FROM events WHERE type = 'rate_limit' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|json| json.0))
+}
+
+/// Resets global statistics (non-destructive): future reads only count turns
+/// started after now.
+pub async fn reset_global_stats(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET stats_reset_at = now() WHERE id = 1")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

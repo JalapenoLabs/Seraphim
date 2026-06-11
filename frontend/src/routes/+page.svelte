@@ -20,6 +20,7 @@
   } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
   import Card from '$lib/components/Card.svelte'
+  import Stats from '$lib/components/Stats.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
@@ -280,6 +281,11 @@
         </Button>
       {/if}
     </div>
+  </div>
+
+  <!-- Full-width live statistics banner below the action buttons. -->
+  <div class="flex-none px-6 pb-2">
+    <Stats />
   </div>
 
   {#snippet kanbanColumns()}

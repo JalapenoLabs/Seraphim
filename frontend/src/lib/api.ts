@@ -22,6 +22,7 @@ import type {
   Repository,
   ReviewPolicy,
   Settings,
+  Stats,
   Task,
   TaskColumn,
   TaskDetail
@@ -47,6 +48,20 @@ export function setNotepad(content: string) {
 
 export function getTask(taskId: string) {
   return apiClient.get(`tasks/${taskId}`).json<TaskDetail>()
+}
+
+// --- Live statistics ---------------------------------------------------------
+
+export function getGlobalStats() {
+  return apiClient.get('stats').json<Stats>()
+}
+
+export function getTaskStats(taskId: string) {
+  return apiClient.get(`tasks/${taskId}/stats`).json<Stats>()
+}
+
+export function resetStats() {
+  return apiClient.post('stats/reset').json<{ reset: boolean }>()
 }
 
 export function getIssueThread(taskId: string) {
