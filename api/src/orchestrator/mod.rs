@@ -10,12 +10,14 @@
 //! completion before the next is considered, so turns never overlap.
 
 mod availability;
+mod issues;
 mod network;
 mod prompt;
 mod provision;
 mod thoughts;
 mod usage;
 
+pub use issues::sync_for_move;
 pub use provision::provision_workspace;
 
 use std::time::Duration;
@@ -806,6 +808,14 @@ async fn review_once(state: &AppState) -> Result<()> {
                         )
                         .await?;
                         state.notify_board();
+                        // Deterministically close the issue now it's done, in case
+                        // the merge alone didn't (e.g. no "Closes #N" in the PR).
+                        if let Err(error) =
+                            issues::sync_for_move(state, &task, task.board_column, TaskColumn::Done)
+                                .await
+                        {
+                            warn!(error = %error, task_id = %task.id, "failed to close issue after merge");
+                        }
                         info!(task_id = %task.id, "auto-merged and marked done");
                     }
                     // A merge can fail for reasons retrying won't fix (conflicts
