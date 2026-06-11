@@ -180,6 +180,45 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
         }
     }
 
+    // Jira: pull tickets from each followed board, mapping the Jira status to one
+    // of our columns. New tickets land in the mapped column; existing ones refresh
+    // their cached fields and live status but keep the human-set column.
+    if let Some(jira) = state.jira().await? {
+        for board in queries::list_jira_boards_to_sync(&state.db).await? {
+            let issues = match jira.list_board_issues(board.board_id).await {
+                Ok(issues) => issues,
+                Err(error) => {
+                    warn!(error = %error, board = %board.name, "failed to list Jira issues");
+                    continue;
+                }
+            };
+            // A ticket can target several repos; the first is the primary one the
+            // agent would branch in (multi-repo execution is a follow-up).
+            let primary_repo = board.repo_ids.0.first().copied();
+            for issue in issues {
+                let column = crate::jira::column_for_status(&board.status_map.0, &issue.status);
+                let next_position = queries::max_position_in_column(&state.db, column)
+                    .await?
+                    .unwrap_or(0.0)
+                    + 1.0;
+                queries::upsert_jira_task(
+                    &state.db,
+                    &issue.key,
+                    primary_repo,
+                    board.id,
+                    &issue.summary,
+                    &issue.description,
+                    &issue.url,
+                    &issue.status,
+                    column,
+                    next_position,
+                )
+                .await?;
+                changed = true;
+            }
+        }
+    }
+
     if changed {
         state.notify_board();
     }
@@ -961,6 +1000,7 @@ mod tests {
             source_kind: crate::db::models::SourceKind::Github,
             external_id: String::new(),
             repo_id: None,
+            jira_board_id: None,
             title: String::new(),
             body_snapshot: String::new(),
             url: String::new(),

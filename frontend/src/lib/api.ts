@@ -13,6 +13,8 @@ import type {
   IssueComment,
   IssueDetail,
   IssueThread,
+  JiraBoard,
+  JiraDeployment,
   NetworkAccessLevel,
   PendingQuestion,
   Question,
@@ -151,6 +153,10 @@ export type UpdateSettingsRequest = {
   usage_limit_pause_enabled?: boolean
   usage_limit_threshold?: number
   post_thoughts_enabled?: boolean
+  jira_enabled?: boolean
+  jira_deployment?: JiraDeployment
+  jira_base_url?: string
+  jira_email?: string
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {
@@ -164,10 +170,42 @@ export function setPaused(paused: boolean) {
 export type TokensRequest = {
   claude_oauth_token?: string
   github_token?: string
+  jira_api_token?: string
 }
 
 export function setTokens(body: TokensRequest) {
   return apiClient.post('settings/tokens', { json: body }).json<Settings>()
+}
+
+// --- Jira --------------------------------------------------------------------
+
+export type JiraTestResult = { ok: boolean; user?: string; error?: string }
+
+export function testJira() {
+  return apiClient.post('jira/test').json<JiraTestResult>()
+}
+
+export function listJiraBoards() {
+  return apiClient.get('jira/boards').json<JiraBoard[]>()
+}
+
+// Pull boards from Jira and start following any new ones; returns the full list.
+export function discoverJiraBoards() {
+  return apiClient.post('jira/discover').json<JiraBoard[]>()
+}
+
+export type UpdateJiraBoardRequest = {
+  sync_enabled: boolean
+  status_map: Record<string, TaskColumn>
+  repo_ids: string[]
+}
+
+export function updateJiraBoard(id: string, body: UpdateJiraBoardRequest) {
+  return apiClient.put(`jira/boards/${id}`, { json: body }).json<JiraBoard>()
+}
+
+export function deleteJiraBoard(id: string) {
+  return apiClient.delete(`jira/boards/${id}`).json<{ deleted: boolean }>()
 }
 
 type EnvVarsResponse = {

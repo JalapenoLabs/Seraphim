@@ -30,6 +30,12 @@ sqlx = { version = "0.8", features = [
 # Docker control + GitHub
 bollard = "0.17"
 octocrab = "0.41"
+# Jira REST client (Cloud + Server/DC). rustls so we don't pull in OpenSSL; the
+# `json` feature gives typed request/response bodies.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 
 # Serialization + domain helpers
 serde = { version = "1", features = ["derive"] }

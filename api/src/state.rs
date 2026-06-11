@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::db::queries;
 use crate::docker::Workspace;
+use crate::jira::{JiraClient, JiraConfig};
 
 /// How many pending server events a slow SSE client may lag before it is
 /// dropped from the broadcast. Generous enough for a single-user board.
@@ -85,6 +86,17 @@ impl AppState {
             builder.personal_token(token)
         };
         builder.build().map_err(Into::into)
+    }
+
+    /// Builds a Jira client from the stored connection, or `None` when Jira is
+    /// disabled or unconfigured. Built on demand, like [`Self::github`].
+    pub async fn jira(&self) -> Result<Option<JiraClient>> {
+        let settings = queries::get_settings(&self.db).await?;
+        let token = queries::get_jira_token(&self.db).await?;
+        match JiraConfig::from_settings(&settings, &token) {
+            Some(config) => Ok(Some(JiraClient::new(config)?)),
+            None => Ok(None),
+        }
     }
 
     /// Signals that the board changed; ignores the error when no clients listen.

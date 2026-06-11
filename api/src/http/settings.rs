@@ -9,7 +9,7 @@ use sqlx::types::Json as SqlxJson;
 
 use super::ApiResult;
 use crate::db::models::{
-    AvailabilityWindow, EnvVarWrite, NetworkAccessLevel, ReviewPolicy, Settings,
+    AvailabilityWindow, EnvVarWrite, JiraDeployment, NetworkAccessLevel, ReviewPolicy, Settings,
 };
 use crate::db::queries;
 use crate::secrets::mask;
@@ -21,8 +21,10 @@ async fn settings_view(state: &AppState) -> ApiResult<Settings> {
     let mut settings = queries::get_settings(&state.db).await?;
     let claude = queries::get_claude_token(&state.db).await?;
     let github = queries::get_github_token(&state.db).await?;
+    let jira = queries::get_jira_token(&state.db).await?;
     settings.claude_token_preview = (!claude.is_empty()).then(|| mask(&claude));
     settings.github_token_preview = (!github.is_empty()).then(|| mask(&github));
+    settings.jira_token_preview = (!jira.is_empty()).then(|| mask(&jira));
     Ok(settings)
 }
 
@@ -50,6 +52,10 @@ pub struct UpdateSettingsRequest {
     pub usage_limit_pause_enabled: Option<bool>,
     pub usage_limit_threshold: Option<i32>,
     pub post_thoughts_enabled: Option<bool>,
+    pub jira_enabled: Option<bool>,
+    pub jira_deployment: Option<JiraDeployment>,
+    pub jira_base_url: Option<String>,
+    pub jira_email: Option<String>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -76,6 +82,10 @@ pub async fn update(
         body.usage_limit_pause_enabled,
         body.usage_limit_threshold,
         body.post_thoughts_enabled,
+        body.jira_enabled,
+        body.jira_deployment,
+        body.jira_base_url,
+        body.jira_email,
     )
     .await?;
     state.notify_board();
@@ -86,10 +96,11 @@ pub async fn update(
 pub struct TokensRequest {
     pub claude_oauth_token: Option<String>,
     pub github_token: Option<String>,
+    pub jira_api_token: Option<String>,
 }
 
 /// `POST /api/v1/settings/tokens` - store the app tokens (write-only). Empty
-/// values are ignored so you can set one without resending the other, and the
+/// values are ignored so you can set one without resending the others, and the
 /// raw tokens are never returned by the API.
 pub async fn set_tokens(
     State(state): State<AppState>,
@@ -99,6 +110,7 @@ pub async fn set_tokens(
         &state.db,
         body.claude_oauth_token.filter(|token| !token.is_empty()),
         body.github_token.filter(|token| !token.is_empty()),
+        body.jira_api_token.filter(|token| !token.is_empty()),
     )
     .await?;
     Ok(Json(settings_view(&state).await?))

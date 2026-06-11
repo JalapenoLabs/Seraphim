@@ -10,6 +10,7 @@ mod db;
 mod docker;
 mod git;
 mod http;
+mod jira;
 mod orchestrator;
 mod secrets;
 mod state;
@@ -89,6 +90,12 @@ async fn bootstrap_settings(db: &sqlx::PgPool, config: &Config) -> Result<()> {
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            // Jira connection (enabled, deployment, base URL, email): configured
+            // only via the settings UI, never seeded from env.
             None,
             None,
             None,
