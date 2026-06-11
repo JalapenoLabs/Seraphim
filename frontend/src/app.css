@@ -35,6 +35,9 @@
   /* A poppy cyan for informational log markers (e.g. rate-limit notices). */
   --info: #22d3ee;
   --info-foreground: #0b1020;
+  /* A violet reserved for our own prompts to the agent in the activity log. */
+  --prompt: #a78bfa;
+  --prompt-foreground: #0b1020;
 
   /* Legacy variables kept so any not-yet-migrated style still resolves. */
   --bg: var(--background);
@@ -75,6 +78,8 @@
   --color-warning-foreground: var(--warning-foreground);
   --color-info: var(--info);
   --color-info-foreground: var(--info-foreground);
+  --color-prompt: var(--prompt);
+  --color-prompt-foreground: var(--prompt-foreground);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);

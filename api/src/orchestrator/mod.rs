@@ -739,6 +739,16 @@ async fn stream_turn(
     // persisted or streamed, so a secret the agent echoes never leaks.
     let scrubber = Scrubber::new(queries::list_secret_values(&state.db).await?);
 
+    // Record the exact brief we hand Claude as the first event of the turn, so the
+    // activity log shows our own instructions (secrets scrubbed) right alongside
+    // the agent's response, for full transparency.
+    let prompt_event = serde_json::json!({ "text": scrubber.scrub_text(&prompt) });
+    queries::append_event(&state.db, turn.id, 0, "prompt", prompt_event.clone()).await?;
+    state.notify_task(
+        task.id,
+        serde_json::json!({ "type": "prompt", "payload": prompt_event, "created_at": Utc::now() }),
+    );
+
     let args = TurnArgs {
         container: state.workspace.container().to_string(),
         working_dir,
@@ -770,7 +780,8 @@ async fn stream_turn(
         .await;
 
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));
-    let mut seq = 0_i32;
+    // seq 0 is the prompt event recorded above; the stream's events follow.
+    let mut seq = 1_i32;
     let mut session_id = settings.current_session_id.clone();
     let mut result_text: Option<String> = None;
     let mut total_cost: Option<f64> = None;
