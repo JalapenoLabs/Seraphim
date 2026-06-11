@@ -4,7 +4,7 @@
 
   import { onMount, onDestroy } from 'svelte'
   import { dndzone } from 'svelte-dnd-action'
-  import { NotebookPen, RefreshCw, Pause, Play } from '@lucide/svelte'
+  import { NotebookPen, RefreshCw, Pause, Play, Eye, EyeOff } from '@lucide/svelte'
   import { PaneGroup } from 'paneforge'
 
   import { COLUMNS } from '$lib/types'
@@ -43,6 +43,24 @@
   let eventSource: EventSource | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
   let repoNames = $state<Record<string, string>>({})
+
+  // The Done column hides older items by default so it doesn't grow without
+  // bound: only tasks finished today are shown until the user reveals the rest
+  // with the eyeball toggle in the column header.
+  let showAllDone = $state(false)
+
+  // A task counts as "done today" if its completion stamp falls on the current
+  // local calendar day. `finished_at` is set on auto-completion; a card dragged
+  // to Done manually has none, so fall back to `updated_at` (the move time).
+  function isDoneToday(task: Task): boolean {
+    const stamp = task.finished_at ?? task.updated_at
+    return !!stamp && new Date(stamp).toDateString() === new Date().toDateString()
+  }
+
+  // Recomputed on every board reload (the SSE stream keeps that frequent enough
+  // that the "today" boundary stays fresh while the page is open).
+  const doneTodayCount = $derived(columns.done.filter(isDoneToday).length)
+  const hasHiddenDone = $derived(columns.done.length > doneTodayCount)
 
   // --- Global notepad --------------------------------------------------------
   // A scratchpad in a resizable pane beside the board. Default collapsed; the
@@ -290,12 +308,35 @@
 
   {#snippet kanbanColumns()}
     {#each COLUMNS as column}
+      {@const isDone = column.key === 'done'}
+      <!-- Done hides items finished before today; toggle to reveal them. Older
+           cards are kept in the dnd list (just display:none) so drag-and-drop
+           never desyncs from the rendered children. -->
+      {@const collapsed = isDone && !showAllDone}
       <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
         <header
           class="flex items-center justify-between border-b border-border px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
         >
-          <span>{column.label}</span>
-          <span>{columns[column.key].length}</span>
+          <div class="flex items-center gap-1.5">
+            <span>{column.label}</span>
+            {#if isDone && hasHiddenDone}
+              <button
+                type="button"
+                onclick={() => (showAllDone = !showAllDone)}
+                title={showAllDone ? 'Show only today' : 'View all'}
+                aria-label={showAllDone ? 'Show only today' : 'View all'}
+                aria-pressed={showAllDone}
+                class="rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              >
+                {#if showAllDone}
+                  <EyeOff class="size-3.5" />
+                {:else}
+                  <Eye class="size-3.5" />
+                {/if}
+              </button>
+            {/if}
+          </div>
+          <span>{collapsed ? doneTodayCount : columns[column.key].length}</span>
         </header>
         <div
           class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
@@ -309,7 +350,7 @@
           onfinalize={(event) => handleFinalize(column.key, event)}
         >
           {#each columns[column.key] as task (task.id)}
-            <div>
+            <div class:hidden={collapsed && !isDoneToday(task)}>
               <Card
                 {task}
                 onchange={load}
