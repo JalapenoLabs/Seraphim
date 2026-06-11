@@ -226,6 +226,80 @@ pub async fn ci_status(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -> R
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkflowRunsPage {
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRun {
+    id: u64,
+    status: String,
+    conclusion: Option<String>,
+    run_attempt: u32,
+}
+
+/// Re-runs the failed jobs of any first-attempt workflow run at `head_sha`.
+///
+/// Gives a failed run exactly one automatic retry before an agent fix turn or a
+/// human is spent on it, absorbing transient infrastructure flakes (a runner
+/// hiccup, a base-image pull failure, a network blip). Idempotency is stateless:
+/// a run that was already retried sits at `run_attempt >= 2` and is skipped, so
+/// repeated review passes never re-run the same commit's CI more than once.
+///
+/// Only `failure`, `timed_out`, and `startup_failure` runs are retried; a
+/// `cancelled` run (e.g. one superseded by `cancel-in-progress`) is left alone.
+///
+/// Returns the number of runs whose failed jobs were re-queued; `0` means
+/// nothing was retried (no eligible failures, or each had already been retried).
+///
+/// # Errors
+/// If listing the commit's workflow runs fails. A failure to re-queue an
+/// individual run is logged and skipped rather than aborting the sweep.
+pub async fn rerun_failed_runs(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    head_sha: &str,
+) -> Result<u64> {
+    let page: WorkflowRunsPage = octo
+        .get(
+            format!("/repos/{owner}/{repo}/actions/runs?head_sha={head_sha}&per_page={PER_PAGE}"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to list workflow runs for the commit")?;
+
+    let mut reran = 0_u64;
+    for run in &page.workflow_runs {
+        let retriable = run.status == "completed"
+            && matches!(
+                run.conclusion.as_deref(),
+                Some("failure" | "timed_out" | "startup_failure")
+            );
+        // Skip anything that already used its one automatic retry.
+        if !retriable || run.run_attempt > 1 {
+            continue;
+        }
+        match octo
+            .post::<(), serde_json::Value>(
+                format!(
+                    "/repos/{owner}/{repo}/actions/runs/{id}/rerun-failed-jobs",
+                    id = run.id
+                ),
+                None,
+            )
+            .await
+        {
+            Ok(_) => reran += 1,
+            Err(error) => {
+                tracing::warn!(error = %error, run_id = run.id, "failed to re-run a workflow run");
+            }
+        }
+    }
+    Ok(reran)
+}
+
+#[derive(Debug, Deserialize)]
 struct GitRef {
     object: GitRefObject,
 }
