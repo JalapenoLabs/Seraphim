@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
 
 use super::ApiResult;
@@ -53,8 +54,23 @@ pub async fn move_task(
     Path(id): Path<Uuid>,
     Json(body): Json<MoveRequest>,
 ) -> ApiResult<Json<Task>> {
+    // The column the card is leaving, so we can reconcile the issue's open/closed
+    // state for the transition (closes on entering Done, reopens on leaving it).
+    let from = queries::get_task(&state.db, id)
+        .await?
+        .map(|task| task.board_column);
     let task = queries::move_task(&state.db, id, body.column, body.position).await?;
     state.notify_board();
+
+    // Best-effort: a GitHub failure must never fail the move itself.
+    if let Some(from) = from {
+        if let Err(error) =
+            crate::orchestrator::sync_for_move(&state, &task, from, body.column).await
+        {
+            warn!(error = %error, task = %task.id, "failed to sync issue state on move");
+        }
+    }
+
     Ok(Json(task))
 }
 
