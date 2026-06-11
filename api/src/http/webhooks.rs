@@ -116,9 +116,16 @@ async fn apply_github_event(state: &AppState, event: GithubIssueEvent) -> Result
             author_login: event.issue.user.login,
             author_avatar_url: event.issue.user.avatar_url,
         };
+        // upsert_github_issue also reflects a reopen (closed -> open) by returning
+        // the card to Available.
         orchestrator::upsert_github_issue(state, repo.id, &issue, "open").await?;
         Ok(true)
+    } else if event.issue.state == "closed" {
+        // Closed outside Seraphim: move the tracked card to Done.
+        Ok(orchestrator::reflect_closed_github_issue(state, repo.id, &external_id).await?)
     } else {
+        // Open but filtered out by the repo's labels: keep the cached state
+        // current without moving a card we may not even track.
         Ok(queries::refresh_issue_external_state(
             &state.db,
             SourceKind::Github,

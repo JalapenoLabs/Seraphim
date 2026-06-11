@@ -170,6 +170,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    upsert the instant an issue changes, authenticated by a per-provider shared
    secret on the settings row (GitHub HMAC-signs the body; Jira signs or carries
    `?secret=`). Both poll and webhook share `orchestrator::upsert_{github,jira}_issue`.
+   Sync also **reflects external state changes** onto the board: a GitHub issue
+   closed outside Seraphim moves its card to **Done**, a reopened one back to
+   **Available**, and a Jira status change moves the card to its newly mapped
+   column. This fires only on a genuine transition (via `queries::apply_external_
+   state`, guarded by `external_state IS DISTINCT FROM`), so steady-state syncs
+   never clobber human curation, and a card the agent is mid-work on
+   (`in_progress`) is left alone. The poll also pulls recently-closed issues
+   (`git::list_recently_closed_issues`) since the open list can't reveal a closure.
 2. **agent** — single-threaded: when not paused, the config repo is healthy, and
    inside the availability schedule, it picks work by priority — (a) **resume** a
    task whose question the user just answered (`waiting_for_input` → deliver the

@@ -60,6 +60,39 @@ pub async fn list_open_issues(
         .collect())
 }
 
+/// The numbers of recently-updated closed issues (excluding PRs), most-recent
+/// first, optionally label-filtered. One page is enough to catch issues closed
+/// outside Seraphim since the last poll, so the board can move them to Done.
+pub async fn list_recently_closed_issues(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    labels: &[String],
+) -> Result<Vec<u64>> {
+    let handler = octo.issues(owner, repo);
+    let mut request = handler
+        .list()
+        .state(State::Closed)
+        .sort(octocrab::params::issues::Sort::Updated)
+        .direction(octocrab::params::Direction::Descending)
+        .per_page(PER_PAGE);
+    if !labels.is_empty() {
+        request = request.labels(labels);
+    }
+
+    let page = request
+        .send()
+        .await
+        .wrap_err_with(|| format!("failed to list closed issues for {owner}/{repo}"))?;
+
+    Ok(page
+        .items
+        .into_iter()
+        .filter(|issue| issue.pull_request.is_none())
+        .map(|issue| issue.number)
+        .collect())
+}
+
 /// A repo discovered when importing an org.
 #[derive(Debug, Clone)]
 pub struct DiscoveredRepo {

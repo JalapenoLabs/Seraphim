@@ -168,6 +168,22 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
             upsert_github_issue(state, repo.id, &issue, "open").await?;
             changed = true;
         }
+
+        // The open list above can't reveal an issue closed outside Seraphim (it
+        // simply drops out), so reconcile recently-closed issues separately and
+        // move any we still track to Done.
+        match git::list_recently_closed_issues(&github, owner, name, &repo.issue_labels).await {
+            Ok(numbers) => {
+                for number in numbers {
+                    if reflect_closed_github_issue(state, repo.id, &number.to_string()).await? {
+                        changed = true;
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, repo = %repo.full_name, "failed to list closed issues");
+            }
+        }
     }
 
     // Jira: pull tickets from each followed board, mapping the Jira status to one
@@ -214,11 +230,28 @@ pub async fn upsert_github_issue(
     issue: &git::OpenIssue,
     external_state: &str,
 ) -> Result<()> {
+    let external_id = issue.number.to_string();
     let position = top_of_column_position(state, TaskColumn::Available).await?;
+
+    // Reflect an external reopen (the issue flipped back to open) by returning the
+    // card to Available, *before* the upsert refreshes the cached state. Update-
+    // only and a no-op unless the state actually changed, so it never disturbs a
+    // steady open issue or its human-curated column.
+    queries::apply_external_state(
+        &state.db,
+        SourceKind::Github,
+        Some(repo_id),
+        &external_id,
+        external_state,
+        TaskColumn::Available,
+        position,
+    )
+    .await?;
+
     queries::upsert_issue_task(
         &state.db,
         SourceKind::Github,
-        &issue.number.to_string(),
+        &external_id,
         Some(repo_id),
         &issue.title,
         &issue.body,
@@ -232,6 +265,28 @@ pub async fn upsert_github_issue(
     Ok(())
 }
 
+/// Reflects an issue closed outside Seraphim by moving its tracked task to Done.
+/// Update-only and idempotent (see [`queries::apply_external_state`]); does
+/// nothing for an issue we don't track. Returns whether the board changed.
+pub async fn reflect_closed_github_issue(
+    state: &AppState,
+    repo_id: uuid::Uuid,
+    external_id: &str,
+) -> Result<bool> {
+    let position = top_of_column_position(state, TaskColumn::Done).await?;
+    queries::apply_external_state(
+        &state.db,
+        SourceKind::Github,
+        Some(repo_id),
+        external_id,
+        "closed",
+        TaskColumn::Done,
+        position,
+    )
+    .await
+    .map_err(Into::into)
+}
+
 /// Upserts a Jira ticket as a task, placing a brand-new one at the top of the
 /// column its mapped status implies. Shared by the poll sync and the webhook.
 pub async fn upsert_jira_issue(
@@ -241,6 +296,22 @@ pub async fn upsert_jira_issue(
 ) -> Result<()> {
     let column = crate::jira::column_for_status(&board.status_map.0, &issue.status);
     let position = top_of_column_position(state, column).await?;
+
+    // Reflect an external Jira status change by moving the card to the column its
+    // new status maps to, before the upsert refreshes the cached status. Jira keys
+    // are globally unique, so match on the key alone (repo_id = None). Update-only
+    // and a no-op unless the status actually changed.
+    queries::apply_external_state(
+        &state.db,
+        SourceKind::Jira,
+        None,
+        &issue.key,
+        &issue.status,
+        column,
+        position,
+    )
+    .await?;
+
     // A ticket can target several repos; the first is the primary one the agent
     // would branch in (multi-repo execution is a follow-up).
     let primary_repo = board.repo_ids.0.first().copied();
