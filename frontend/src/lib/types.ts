@@ -93,6 +93,9 @@ export type Task = {
   title: string
   body_snapshot: string
   url: string
+  // The login and avatar URL of whoever opened the issue. Null when unknown.
+  author_login: string | null
+  author_avatar_url: string | null
   // The source ticket's own state, separate from the agent `status` below: for
   // GitHub "open"/"closed", for Jira the workflow status name. Null until known.
   external_state: string | null

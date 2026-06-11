@@ -524,6 +524,7 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Task>> {
 /// Inserts a freshly-synced issue into `Available`, or refreshes the cached
 /// title/body/url of one we already track. Never touches the human-curated
 /// `board_column`, `position`, or `status`.
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_issue_task(
     pool: &PgPool,
     source_kind: SourceKind,
@@ -533,16 +534,20 @@ pub async fn upsert_issue_task(
     body: &str,
     url: &str,
     external_state: &str,
+    author_login: &str,
+    author_avatar_url: &str,
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
-        "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, external_state, board_column, position) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'available', $8) \
+        "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, external_state, author_login, author_avatar_url, board_column, position) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'available', $10) \
          ON CONFLICT (repo_id, source_kind, external_id) DO UPDATE SET \
          title = EXCLUDED.title, \
          body_snapshot = EXCLUDED.body_snapshot, \
          url = EXCLUDED.url, \
          external_state = EXCLUDED.external_state, \
+         author_login = EXCLUDED.author_login, \
+         author_avatar_url = EXCLUDED.author_avatar_url, \
          updated_at = now() \
          RETURNING *",
     )
@@ -553,6 +558,8 @@ pub async fn upsert_issue_task(
     .bind(body)
     .bind(url)
     .bind(external_state)
+    .bind(author_login)
+    .bind(author_avatar_url)
     .bind(initial_position)
     .fetch_one(pool)
     .await

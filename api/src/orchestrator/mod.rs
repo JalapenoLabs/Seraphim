@@ -173,6 +173,8 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
                 &issue.url,
                 // Sync only ever lists open issues, so any issue we see here is open.
                 "open",
+                &issue.author_login,
+                &issue.author_avatar_url,
                 next_position,
             )
             .await?;
@@ -1014,6 +1016,8 @@ mod tests {
             title: String::new(),
             body_snapshot: String::new(),
             url: String::new(),
+            author_login: None,
+            author_avatar_url: None,
             external_state: None,
             board_column: TaskColumn::Todo,
             position: 0.0,

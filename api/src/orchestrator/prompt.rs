@@ -290,6 +290,8 @@ mod tests {
             title: "Ask the user for help".to_string(),
             body_snapshot: String::new(),
             url: String::new(),
+            author_login: None,
+            author_avatar_url: None,
             external_state: Some("open".to_string()),
             board_column: TaskColumn::InProgress,
             position: 0.0,
