@@ -2,12 +2,22 @@
   import type { PendingQuestion } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
+  import { fly, fade } from 'svelte/transition'
   import { goto } from '$app/navigation'
+  import { Bell, Check, Trash2, X } from '@lucide/svelte'
 
+  import { Button } from '$lib/components/ui/button'
   import { getPendingQuestions } from '$lib/api'
 
   // How long a toast stays on screen before auto-dismissing.
   const TOAST_TIMEOUT_MS = 8000
+
+  // Notifications are the agent's pending questions, which have no server-side
+  // "read"/"dismissed" state. We track that client-side, keyed by question id,
+  // and prune to the live set on each refresh so it never grows unbounded and a
+  // re-asked question reads as unread again.
+  const READ_KEY = 'seraphim.notif.read'
+  const DISMISSED_KEY = 'seraphim.notif.dismissed'
 
   type Toast = {
     id: number
@@ -16,20 +26,78 @@
     prompt: string
   }
 
+  function loadIds(key: string): Set<string> {
+    if (typeof localStorage === 'undefined') {
+      return new Set()
+    }
+    try {
+      const raw = localStorage.getItem(key)
+      return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+    } catch {
+      return new Set()
+    }
+  }
+
+  function saveIds(key: string, ids: Set<string>) {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(key, JSON.stringify([...ids]))
+    }
+  }
+
   let pending = $state<PendingQuestion[]>([])
-  let toasts = $state<Toast[]>([])
+  let readIds = $state<Set<string>>(loadIds(READ_KEY))
+  let dismissedIds = $state<Set<string>>(loadIds(DISMISSED_KEY))
   let open = $state(false)
+  let toasts = $state<Toast[]>([])
   let nextToastId = 0
 
   let eventSource: EventSource | null = null
+
+  // What the bell surfaces: pending questions the user hasn't cleared away. The
+  // unread count drives the badge.
+  const visible = $derived(pending.filter((question) => !dismissedIds.has(question.id)))
+  const unreadCount = $derived(visible.filter((question) => !readIds.has(question.id)).length)
+
+  // If everything is cleared or answered while the drawer is open, close it.
+  $effect(() => {
+    if (open && visible.length === 0) {
+      open = false
+    }
+  })
 
   async function refresh() {
     try {
       const response = await getPendingQuestions()
       pending = response.questions
+      pruneState()
     } catch (error) {
       console.debug('failed to refresh pending questions', error)
     }
+  }
+
+  // Drop read/dismissed ids for questions that are no longer pending.
+  function pruneState() {
+    const live = new Set(pending.map((question) => question.id))
+    readIds = new Set([...readIds].filter((id) => live.has(id)))
+    dismissedIds = new Set([...dismissedIds].filter((id) => live.has(id)))
+    saveIds(READ_KEY, readIds)
+    saveIds(DISMISSED_KEY, dismissedIds)
+  }
+
+  function markRead(id: string) {
+    readIds = new Set([...readIds, id])
+    saveIds(READ_KEY, readIds)
+  }
+
+  function markAllRead() {
+    readIds = new Set([...readIds, ...visible.map((question) => question.id)])
+    saveIds(READ_KEY, readIds)
+  }
+
+  function clearAll() {
+    dismissedIds = new Set([...dismissedIds, ...visible.map((question) => question.id)])
+    saveIds(DISMISSED_KEY, dismissedIds)
+    open = false
   }
 
   // Fires a native desktop notification when the browser has granted permission.
@@ -54,14 +122,15 @@
     toasts = toasts.filter((toast) => toast.id !== id)
   }
 
-  function openTask(taskId: string) {
+  function goToTask(taskId: string) {
     open = false
-    dismissAll()
+    toasts = []
     goto(`/task/${taskId}`)
   }
 
-  function dismissAll() {
-    toasts = []
+  function openTask(question: PendingQuestion) {
+    markRead(question.id)
+    goToTask(question.task_id)
   }
 
   function handleNotification(event: MessageEvent) {
@@ -89,196 +158,113 @@
   onDestroy(() => eventSource?.close())
 </script>
 
-<div class="notifications">
-  <button class="bell" title="Notifications" onclick={() => (open = !open)}>
-    🔔
-    {#if pending.length}
-      <span class="badge">{pending.length}</span>
+<svelte:window
+  onkeydown={(event) => {
+    if (open && event.key === 'Escape') {
+      open = false
+    }
+  }}
+/>
+
+<!-- The bell only appears when there's something to show. -->
+{#if visible.length > 0}
+  <button
+    type="button"
+    class="relative rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+    title="Notifications"
+    aria-label="Notifications"
+    onclick={() => (open = true)}
+  >
+    <Bell class="size-5" />
+    {#if unreadCount > 0}
+      <span
+        class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-destructive-foreground"
+      >
+        {unreadCount}
+      </span>
     {/if}
   </button>
+{/if}
 
-  {#if open}
-    <div class="panel">
-      <header>
-        <strong>Notifications</strong>
-        <button class="close" title="Close" onclick={() => (open = false)}>✕</button>
+<!-- Right-side drawer (slides in over a dimmed backdrop). -->
+{#if open}
+  <div class="fixed inset-0 z-50">
+    <button
+      type="button"
+      class="absolute inset-0 bg-black/50"
+      aria-label="Close notifications"
+      transition:fade={{ duration: 150 }}
+      onclick={() => (open = false)}
+    ></button>
+    <aside
+      class="absolute right-0 top-0 flex h-full w-[360px] max-w-[90vw] flex-col border-l border-border bg-card shadow-2xl"
+      transition:fly={{ x: 360, duration: 200 }}
+    >
+      <header class="flex items-center gap-2 border-b border-border px-4 py-3">
+        <strong class="text-sm">Notifications</strong>
+        <div class="ml-auto flex items-center gap-1">
+          <Button variant="ghost" size="sm" disabled={unreadCount === 0} onclick={markAllRead}>
+            <Check class="size-3.5" /> Mark all read
+          </Button>
+          <Button variant="ghost" size="sm" onclick={clearAll}>
+            <Trash2 class="size-3.5" /> Clear all
+          </Button>
+          <Button variant="ghost" size="icon" aria-label="Close" onclick={() => (open = false)}>
+            <X class="size-4" />
+          </Button>
+        </div>
       </header>
-      {#if pending.length === 0}
-        <p class="empty">Nothing needs your attention.</p>
-      {:else}
-        {#each pending as question}
-          <button class="item" onclick={() => openTask(question.task_id)}>
-            <span class="item-task">{question.task_title}</span>
-            <span class="item-prompt">{question.prompt}</span>
+      <div class="min-h-0 flex-1 overflow-y-auto">
+        {#each visible as question (question.id)}
+          <button
+            type="button"
+            class="flex w-full flex-col gap-0.5 border-b border-border px-4 py-3 text-left transition-colors hover:bg-secondary {readIds.has(
+              question.id
+            )
+              ? 'opacity-60'
+              : ''}"
+            onclick={() => openTask(question)}
+          >
+            <span class="flex items-center gap-2 text-xs text-muted-foreground">
+              {#if !readIds.has(question.id)}
+                <span class="size-1.5 flex-none rounded-full bg-destructive"></span>
+              {/if}
+              {question.task_title}
+            </span>
+            <span class="text-sm">{question.prompt}</span>
           </button>
         {/each}
-      {/if}
-    </div>
-  {/if}
-</div>
+      </div>
+    </aside>
+  </div>
+{/if}
 
-<!-- Toasts float at the bottom-right, independent of the bell dropdown. -->
-<div class="toasts">
+<!-- Toasts float at the bottom-right, independent of the bell drawer. -->
+<div class="pointer-events-none fixed bottom-5 right-5 z-50 flex max-w-sm flex-col gap-2">
   {#each toasts as toast (toast.id)}
-    <div class="toast">
-      <button class="toast-body" onclick={() => openTask(toast.taskId)}>
-        <span class="toast-title">Seraphim needs your input</span>
-        <span class="toast-task">{toast.taskTitle}</span>
-        <span class="toast-prompt">{toast.prompt}</span>
+    <div
+      class="pointer-events-auto flex items-start overflow-hidden rounded-lg border border-warning/50 bg-card shadow-2xl"
+    >
+      <button
+        type="button"
+        class="flex flex-1 flex-col gap-0.5 px-4 py-3 text-left"
+        onclick={() => goToTask(toast.taskId)}
+      >
+        <span class="text-[10px] font-bold uppercase tracking-wide text-warning"
+          >Seraphim needs your input</span
+        >
+        <span class="text-xs text-muted-foreground">{toast.taskTitle}</span>
+        <span class="text-sm">{toast.prompt}</span>
       </button>
-      <button class="toast-close" title="Dismiss" onclick={() => dismissToast(toast.id)}>✕</button>
+      <button
+        type="button"
+        class="px-2.5 py-2 text-muted-foreground transition-colors hover:text-foreground"
+        title="Dismiss"
+        aria-label="Dismiss"
+        onclick={() => dismissToast(toast.id)}
+      >
+        <X class="size-4" />
+      </button>
     </div>
   {/each}
 </div>
-
-<style>
-  .notifications {
-    position: relative;
-  }
-
-  .bell {
-    position: relative;
-    background: transparent;
-    border: none;
-    font-size: 1.2rem;
-    cursor: pointer;
-    padding: 0.2rem 0.4rem;
-  }
-
-  .badge {
-    position: absolute;
-    top: -0.1rem;
-    right: -0.1rem;
-    background: var(--danger);
-    color: #fff;
-    border-radius: 999px;
-    font-size: 0.65rem;
-    font-weight: 700;
-    min-width: 1rem;
-    padding: 0 0.25rem;
-    line-height: 1rem;
-    text-align: center;
-  }
-
-  .panel {
-    position: absolute;
-    right: 0;
-    top: 2.2rem;
-    width: 320px;
-    max-height: 70vh;
-    overflow-y: auto;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-    z-index: 20;
-  }
-
-  .panel header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.7rem 0.9rem;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .close {
-    background: transparent;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-  }
-
-  .empty {
-    color: var(--muted);
-    font-size: 0.85rem;
-    padding: 1rem 0.9rem;
-    margin: 0;
-  }
-
-  .item {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--border);
-    padding: 0.7rem 0.9rem;
-    cursor: pointer;
-  }
-
-  .item:hover {
-    background: var(--panel-2);
-  }
-
-  .item-task {
-    font-size: 0.75rem;
-    color: var(--muted);
-  }
-
-  .item-prompt {
-    color: var(--text);
-    font-size: 0.85rem;
-  }
-
-  .toasts {
-    position: fixed;
-    bottom: 1.2rem;
-    right: 1.2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    z-index: 50;
-    max-width: 360px;
-  }
-
-  .toast {
-    display: flex;
-    align-items: flex-start;
-    background: var(--panel);
-    border: 1px solid var(--warn);
-    border-radius: var(--radius);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    overflow: hidden;
-  }
-
-  .toast-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    text-align: left;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    padding: 0.7rem 0.9rem;
-    cursor: pointer;
-    flex: 1;
-  }
-
-  .toast-title {
-    font-size: 0.7rem;
-    font-weight: 700;
-    color: var(--warn);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .toast-task {
-    font-size: 0.78rem;
-    color: var(--muted);
-  }
-
-  .toast-prompt {
-    font-size: 0.88rem;
-  }
-
-  .toast-close {
-    background: transparent;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    padding: 0.5rem 0.6rem;
-  }
-</style>
