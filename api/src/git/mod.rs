@@ -411,6 +411,27 @@ pub struct IssueThread {
     pub comments: Vec<IssueComment>,
 }
 
+/// Fetches an issue's comments (oldest first), for the agent's task brief.
+///
+/// Returns up to the first 100 comments (one page), matching the rest of the
+/// issue handling here; that covers any realistic discussion and bounds the
+/// prompt size.
+pub async fn list_issue_comments(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: &str,
+) -> Result<Vec<IssueComment>> {
+    let comments: Vec<IssueComment> = octo
+        .get(
+            format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page={PER_PAGE}"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to fetch issue comments")?;
+    Ok(comments)
+}
+
 /// Fetches an issue and its comments for the conversation view.
 pub async fn get_issue_thread(
     octo: &Octocrab,
