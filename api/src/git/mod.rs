@@ -22,6 +22,9 @@ pub struct OpenIssue {
     pub title: String,
     pub body: String,
     pub url: String,
+    /// The login and avatar of whoever opened the issue, for the board card.
+    pub author_login: String,
+    pub author_avatar_url: String,
 }
 
 /// Lists open issues for a repo (excluding PRs), optionally label-filtered.
@@ -51,6 +54,8 @@ pub async fn list_open_issues(
             title: issue.title,
             body: issue.body.unwrap_or_default(),
             url: issue.html_url.to_string(),
+            author_login: issue.user.login,
+            author_avatar_url: issue.user.avatar_url.to_string(),
         })
         .collect())
 }

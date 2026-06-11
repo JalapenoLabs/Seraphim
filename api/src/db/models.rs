@@ -338,6 +338,10 @@ pub struct Task {
     pub title: String,
     pub body_snapshot: String,
     pub url: String,
+    /// The login and avatar URL of whoever opened the issue, shown on the board
+    /// card. `None` for tasks with no known author (Jira/internal).
+    pub author_login: Option<String>,
+    pub author_avatar_url: Option<String>,
     /// The source ticket's own state, distinct from the agent's `status`: for
     /// GitHub "open" / "closed", for Jira the workflow status name. `None` until
     /// a sync or state change records it.

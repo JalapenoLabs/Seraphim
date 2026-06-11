@@ -63,7 +63,18 @@
     </Badge>
   </div>
 
-  <div class="mt-2 text-sm leading-snug">{task.title}</div>
+  <div class="mt-2 flex items-start gap-2">
+    {#if task.author_avatar_url}
+      <img
+        src={task.author_avatar_url}
+        alt={task.author_login ?? 'issue author'}
+        title={task.author_login ? `Opened by ${task.author_login}` : 'Issue author'}
+        class="mt-0.5 size-5 flex-none rounded-full"
+        onerror={(event) => ((event.currentTarget as HTMLImageElement).style.display = 'none')}
+      />
+    {/if}
+    <div class="min-w-0 text-sm leading-snug">{task.title}</div>
+  </div>
 
   <!-- Loud on purpose: pulses until the user acknowledges the suggestions on the task. -->
   {#if suggestionCount > 0}
