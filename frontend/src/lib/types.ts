@@ -196,6 +196,11 @@ export type EnvSuggestion = {
 export type QuestionStatus = 'pending' | 'answered' | 'declined'
 export type AnswerKind = 'option' | 'custom' | 'declined'
 
+// One answer submitted from the review step of the clarify-questions wizard.
+// A skipped question is sent as `declined` (the agent is still unblocked and
+// told it was skipped).
+export type AnswerSubmission = { questionId: string; kind: AnswerKind; text: string }
+
 export type QuestionOption = {
   title: string
   description: string

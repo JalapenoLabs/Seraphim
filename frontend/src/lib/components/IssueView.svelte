@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AnswerKind, IssueThread, IssueUser, Question, Task } from '../types'
+  import type { AnswerSubmission, IssueThread, IssueUser, Question, Task } from '../types'
 
   import { onMount } from 'svelte'
   import { toast } from 'svelte-sonner'
@@ -26,12 +26,12 @@
   let {
     task,
     questions,
-    onAnswer
+    onSubmit
   }: {
     task: Task
     // The agent's escalated decisions, rendered inline in the conversation feed.
     questions: Question[]
-    onAnswer: (questionId: string, kind: AnswerKind, text: string) => void | Promise<void>
+    onSubmit: (answers: AnswerSubmission[]) => void | Promise<void>
   } = $props()
 
   // GitHub URLs derived from the issue link: the repo root and its "new issue"
@@ -236,7 +236,7 @@
         {/each}
 
         <!-- The agent's decisions, inline in the feed below the conversation. -->
-        <DecisionsFeed {questions} {onAnswer} />
+        <DecisionsFeed {questions} {onSubmit} />
 
         <!-- Add a comment / change state -->
         <div class="rounded-lg border border-border p-3">
@@ -301,7 +301,7 @@
         <div class="rounded-lg border border-border p-4">
           <Markdown source={task.body_snapshot} />
         </div>
-        <DecisionsFeed {questions} {onAnswer} />
+        <DecisionsFeed {questions} {onSubmit} />
       {:else if !loadError}
         <p class="text-sm text-muted-foreground">Loading issue…</p>
       {/if}

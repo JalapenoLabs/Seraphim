@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AgentEvent, AnswerKind, EnvSuggestion, Question, Task } from '$lib/types'
+  import type { AgentEvent, AnswerSubmission, EnvSuggestion, Question, Task } from '$lib/types'
 
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
@@ -54,8 +54,13 @@
     }
   }
 
-  async function submitAnswer(questionId: string, kind: AnswerKind, text: string) {
-    await answerQuestion(questionId, kind, text)
+  // Persist every answer from the wizard's review step, then reload once. The
+  // agent only resumes when no pending question remains, so submitting them
+  // together (in order) is safe.
+  async function submitAnswers(answers: AnswerSubmission[]) {
+    for (const answer of answers) {
+      await answerQuestion(answer.questionId, answer.kind, answer.text)
+    }
     await load()
   }
 
@@ -387,7 +392,7 @@
     >
       <Resizable.Pane defaultSize={55} minSize={30} class="min-w-0">
         <div class="h-full min-w-0 pr-3">
-          <IssueView {task} {questions} onAnswer={submitAnswer} />
+          <IssueView {task} {questions} onSubmit={submitAnswers} />
         </div>
       </Resizable.Pane>
 
