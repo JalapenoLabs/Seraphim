@@ -1062,19 +1062,48 @@
             placeholder="fine-grained PAT"
             bind:value={githubTokenInput}
           />
-          <p class="text-xs text-muted-foreground">
-            Create a fine-grained
-            <a
-              href="https://github.com/settings/personal-access-tokens"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="underline"
-            >
-              personal access token
-            </a>
-            with read/write on Contents, Pull requests, and Issues, plus read on Actions and Commit
-            statuses (so the agent can read CI results).
-          </p>
+          <details class="rounded-md border border-border p-3 text-xs text-muted-foreground">
+            <summary class="cursor-pointer font-medium text-foreground">
+              Required token permissions
+            </summary>
+            <div class="mt-2 space-y-3">
+              <p>
+                Use a fine-grained
+                <a
+                  href="https://github.com/settings/personal-access-tokens"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="underline"
+                >
+                  personal access token
+                </a>
+                with access to the repositories you want the agent to work, then grant these
+                repository permissions.
+              </p>
+              <div>
+                <p class="font-medium text-foreground">Required</p>
+                <ul class="mt-1 list-disc space-y-0.5 pl-4">
+                  <li><span class="font-medium">Contents</span>: Read and write (clone repos, push branches)</li>
+                  <li><span class="font-medium">Pull requests</span>: Read and write (open and merge PRs)</li>
+                  <li><span class="font-medium">Issues</span>: Read and write (read, comment, close)</li>
+                  <li><span class="font-medium">Actions</span>: Read (read CI / workflow run status)</li>
+                  <li><span class="font-medium">Commit statuses</span>: Read (non-Actions CI)</li>
+                  <li><span class="font-medium">Metadata</span>: Read (granted automatically)</li>
+                </ul>
+              </div>
+              <div>
+                <p class="font-medium text-foreground">Recommended</p>
+                <ul class="mt-1 list-disc space-y-0.5 pl-4">
+                  <li><span class="font-medium">Actions</span>: Read and write (let the agent re-run failed CI before escalating)</li>
+                  <li><span class="font-medium">Workflows</span>: Read and write (let the agent edit GitHub Actions workflow files)</li>
+                </ul>
+              </div>
+              <p>
+                There is no "Checks" permission to grant: it is GitHub App only, so Seraphim reads CI
+                from the Actions API instead.
+              </p>
+            </div>
+          </details>
         </div>
 
         <!-- Realtime issue webhooks: set the shared secret here, then point the
