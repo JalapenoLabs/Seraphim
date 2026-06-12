@@ -13,6 +13,7 @@ mod availability;
 mod network;
 mod prompt;
 mod provision;
+mod review;
 mod subscription;
 mod thoughts;
 mod usage;
@@ -30,12 +31,14 @@ use tracing::{error, info, warn};
 use crate::automation::{self, QueuePosition, RuleAction, RuleContext};
 use crate::claude::{run_turn, AgentEventKind, TurnArgs};
 use crate::db::models::{
-    AutomationRule, Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskStatus,
+    AutomationRule, Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskPullRequest,
+    TaskStatus,
 };
 use crate::db::queries;
 use crate::git;
 use crate::secrets::Scrubber;
 use crate::state::AppState;
+use review::{PrCi, PrReview, ReviewDecision};
 
 /// How often the agent loop checks for work when idle.
 const AGENT_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -507,6 +510,176 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
     Ok(())
 }
 
+// --- Per-task hard reset -----------------------------------------------------
+
+/// What a per-task hard reset did, returned to the UI so it can confirm exactly
+/// which side effects happened.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a flat result DTO of four independent, best-effort reset outcomes"
+)]
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ResetSummary {
+    /// The agent's in-flight turn on this task was stopped.
+    pub interrupted_agent: bool,
+    /// An open pull request was closed.
+    pub pr_closed: bool,
+    /// The branch was deleted from the remote.
+    pub branch_deleted: bool,
+    /// A closed source issue was reopened.
+    pub issue_reopened: bool,
+}
+
+/// Hard-resets a single stuck task to a clean slate (issue #72): if the agent is
+/// mid-turn on it, that turn is stopped; its pull request is closed, its branch
+/// deleted from the remote and the workspace, a closed source issue is reopened,
+/// and the card returns to **Available**, queued and unstarted.
+///
+/// The external GitHub steps are best-effort and independently logged, so a
+/// network hiccup on any one of them never prevents the card from being reset
+/// locally. The returned [`ResetSummary`] reports what actually happened.
+pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSummary> {
+    let Some(task) = queries::get_task(&state.db, task_id).await? else {
+        return Err(eyre!("task {task_id} not found"));
+    };
+    info!(task_id = %task.id, title = %task.title, "hard reset of a task requested");
+
+    let mut summary = ResetSummary::default();
+
+    // Stop the agent only if it is *actively* running a turn on THIS task. The
+    // loop is single-threaded, so the live turn is unique; a task merely parked
+    // awaiting input, or sitting in review, is not it and must not be disturbed.
+    // Interrupting the live turn bumps the reset epoch (so the turn abandons its
+    // post-turn handling rather than re-moving the card), kills the Claude
+    // process, and clears the shared session, since a turn killed mid-stream can
+    // leave the resumable conversation inconsistent for the next task.
+    let actively_working = task.board_column == TaskColumn::InProgress
+        && matches!(task.status, TaskStatus::Working | TaskStatus::Preparing);
+    if actively_working {
+        state.bump_reset_epoch();
+        kill_agent_process(state).await;
+        queries::set_current_session_id(&state.db, None).await?;
+        state.set_live_usage(None);
+        summary.interrupted_agent = true;
+        info!(task_id = %task.id, "stopped the agent's in-flight turn for the reset");
+    }
+
+    // Best-effort external cleanup for a GitHub-sourced task with a known repo.
+    if task.source_kind == SourceKind::Github {
+        if let Some(repo_id) = task.repo_id {
+            if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
+                reset_github_side(state, &task, &repo, &mut summary).await;
+            }
+        }
+    }
+
+    // Local reset: clear the branch/PR/error/session and return the card to
+    // Available, queued and unstarted, then drop any pending questions so it
+    // stops asking for input.
+    let position = top_of_column_position(state, TaskColumn::Available).await?;
+    queries::reset_task(&state.db, task.id, position).await?;
+    if let Err(error) = queries::delete_pending_questions(&state.db, task.id).await {
+        warn!(error = %error, task_id = %task.id, "failed to clear pending questions on reset");
+    }
+
+    state.notify_board();
+    info!(task_id = %task.id, ?summary, "task hard reset complete");
+    Ok(summary)
+}
+
+/// The GitHub-side cleanup of a reset: close the open PR, delete its branch from
+/// the remote and the workspace, and reopen a closed source issue. Every step is
+/// best-effort and updates `summary` with what succeeded.
+async fn reset_github_side(
+    state: &AppState,
+    task: &Task,
+    repo: &Repository,
+    summary: &mut ResetSummary,
+) {
+    let Ok((owner, name)) = split_full_name(&repo.full_name) else {
+        warn!(repo = %repo.full_name, "reset: repository is not owner/repo; skipping GitHub cleanup");
+        return;
+    };
+    let github = match state.github().await {
+        Ok(github) => github,
+        Err(error) => {
+            warn!(error = %error, "reset: GitHub client unavailable; skipping remote cleanup");
+            return;
+        }
+    };
+
+    if let Some(branch) = task.branch.as_deref() {
+        // Close any open PR on the branch first, so the close is explicit even
+        // though deleting the head branch would also close it.
+        match git::find_open_pr_for_branch(&github, owner, name, branch).await {
+            Ok(Some(pull)) => {
+                match git::close_pull_request(&github, owner, name, pull.number).await {
+                    Ok(()) => {
+                        summary.pr_closed = true;
+                        info!(task_id = %task.id, pr = pull.number, "reset: closed the pull request");
+                    }
+                    Err(error) => {
+                        warn!(error = %error, task_id = %task.id, "reset: failed to close the pull request");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "reset: failed to look up the pull request");
+            }
+        }
+
+        // Delete the branch from the remote, then from the workspace clone.
+        match git::delete_remote_branch(&github, owner, name, branch).await {
+            Ok(()) => {
+                summary.branch_deleted = true;
+                info!(task_id = %task.id, branch, "reset: deleted the remote branch");
+            }
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "reset: failed to delete the remote branch (already gone?)");
+            }
+        }
+        delete_local_branch(state, repo, branch).await;
+    }
+
+    // Reopen the source issue if Seraphim has it recorded as closed.
+    if !task.external_id.trim().is_empty() && task.external_state.as_deref() == Some("closed") {
+        match git::set_issue_state(&github, owner, name, &task.external_id, "open", None).await {
+            Ok(_) => {
+                summary.issue_reopened = true;
+                info!(task_id = %task.id, issue = %task.external_id, "reset: reopened the issue");
+            }
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "reset: failed to reopen the issue");
+            }
+        }
+    }
+}
+
+/// Deletes the task's branch from the workspace clone, switching off it first
+/// (a checked-out branch can't be deleted). Best-effort: a missing repo dir or
+/// branch is fine, since the authoritative copy was already deleted on the remote.
+async fn delete_local_branch(state: &AppState, repo: &Repository, branch: &str) {
+    let dir = format!("/workspace/{}", provision::repo_dir_name(&repo.full_name));
+    let script = format!(
+        "cd \"{dir}\" 2>/dev/null || exit 0\n\
+         git checkout \"{default}\" 2>/dev/null || true\n\
+         git branch -D \"{branch}\" 2>/dev/null || true\n",
+        default = repo.default_branch,
+    );
+    if let Err(error) = state
+        .workspace
+        .exec_capture(
+            "/workspace",
+            vec!["bash".to_string(), "-lc".to_string(), script],
+            vec![],
+        )
+        .await
+    {
+        warn!(error = %error, branch, "reset: failed to delete the local branch (continuing)");
+    }
+}
+
 // --- Agent loop --------------------------------------------------------------
 
 async fn agent_loop(state: AppState) {
@@ -700,25 +873,44 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Deterministically detect the PR the agent opened for this branch. Retry to
-    // absorb GitHub's brief indexing lag after `gh pr create`.
+    // Deterministically detect every PR the agent opened on this branch, across
+    // all enabled repos (a task may span more than one). Retry to absorb GitHub's
+    // brief indexing lag after `gh pr create`.
     let github = state.github().await?;
-    let (owner, repo_name) = split_full_name(&repo.full_name)?;
-    let Some(pull) = detect_pr(&github, owner, repo_name, &branch).await? else {
+    let mut detected = 0;
+    for attempt in 1..=PR_DETECT_ATTEMPTS {
+        detected = detect_task_prs(state, &github, &task).await?;
+        if detected > 0 {
+            break;
+        }
+        if attempt < PR_DETECT_ATTEMPTS {
+            sleep(PR_DETECT_DELAY).await;
+        }
+    }
+    if detected == 0 {
         return fail(
             state,
             &task,
             "the agent finished without opening a pull request",
         )
         .await;
-    };
+    }
 
-    queries::set_task_pr(&state.db, task.id, &pull.html_url).await?;
+    // Keep the board card's primary PR pointing at the focus repo's PR when it has
+    // one, else the first PR opened. The full set lives in `task_pull_requests`.
+    let prs = queries::list_task_prs(&state.db, task.id).await?;
+    let primary = prs
+        .iter()
+        .find(|pr| pr.repo_full_name == repo.full_name)
+        .or_else(|| prs.first());
+    if let Some(primary) = primary {
+        queries::set_task_pr(&state.db, task.id, &primary.pr_url).await?;
+    }
     queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
     state.notify_board();
 
-    info!(task_id = %task.id, pr = %pull.html_url, "task moved to review");
+    info!(task_id = %task.id, prs = detected, "task moved to review");
     Ok(())
 }
 
@@ -760,37 +952,47 @@ async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()>
     queries::set_task_status(&state.db, task.id, TaskStatus::Working).await?;
     state.notify_board();
 
-    if let Err(error) = provision::prepare_existing_branch(state, &settings, &repo, &branch).await {
-        return fail(
-            state,
-            &task,
-            &format!("could not check out the PR branch: {error}"),
-        )
-        .await;
+    let github = state.github().await?;
+
+    // A task can have PRs in several repos; check out the branch in each so the
+    // agent can fix whichever repo is red (or resolve a conflict there). The focus
+    // repo comes first, so its prompt context is checked out even on the first fix
+    // (before any PR is tracked).
+    let repos = task_branch_repos(state, &task, &repo).await?;
+    for branch_repo in &repos {
+        if let Err(error) =
+            provision::prepare_existing_branch(state, &settings, branch_repo, &branch).await
+        {
+            return fail(
+                state,
+                &task,
+                &format!(
+                    "could not check out the PR branch in {}: {error}",
+                    branch_repo.full_name,
+                ),
+            )
+            .await;
+        }
     }
 
-    let github = state.github().await?;
-    let (owner, repo_name) = split_full_name(&repo.full_name)?;
-
-    // Snapshot the branch tip so we can later tell whether the agent pushed.
-    let before_sha = git::branch_head_sha(&github, owner, repo_name, &branch)
-        .await
-        .ok();
+    // Snapshot each repo's branch tip so we can later tell whether the agent
+    // pushed to any of them.
+    let mut before_shas = Vec::with_capacity(repos.len());
+    for branch_repo in &repos {
+        let (owner, name) = split_full_name(&branch_repo.full_name)?;
+        before_shas.push(
+            git::branch_head_sha(&github, owner, name, &branch)
+                .await
+                .ok(),
+        );
+    }
 
     let comments = fetch_issue_comments(state, &repo, &task).await;
     let prompt = match mode {
         WorkMode::FixCi => {
-            // Enumerate the failing checks (best-effort) to focus the agent.
-            let failing = match git::find_open_pr_for_branch(&github, owner, repo_name, &branch)
-                .await?
-            {
-                Some(pull) => match git::ci_status(&github, owner, repo_name, &pull.head_sha).await
-                {
-                    Ok(git::CiStatus::Failing(checks)) => checks,
-                    _ => Vec::new(),
-                },
-                None => Vec::new(),
-            };
+            // Enumerate the failing checks across every tracked open PR (best-
+            // effort), tagging each with its repo when the task spans more than one.
+            let failing = collect_failing_checks(state, &github, &task, repos.len() > 1).await;
             prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing, &comments)
         }
         WorkMode::ResolveConflict => prompt::build_merge_conflict(
@@ -835,16 +1037,24 @@ async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()>
         return fail(state, &task, &message).await;
     }
 
-    // A pushed commit moves the tip; nothing pushed means the agent chose not to
-    // act (e.g. the failure is pre-existing or out of scope).
-    let after_sha = git::branch_head_sha(&github, owner, repo_name, &branch)
-        .await
-        .ok();
-    let pushed = match (&before_sha, &after_sha) {
-        (Some(before), Some(after)) => before != after,
-        // If a tip can't be read, assume progress and let the review loop judge.
-        _ => true,
-    };
+    // A pushed commit moves a tip in some repo; nothing pushed in any means the
+    // agent chose not to act (e.g. the failure is pre-existing or out of scope).
+    let mut pushed = false;
+    for (branch_repo, before_sha) in repos.iter().zip(&before_shas) {
+        let (owner, name) = split_full_name(&branch_repo.full_name)?;
+        let after_sha = git::branch_head_sha(&github, owner, name, &branch)
+            .await
+            .ok();
+        let repo_pushed = match (before_sha, &after_sha) {
+            (Some(before), Some(after)) => before != after,
+            // If a tip can't be read, assume progress and let the review loop judge.
+            _ => true,
+        };
+        if repo_pushed {
+            pushed = true;
+            break;
+        }
+    }
 
     if !pushed {
         // Nothing pushed means the agent judged there was nothing it could (or
@@ -1246,116 +1456,375 @@ async fn review_once(state: &AppState) -> Result<()> {
     let github = state.github().await?;
 
     for task in candidates {
-        let Some(repo_id) = task.repo_id else {
-            continue;
-        };
-        let Some(repo) = queries::get_repository(&state.db, repo_id).await? else {
-            continue;
-        };
-        let Some(branch) = &task.branch else { continue };
-        let (owner, repo_name) = split_full_name(&repo.full_name)?;
-        let Some(pull) = git::find_open_pr_for_branch(&github, owner, repo_name, branch).await?
-        else {
-            continue; // PR closed or merged externally; nothing to do.
-        };
+        if let Err(error) = review_task(state, &settings, &github, &task).await {
+            warn!(error = %error, task_id = %task.id, "review of task failed");
+        }
+    }
+    Ok(())
+}
 
-        match git::ci_status(&github, owner, repo_name, &pull.head_sha).await? {
-            // Checks still running: re-check next tick.
-            git::CiStatus::Pending => {}
+/// Reviews one task across *all* of its pull requests: refreshes their CI +
+/// lifecycle, then takes the single action the gating rules imply (fix, wait,
+/// merge what's mergeable, finish when all merged, or hold for a human).
+async fn review_task(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+    github: &octocrab::Octocrab,
+    task: &Task,
+) -> Result<()> {
+    // Refresh tracked PRs; if none are tracked yet (detection lag, or a task from
+    // before multi-PR tracking), discover them from the branch now.
+    let mut prs = refresh_task_prs(state, github, task).await?;
+    if prs.is_empty() {
+        detect_task_prs(state, github, task).await?;
+        prs = queries::list_task_prs(&state.db, task.id).await?;
+        if prs.is_empty() {
+            return Ok(()); // PR closed/merged externally, or none yet.
+        }
+    }
 
-            // Red CI: hand it to the agent to fix, or give up once the cap hits.
-            // This applies regardless of review policy, so PRs are greened before
-            // a human ever looks at them.
-            git::CiStatus::Failing(checks) => {
-                // Absorb a transient infrastructure flake before spending an
-                // agent fix turn (or a human) on it: re-run a failed, first-
-                // attempt workflow once and judge the retry on a later tick. A
-                // run already retried sits at attempt >= 2, so this fires at most
-                // once per commit and then lets the real verdict through.
-                match git::rerun_failed_runs(&github, owner, repo_name, &pull.head_sha).await {
-                    Ok(reran) if reran > 0 => {
-                        info!(task_id = %task.id, reran, "re-ran failed CI once for a possible flake");
-                        continue;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        warn!(error = %error, task_id = %task.id, "could not re-run CI; treating as failed");
-                    }
-                }
+    let mut views = Vec::with_capacity(prs.len());
+    for pr in &prs {
+        let auto_merge =
+            pr_repo_policy(state, settings, pr).await? == ReviewPolicy::AutoSquashMerge;
+        views.push(pr_review_of(pr, auto_merge));
+    }
 
-                if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
-                    queries::set_task_status(&state.db, task.id, TaskStatus::CiFailing).await?;
-                } else {
-                    let note = format!(
-                        "CI still failing after {MAX_CI_FIX_ATTEMPTS} fix attempts ({checks}); \
-                         needs a human.",
-                        checks = checks.join(", "),
-                    );
-                    queries::block_task_ci(&state.db, task.id, &note).await?;
-                }
+    match review::decide(&views) {
+        // Still settling (CI pending, or no actionable PR this tick): re-check next.
+        ReviewDecision::Wait => {}
+        // Open, passing PRs remain that need a human to merge; keep awaiting. Only
+        // write when the status actually changes (e.g. returning from Merging once
+        // the auto PRs landed) so steady-state ticks stay quiet.
+        ReviewDecision::Hold => {
+            if task.status != TaskStatus::AwaitingReview {
+                queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
                 state.notify_board();
             }
+        }
+        // A failing PR: hand back to the agent (or block once the cap is hit).
+        ReviewDecision::Fix => handle_ci_failing(state, github, task, &prs).await?,
+        // Merge the green, auto-merge PRs now; the next tick finishes once all are.
+        ReviewDecision::Merge(indices) => {
+            merge_task_prs(state, github, task, &prs, &indices).await?;
+        }
+        // Every PR merged: the task is complete.
+        ReviewDecision::Done => {
+            queries::finish_task(&state.db, task.id, TaskColumn::Done, TaskStatus::Done).await?;
+            state.notify_board();
+            // Let the UI play the task-finished sound.
+            state.notify_task_finished(task.id, task.title.clone());
+            info!(task_id = %task.id, prs = prs.len(), "all PRs merged; marked done");
 
-            // Green CI: auto-merge repos merge now; others wait for a human.
-            git::CiStatus::Passing => {
-                let policy = repo.review_policy.unwrap_or(settings.default_review_policy);
-                if policy != ReviewPolicy::AutoSquashMerge {
-                    continue;
-                }
-                queries::set_task_status(&state.db, task.id, TaskStatus::Merging).await?;
-                state.notify_board();
-
-                match git::squash_merge(&github, owner, repo_name, pull.number).await {
-                    Ok(()) => {
-                        queries::finish_task(
-                            &state.db,
-                            task.id,
-                            TaskColumn::Done,
-                            TaskStatus::Done,
-                        )
-                        .await?;
-                        state.notify_board();
-                        // Let the UI play the task-finished sound.
-                        state.notify_task_finished(task.id, task.title.clone());
-                        info!(task_id = %task.id, "auto-merged and marked done");
-
-                        // Close the linked GitHub issue so Done doesn't leave it
-                        // open. The agent merges into `develop`, so GitHub's own
-                        // keyword-close (default-branch only) never fires. Best-
-                        // effort and idempotent: a failure (or an already-closed
-                        // issue) never affects the completed task.
-                        close_linked_issue(&github, &settings, &task, owner, repo_name).await;
-                    }
-                    // A failed auto-merge is almost always a merge conflict with
-                    // the base (another PR landed first). Rather than give up, hand
-                    // it back to the agent to merge the base in and resolve, bounded
-                    // by the same fix-attempt budget as CI. The agent's own "nothing
-                    // to push" path (in `work_pr_fix`) catches the genuinely
-                    // unresolvable cases (e.g. restricted merge settings) and leaves
-                    // them for a human; once the budget is exhausted we block here.
-                    Err(error) => {
-                        if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
-                            let note = format!(
-                                "Auto-merge failed: {error}. Re-engaging the agent to resolve \
-                                 the conflict with the base branch.",
-                            );
-                            queries::flag_merge_conflict(&state.db, task.id, &note).await?;
-                            state.notify_board();
-                        } else {
-                            let note = format!(
-                                "Auto-merge still failing after {MAX_CI_FIX_ATTEMPTS} resolution \
-                                 attempts: {error}. The PR likely conflicts with its base branch \
-                                 or merging is restricted; resolve it manually.",
-                            );
-                            block(state, &task, &note).await?;
-                        }
+            // Close the linked GitHub issue from the task's own repo (best-effort).
+            if let Some(repo_id) = task.repo_id {
+                if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
+                    if let Ok((owner, name)) = split_full_name(&repo.full_name) {
+                        close_linked_issue(github, settings, task, owner, name).await;
                     }
                 }
             }
         }
     }
-
     Ok(())
+}
+
+/// Squash-merges the green, auto-merge PRs (`indices`) of a task. A merge that
+/// fails is almost always a base conflict (another PR landed first); rather than
+/// give up, hand the task to the agent to merge the base in and resolve, bounded
+/// by the fix-attempt budget. The agent's "nothing to push" path catches the
+/// genuinely unresolvable cases (e.g. restricted merge settings); once the budget
+/// is exhausted we block for a human.
+async fn merge_task_prs(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+    prs: &[TaskPullRequest],
+    indices: &[usize],
+) -> Result<()> {
+    queries::set_task_status(&state.db, task.id, TaskStatus::Merging).await?;
+    state.notify_board();
+
+    for &index in indices {
+        let pr = &prs[index];
+        let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+            continue;
+        };
+        let number = u64::try_from(pr.pr_number).unwrap_or_default();
+        match git::squash_merge(github, owner, name, number).await {
+            Ok(()) => {
+                // Persist the merge immediately, so a later PR's conflict doesn't
+                // make us re-merge this one on the next tick.
+                queries::upsert_task_pr(
+                    &state.db,
+                    task.id,
+                    pr.repo_id,
+                    &pr.repo_full_name,
+                    pr.pr_number,
+                    &pr.pr_url,
+                    &pr.head_sha,
+                    "",
+                    "merged",
+                )
+                .await?;
+                info!(task_id = %task.id, pr = %pr.pr_url, "auto-merged a PR");
+            }
+            Err(error) => {
+                if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
+                    let note = format!(
+                        "Auto-merge of {} failed: {error}. Re-engaging the agent to resolve the \
+                         conflict with the base branch.",
+                        pr.pr_url,
+                    );
+                    queries::flag_merge_conflict(&state.db, task.id, &note).await?;
+                    state.notify_board();
+                } else {
+                    let note = format!(
+                        "Auto-merge of {} still failing after {MAX_CI_FIX_ATTEMPTS} resolution \
+                         attempts: {error}. It likely conflicts with its base branch or merging \
+                         is restricted; resolve it manually.",
+                        pr.pr_url,
+                    );
+                    block(state, task, &note).await?;
+                }
+                return Ok(());
+            }
+        }
+    }
+    state.notify_board();
+    Ok(())
+}
+
+/// Handles a task with at least one failing PR: absorb a transient flake on each
+/// failing PR's head once, otherwise hand the whole task back to the agent (or
+/// block it once the fix-attempt cap is reached). The fix turn works every repo.
+async fn handle_ci_failing(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+    prs: &[TaskPullRequest],
+) -> Result<()> {
+    let failing = || {
+        prs.iter()
+            .filter(|pr| pr.pr_state == "open" && pr.ci_state == "failing")
+    };
+
+    // Re-run a first-attempt flake on each failing PR and judge it on a later tick.
+    let mut reran = false;
+    for pr in failing() {
+        let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+            continue;
+        };
+        match git::rerun_failed_runs(github, owner, name, &pr.head_sha).await {
+            Ok(count) if count > 0 => {
+                reran = true;
+                info!(task_id = %task.id, pr = %pr.pr_url, "re-ran failed CI once for a possible flake");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "could not re-run CI; treating as failed");
+            }
+        }
+    }
+    if reran {
+        return Ok(());
+    }
+
+    if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
+        queries::set_task_status(&state.db, task.id, TaskStatus::CiFailing).await?;
+    } else {
+        let repos: Vec<&str> = failing().map(|pr| pr.repo_full_name.as_str()).collect();
+        let note = format!(
+            "CI still failing after {MAX_CI_FIX_ATTEMPTS} fix attempts on: {}. Needs a human.",
+            repos.join(", "),
+        );
+        queries::block_task_ci(&state.db, task.id, &note).await?;
+    }
+    state.notify_board();
+    Ok(())
+}
+
+// --- Pull-request tracking (multi-repo) --------------------------------------
+
+/// The stored label for a PR's CI verdict.
+fn ci_state_label(status: &git::CiStatus) -> &'static str {
+    match status {
+        git::CiStatus::Passing => "passing",
+        git::CiStatus::Pending => "pending",
+        git::CiStatus::Failing(_) => "failing",
+    }
+}
+
+/// Scans every enabled repo for an open PR on the task's branch and records each
+/// one with its CI verdict. Run after an agent turn, since that is when PRs are
+/// opened or pushed. Returns the number of open PRs tracked (one, for the common
+/// single-repo case).
+async fn detect_task_prs(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+) -> Result<usize> {
+    let Some(branch) = task.branch.as_deref() else {
+        return Ok(0);
+    };
+    let mut found = 0;
+    for repo in queries::list_repositories(&state.db)
+        .await?
+        .into_iter()
+        .filter(|repo| repo.enabled)
+    {
+        let Some((owner, name)) = repo.full_name.split_once('/') else {
+            continue;
+        };
+        let Some(pull) = git::find_open_pr_for_branch(github, owner, name, branch).await? else {
+            continue;
+        };
+        let ci = ci_state_label(&git::ci_status(github, owner, name, &pull.head_sha).await?);
+        queries::upsert_task_pr(
+            &state.db,
+            task.id,
+            Some(repo.id),
+            &repo.full_name,
+            i64::try_from(pull.number).unwrap_or_default(),
+            &pull.html_url,
+            &pull.head_sha,
+            ci,
+            "open",
+        )
+        .await?;
+        found += 1;
+    }
+    Ok(found)
+}
+
+/// Refreshes every tracked PR: an open PR's head + CI, or, once it's no longer
+/// open, whether it merged or closed. Returns the updated rows.
+async fn refresh_task_prs(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+) -> Result<Vec<TaskPullRequest>> {
+    for pr in queries::list_task_prs(&state.db, task.id).await? {
+        if pr.pr_state != "open" {
+            continue; // merged/closed PRs are settled.
+        }
+        let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+            continue;
+        };
+        let number = u64::try_from(pr.pr_number).unwrap_or_default();
+        let status = git::pr_status(github, owner, name, number).await?;
+        let (ci, pr_state, head) = match status.lifecycle {
+            git::PrLifecycle::Open => {
+                let ci =
+                    ci_state_label(&git::ci_status(github, owner, name, &status.head_sha).await?);
+                (ci, "open", status.head_sha)
+            }
+            git::PrLifecycle::Merged => ("", "merged", pr.head_sha.clone()),
+            git::PrLifecycle::Closed => ("", "closed", pr.head_sha.clone()),
+        };
+        queries::upsert_task_pr(
+            &state.db,
+            task.id,
+            pr.repo_id,
+            &pr.repo_full_name,
+            pr.pr_number,
+            &pr.pr_url,
+            &head,
+            ci,
+            pr_state,
+        )
+        .await?;
+    }
+    Ok(queries::list_task_prs(&state.db, task.id).await?)
+}
+
+/// The effective review policy for a tracked PR's repo (its own, else the global
+/// default).
+async fn pr_repo_policy(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+    pr: &TaskPullRequest,
+) -> Result<ReviewPolicy> {
+    let policy = match pr.repo_id {
+        Some(repo_id) => queries::get_repository(&state.db, repo_id)
+            .await?
+            .and_then(|repo| repo.review_policy),
+        None => None,
+    };
+    Ok(policy.unwrap_or(settings.default_review_policy))
+}
+
+/// Maps a stored PR row to the pure review view.
+fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool) -> PrReview {
+    match pr.pr_state.as_str() {
+        "merged" => PrReview::Merged,
+        "closed" => PrReview::Closed,
+        _ => PrReview::Open {
+            ci: match pr.ci_state.as_str() {
+                "passing" => PrCi::Passing,
+                "failing" => PrCi::Failing,
+                _ => PrCi::Pending,
+            },
+            auto_merge,
+        },
+    }
+}
+
+/// The repos whose branch the CI-fix turn should check out: the focus repo (so
+/// its context is present even on the first fix, before a PR is tracked) plus
+/// every other repo that has a tracked PR on this branch. Deduped, focus first.
+async fn task_branch_repos(
+    state: &AppState,
+    task: &Task,
+    focus: &Repository,
+) -> Result<Vec<Repository>> {
+    let mut repos = vec![focus.clone()];
+    for pr in queries::list_task_prs(&state.db, task.id).await? {
+        if pr.repo_full_name == focus.full_name {
+            continue;
+        }
+        if repos.iter().any(|repo| repo.full_name == pr.repo_full_name) {
+            continue;
+        }
+        if let Some(repo_id) = pr.repo_id {
+            if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
+                repos.push(repo);
+            }
+        }
+    }
+    Ok(repos)
+}
+
+/// Gathers the failing CI check names across every tracked open PR, tagging each
+/// with `repo#pr` when the task spans more than one PR so the agent can tell
+/// which repo is red. Best-effort: an unreachable PR contributes nothing.
+async fn collect_failing_checks(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+    tag_repo: bool,
+) -> Vec<String> {
+    let Ok(prs) = queries::list_task_prs(&state.db, task.id).await else {
+        return Vec::new();
+    };
+    let mut failing = Vec::new();
+    for pr in prs.iter().filter(|pr| pr.pr_state == "open") {
+        let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+            continue;
+        };
+        if let Ok(git::CiStatus::Failing(checks)) =
+            git::ci_status(github, owner, name, &pr.head_sha).await
+        {
+            for check in checks {
+                if tag_repo {
+                    failing.push(format!("{}#{}: {check}", pr.repo_full_name, pr.pr_number));
+                } else {
+                    failing.push(check);
+                }
+            }
+        }
+    }
+    failing
 }
 
 // --- Helpers -----------------------------------------------------------------
@@ -1574,28 +2043,6 @@ async fn defibrillator_loop(state: AppState) {
             Err(error) => warn!(error = %error, "defibrillator watchdog query failed"),
         }
     }
-}
-
-/// Detects the open PR for `branch`, retrying to absorb GitHub's indexing lag.
-///
-/// A freshly created PR can take a few seconds to surface in the head-filtered
-/// pulls list, so checking once the instant the turn ends races GitHub. Returns
-/// `None` only after [`PR_DETECT_ATTEMPTS`] checks all come back empty.
-async fn detect_pr(
-    github: &octocrab::Octocrab,
-    owner: &str,
-    repo: &str,
-    branch: &str,
-) -> Result<Option<git::OpenPr>> {
-    for attempt in 1..=PR_DETECT_ATTEMPTS {
-        if let Some(pull) = git::find_open_pr_for_branch(github, owner, repo, branch).await? {
-            return Ok(Some(pull));
-        }
-        if attempt < PR_DETECT_ATTEMPTS {
-            sleep(PR_DETECT_DELAY).await;
-        }
-    }
-    Ok(None)
 }
 
 /// Best-effort fetch of a task's issue comments so the brief carries the full

@@ -9,7 +9,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
-use crate::db::models::{EnvSuggestion, Event, Question, SourceKind, Task, TaskColumn};
+use crate::db::models::{
+    EnvSuggestion, Event, Question, SourceKind, Task, TaskColumn, TaskPullRequest,
+};
 use crate::db::queries;
 use crate::git;
 use crate::git::{IssueComment, IssueDetail, IssueThread, IssueUser};
@@ -54,10 +56,13 @@ pub struct TaskDetail {
     pub suggestions: Vec<EnvSuggestion>,
     /// Every decision the agent escalated on this task, answered or pending.
     pub questions: Vec<Question>,
+    /// Every pull request the task has opened, across all repos it spans. The
+    /// review loop gates Done on all of them passing CI and merging.
+    pub pull_requests: Vec<TaskPullRequest>,
 }
 
 /// `GET /api/v1/tasks/:id` - the card, its conversation events, its environment
-/// suggestions, and its escalated questions.
+/// suggestions, its escalated questions, and its pull requests.
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -72,11 +77,13 @@ pub async fn get_task(
     let events = queries::list_events_for_task(&state.db, id).await?;
     let suggestions = queries::list_suggestions_for_task(&state.db, id).await?;
     let questions = queries::list_questions_for_task(&state.db, id).await?;
+    let pull_requests = queries::list_task_prs(&state.db, id).await?;
     Ok(Json(TaskDetail {
         task,
         events,
         suggestions,
         questions,
+        pull_requests,
     })
     .into_response())
 }
@@ -96,6 +103,18 @@ pub async fn set_notes(
 ) -> ApiResult<Json<serde_json::Value>> {
     queries::set_task_notes(&state.db, id, &body.notes).await?;
     Ok(Json(json!({ "saved": true })))
+}
+
+/// `POST /api/v1/tasks/:id/reset` - hard-reset a stuck task: stop the agent if it
+/// is mid-turn on it, close its PR, delete its branch (remote + workspace), reopen
+/// a closed source issue, and return the card to Available. Returns a summary of
+/// what was done so the UI can confirm it.
+pub async fn hard_reset(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<crate::orchestrator::ResetSummary>> {
+    let summary = crate::orchestrator::reset_task(&state, id).await?;
+    Ok(Json(summary))
 }
 
 /// Resolves a task to its GitHub `(owner, repo, issue number)`, or an error

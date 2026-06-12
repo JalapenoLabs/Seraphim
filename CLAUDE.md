@@ -83,6 +83,12 @@ scripts/    start.sh stop.sh restart.sh
 - `src/db/` — `models.rs` (enums + `FromRow` structs), `queries.rs` (runtime sqlx), `mod.rs` (pool + migrate). Migrations in `api/migrations/`.
 - `src/claude/` — `events.rs` (stream-json parser, unit-tested), `exec.rs` (the `docker exec` turn runner).
 - `src/docker/` — `Workspace`: exec, restart, recreate (bollard).
+- `src/tailscale/` — `Tailscale`: manages the `seraphim-tailscale` sidecar via the
+  host Docker socket (exec `tailscale status/up/down/login` as root, container
+  restart). Powers the Settings → Tailscale panel (`http/tailscale.rs`,
+  `/api/v1/tailscale/{status,up,down,reauth,restart}`): the tailnet URL, hosting
+  status, connect/disconnect, and a login URL when the node needs auth. Status
+  JSON parsing is pure + unit-tested. Container name from `TAILSCALE_CONTAINER`.
 - `src/sources/` — `Source` enum (GitHub; Jira is a future variant), `github.rs`, `types.rs`.
 - `src/git/` — PR detection, CI-green check, squash-merge (octocrab).
 - `src/orchestrator/` — `mod.rs` (the loops), `provision.rs` (workspace provisioning), `prompt.rs`.
@@ -223,16 +229,24 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    `POST /agent/questions` and `POST /agent/suggestions`; the exec injects
    `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL`. One task awaited to completion before
    the next (no overlap).
-3. **review** — watches every open PR's CI: green → squash-merge
-   (`auto_squash_merge` repos) → **Done** (and, for a GitHub-sourced task, closes
-   the linked issue with `state_reason: "completed"` when `close_issue_on_done` is
-   set, the default; best-effort), else wait; red → hand back to the agent,
-   bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for a
-   human. A failed auto-merge (almost always a base conflict because another PR
+3. **review** — gates each task on **all** of its pull requests. A task can span
+   several repos (the agent opens a same-named branch + PR in each); every PR is
+   tracked in `task_pull_requests` and the task only reaches **Done** once they
+   have all merged. The pure, unit-tested `orchestrator::review::decide` takes the
+   tick's action from the set of PRs (`refresh_task_prs` updates each PR's CI +
+   lifecycle first): any open PR failing → hand back to the agent; any pending →
+   wait; merge the green `auto_squash_merge` PRs now; once all are settled and at
+   least one merged → **Done** (and, for a GitHub-sourced task, close the linked
+   issue with `state_reason: "completed"` when `close_issue_on_done` is set, the
+   default; best-effort); open passing human-review PRs → hold. A red PR is bounded
+   by `MAX_CI_FIX_ATTEMPTS` (3) before parking `ci_blocked`; the CI-fix turn checks
+   out the branch in every repo with a PR and tags each failing check with its
+   `repo#pr`. A failed auto-merge (almost always a base conflict because another PR
    landed first) flags the task `merge_conflict` so the agent resolves it on its
    branch instead of giving up, bounded by the same attempt budget; if the agent
    pushes nothing (genuinely unresolvable) or the budget is exhausted, it falls
-   back to `ci_blocked` for a human.
+   back to `ci_blocked` for a human. The single-PR case is just a one-row set, so
+   its behavior is unchanged.
 4. **defibrillator** (dead-agent management) — recovers turns that die mid-flight,
    which we call a **"heart attack"**: the agent hangs with no output, its stream
    breaks, or the turn aborts internally, leaving the card stranded `in_progress`
@@ -323,6 +337,16 @@ fail-fast) on every PR and on `main`/`develop`.
   epoch at its start and abandons its post-turn handling (session persist, task
   move) if it changed, so a reset landing mid-turn is never undone by the turn it
   interrupted. Keep that guard if you touch the turn-completion path.
+- **Per-task hard reset** (`POST /api/v1/tasks/:id/reset`, `orchestrator::reset_task`,
+  task page button) abandons one stuck task's attempt and starts it over: if the
+  agent is *actively* mid-turn on it (`in_progress` + `working`/`preparing`, unique
+  because the loop is single-threaded) it bumps `reset_epoch`, kills the Claude
+  process (`kill_agent_process`), and clears the shared session; then best-effort
+  closes the PR, deletes the branch (remote via `git::delete_remote_branch` + the
+  workspace clone), reopens a closed source issue, and returns the card to
+  **Available** (`queries::reset_task`, clearing branch/PR/error/session). Unlike
+  the global reset it leaves other tasks, the session (when not interrupting), and
+  history untouched. Returns a `ResetSummary` of what ran.
 - **stream-json schema can drift** across Claude Code versions; the parser keeps
   unknown shapes as `Other` rather than failing. Verify against the installed
   version when touching `claude/events.rs`.
@@ -348,6 +372,4 @@ fail-fast) on every PR and on `main`/`develop`.
   Jira is also future.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
-- **Multi-repo PRs** — one primary repo per task for PR detection; cross-repo
-  edits are possible but a single task opens one PR.
 - **Rate-limit handling** — surface `rate_limit` events and auto-pause (planned).

@@ -23,12 +23,15 @@ import type {
   Question,
   RepoDeletionImpact,
   Repository,
+  ResetSummary,
   ReviewPolicy,
   RuleAction,
   RuleGroup,
   RuleSource,
   Settings,
   Stats,
+  TailscaleActionResponse,
+  TailscaleStatus,
   Task,
   TaskColumn,
   TaskDetail
@@ -104,9 +107,34 @@ export function setTaskBlocking(taskId: string, blocking: boolean) {
   return apiClient.post(`tasks/${taskId}/blocking`, { json: { blocking } }).json<Task>()
 }
 
+// --- Bulk edit (board multi-select) ------------------------------------------
+
+// Set hold and/or blocking across a selection. Omit a field to leave it as is.
+export function bulkSetTaskFields(ids: string[], fields: { hold?: boolean; blocking?: boolean }) {
+  return apiClient.post('tasks/bulk/fields', { json: { ids, ...fields } }).json<{ updated: number }>()
+}
+
+// Move a selection into a column. Done closes the linked tickets; moving out of
+// Done reopens any that were closed.
+export function bulkSetTaskStatus(ids: string[], column: TaskColumn) {
+  return apiClient.post('tasks/bulk/status', { json: { ids, column } }).json<{ updated: number }>()
+}
+
+// Permanently delete a selection of tasks.
+export function bulkDeleteTasks(ids: string[]) {
+  return apiClient.post('tasks/bulk/delete', { json: { ids } }).json<{ deleted: number }>()
+}
+
 // Save the private per-task notepad. Stored only in our DB, never sent to the ticket.
 export function setTaskNotes(taskId: string, notes: string) {
   return apiClient.put(`tasks/${taskId}/notes`, { json: { notes } }).json<{ saved: boolean }>()
+}
+
+// Hard-reset a stuck task: stop the agent if it's mid-turn on it, close the PR,
+// delete the branch (remote + workspace), reopen a closed issue, and return the
+// card to Available. Returns a summary of what was actually done.
+export function hardResetTask(taskId: string) {
+  return apiClient.post(`tasks/${taskId}/reset`).json<ResetSummary>()
 }
 
 // --- Environment suggestions -------------------------------------------------
@@ -363,6 +391,30 @@ export function provisionWorkspace() {
 
 export function resetAgent(purgeMemories: boolean) {
   return apiClient.post('agent/reset', { json: { purge_memories: purgeMemories } }).json()
+}
+
+// --- Tailscale ---------------------------------------------------------------
+
+export function getTailscaleStatus() {
+  return apiClient.get('tailscale/status').json<TailscaleStatus>()
+}
+
+export function tailscaleUp() {
+  return apiClient.post('tailscale/up').json<TailscaleActionResponse>()
+}
+
+export function tailscaleDown() {
+  return apiClient.post('tailscale/down').json<TailscaleActionResponse>()
+}
+
+// Start an interactive login to authenticate the node. `force` re-authenticates
+// an already-connected node (to get a fresh login URL / move it to a new tailnet).
+export function tailscaleReauth(force: boolean) {
+  return apiClient.post('tailscale/reauth', { json: { force } }).json<TailscaleActionResponse>()
+}
+
+export function tailscaleRestart() {
+  return apiClient.post('tailscale/restart').json<TailscaleActionResponse>()
 }
 
 // --- Automation rules --------------------------------------------------------

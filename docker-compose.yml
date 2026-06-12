@@ -47,6 +47,8 @@ services:
       API_BIND: 0.0.0.0:27182
       # Name of the workspace container the API drives via `docker exec`.
       WORKSPACE_CONTAINER: seraphim-workspace
+      # Name of the Tailscale sidecar the API manages (status/up/down/reauth).
+      TAILSCALE_CONTAINER: seraphim-tailscale
       RUST_LOG: info,seraphim_api=debug
       # Self-update: the API launches an updater container that bind-mounts these
       # HOST paths to git pull + `docker compose up -d --build`. HOST_REPO_DIR is

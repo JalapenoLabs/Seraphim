@@ -15,7 +15,8 @@ use super::models::{
     AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
     EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
     PendingQuestion, Question, QuestionOption, QuestionStatus, RepoDeletionImpact, Repository,
-    ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
+    ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest,
+    TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -1171,6 +1172,36 @@ pub async fn move_task(
     .await
 }
 
+/// Hard-resets a single task back to a clean, unstarted state in **Available**:
+/// clears its branch, PR link, error, session, and started/finished markers,
+/// re-queues it (`queued`), zeroes the CI-fix counter, and restarts its stats.
+/// The external cleanup (closing the PR, deleting the branch, reopening the
+/// issue) is done by the caller in the orchestrator before this is called.
+pub async fn reset_task(pool: &PgPool, id: Uuid, position: f64) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET \
+           board_column = 'available', position = $2, status = 'queued', \
+           branch = NULL, pr_url = NULL, error = NULL, session_id = NULL, \
+           ci_fix_attempts = 0, started_at = NULL, finished_at = NULL, \
+           stats_reset_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(position)
+    .fetch_one(pool)
+    .await
+}
+
+/// Drops any still-pending questions a task had escalated, so a reset card stops
+/// showing up as needing input. Answered questions are kept as history.
+pub async fn delete_pending_questions(pool: &PgPool, task_id: Uuid) -> sqlx::Result<u64> {
+    let result = sqlx::query("DELETE FROM questions WHERE task_id = $1 AND status = 'pending'")
+        .bind(task_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn set_task_hold(pool: &PgPool, id: Uuid, hold: bool) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET hold = $2, updated_at = now() WHERE id = $1 RETURNING *",
@@ -1191,6 +1222,55 @@ pub async fn set_task_blocking(pool: &PgPool, id: Uuid, blocking: bool) -> sqlx:
     .bind(blocking)
     .fetch_one(pool)
     .await
+}
+
+// --- Bulk operations ---------------------------------------------------------
+//
+// Power the board's multi-select bulk edit. Each takes a set of task ids and
+// applies one change in a single statement, so a selection of many cards is one
+// round-trip rather than N.
+
+/// Loads the tasks for a set of ids (board order), for bulk operations that need
+/// each card's source/repo to also reflect the change onto its ticket.
+pub async fn list_tasks_by_ids(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE id = ANY($1) ORDER BY board_column, position",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+}
+
+/// Sets `hold` and/or `blocking` on a set of tasks. A `None` field is left as is
+/// (`COALESCE` keeps the existing value), so the caller changes only the fields
+/// the user actually picked. Returns how many rows were updated.
+pub async fn bulk_set_fields(
+    pool: &PgPool,
+    ids: &[Uuid],
+    hold: Option<bool>,
+    blocking: Option<bool>,
+) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE tasks SET hold = COALESCE($2, hold), blocking = COALESCE($3, blocking), \
+         updated_at = now() WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(hold)
+    .bind(blocking)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Permanently deletes a set of tasks. Child rows (turns, events, suggestions,
+/// questions, internal comments) cascade; heart attacks keep their snapshot with
+/// a nulled task id. Returns how many tasks were removed.
+pub async fn delete_tasks(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {
+    let result = sqlx::query("DELETE FROM tasks WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 /// Whether any blocking task is currently in progress. A fresh task that
@@ -1445,6 +1525,50 @@ pub async fn set_task_pr(pool: &PgPool, id: Uuid, pr_url: &str) -> sqlx::Result<
     )
     .bind(id)
     .bind(pr_url)
+    .fetch_one(pool)
+    .await
+}
+
+/// Every pull request tracked for a task, oldest first.
+pub async fn list_task_prs(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<TaskPullRequest>> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "SELECT * FROM task_pull_requests WHERE task_id = $1 ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Records (or refreshes) a task's pull request, keyed by `(task, repo, number)`.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_task_pr(
+    pool: &PgPool,
+    task_id: Uuid,
+    repo_id: Option<Uuid>,
+    repo_full_name: &str,
+    pr_number: i64,
+    pr_url: &str,
+    head_sha: &str,
+    ci_state: &str,
+    pr_state: &str,
+) -> sqlx::Result<TaskPullRequest> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "INSERT INTO task_pull_requests \
+           (task_id, repo_id, repo_full_name, pr_number, pr_url, head_sha, ci_state, pr_state) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         ON CONFLICT (task_id, repo_full_name, pr_number) DO UPDATE SET \
+           repo_id = EXCLUDED.repo_id, pr_url = EXCLUDED.pr_url, head_sha = EXCLUDED.head_sha, \
+           ci_state = EXCLUDED.ci_state, pr_state = EXCLUDED.pr_state, updated_at = now() \
+         RETURNING *",
+    )
+    .bind(task_id)
+    .bind(repo_id)
+    .bind(repo_full_name)
+    .bind(pr_number)
+    .bind(pr_url)
+    .bind(head_sha)
+    .bind(ci_state)
+    .bind(pr_state)
     .fetch_one(pool)
     .await
 }

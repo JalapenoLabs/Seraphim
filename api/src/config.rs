@@ -14,6 +14,8 @@ pub struct Config {
     pub claude_model: String,
     pub org_name: String,
     pub workspace_container: String,
+    /// Name of the Tailscale sidecar container the API manages via Docker.
+    pub tailscale_container: String,
     /// URL the workspace container uses to reach this API, so the agent's
     /// `seraphim-ask` and `seraphim-suggest` helpers can post questions and
     /// recommendations. Defaults to the compose service address (`api:27182`),
@@ -57,6 +59,8 @@ impl Config {
             org_name: env::var("ORG_NAME").unwrap_or_else(|_| "Seraphim".to_string()),
             workspace_container: env::var("WORKSPACE_CONTAINER")
                 .unwrap_or_else(|_| "seraphim-workspace".to_string()),
+            tailscale_container: env::var("TAILSCALE_CONTAINER")
+                .unwrap_or_else(|_| "seraphim-tailscale".to_string()),
             internal_api_url: env::var("INTERNAL_API_URL")
                 .unwrap_or_else(|_| "http://api:27182".to_string()),
             update: UpdateConfig {

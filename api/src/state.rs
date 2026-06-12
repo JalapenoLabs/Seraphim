@@ -88,6 +88,8 @@ pub struct SubscriptionUsage {
 pub struct AppState {
     pub db: PgPool,
     pub workspace: Workspace,
+    /// Handle to the Tailscale sidecar container, for the management UI.
+    pub tailscale: crate::tailscale::Tailscale,
     pub events: broadcast::Sender<ServerEvent>,
     /// URL the workspace uses to reach this API (for the agent's helpers).
     pub internal_api_url: String,
@@ -139,6 +141,7 @@ impl AppState {
     pub fn new(
         db: PgPool,
         workspace: Workspace,
+        tailscale: crate::tailscale::Tailscale,
         internal_api_url: String,
         update: crate::config::UpdateConfig,
     ) -> Self {
@@ -156,6 +159,7 @@ impl AppState {
         Self {
             db,
             workspace,
+            tailscale,
             events,
             internal_api_url,
             cooldown_until: Arc::new(RwLock::new(None)),
