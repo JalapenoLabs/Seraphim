@@ -413,6 +413,24 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One pull request opened for a task. A multi-repo task has several; the review
+/// loop gates Done on all of them. `ci_state` is `pending`/`passing`/`failing`
+/// (only meaningful while open); `pr_state` is `open`/`merged`/`closed`.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct TaskPullRequest {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub repo_id: Option<Uuid>,
+    pub repo_full_name: String,
+    pub pr_number: i64,
+    pub pr_url: String,
+    pub head_sha: String,
+    pub ci_state: String,
+    pub pr_state: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// One Claude Code invocation against a task.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Turn {
