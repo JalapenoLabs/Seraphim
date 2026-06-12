@@ -113,6 +113,15 @@ pub fn router(state: AppState) -> Router {
         .route("/notepad", get(notepad::get).put(notepad::set))
         .route("/settings/tokens", post(settings::set_tokens))
         .route(
+            "/settings/claude/oauth/start",
+            post(settings::claude_oauth_start),
+        )
+        .route(
+            "/settings/claude/oauth/finish",
+            post(settings::claude_oauth_finish),
+        )
+        .route("/settings/claude/api-key", post(settings::claude_api_key))
+        .route(
             "/settings/sounds/:kind",
             get(settings::get_sound)
                 .post(settings::upload_sound)

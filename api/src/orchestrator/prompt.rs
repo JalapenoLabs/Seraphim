@@ -443,6 +443,8 @@ mod tests {
             current_session_id: None,
             updated_at: chrono::Utc::now(),
             claude_token_set: false,
+            claude_auth_mode: crate::db::models::ClaudeAuthMode::Subscription,
+            claude_usage_token_set: false,
             github_token_set: false,
             availability_enabled: false,
             availability_timezone: "UTC".to_string(),

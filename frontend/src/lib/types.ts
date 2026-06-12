@@ -131,6 +131,9 @@ export type AvailabilityWindow = {
   end_minute: number
 }
 
+// How the agent authenticates to Claude.
+export type ClaudeAuthMode = 'subscription' | 'api_key'
+
 export type Settings = {
   org_name: string
   global_instructions: string
@@ -145,6 +148,10 @@ export type Settings = {
   current_session_id: string | null
   updated_at: string
   claude_token_set: boolean
+  // How the agent authenticates to Claude (subscription token vs API key).
+  claude_auth_mode: ClaudeAuthMode
+  // Whether subscription usage credentials are stored (powers the usage gauge).
+  claude_usage_token_set: boolean
   github_token_set: boolean
   availability_enabled: boolean
   availability_timezone: string
@@ -276,6 +283,10 @@ export type Stats = {
   usage_resets_at: number | null
   // Rate-limit status (e.g. "allowed") shown when the stream reports no number.
   usage_status: string | null
+  // Subscription 7-day usage utilization (0-100) and reset (unix seconds), when a
+  // subscription login is configured.
+  usage_seven_day_utilization: number | null
+  usage_seven_day_resets_at: number | null
   turns: number
 }
 

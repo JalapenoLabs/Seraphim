@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::claude::oauth::PendingAuth;
 use crate::db::queries;
 use crate::docker::Workspace;
 use crate::jira::{JiraClient, JiraConfig};
@@ -70,6 +71,18 @@ pub struct LiveUsage {
     pub context_tokens: i64,
 }
 
+/// A cached subscription usage snapshot for the gauge, polled from
+/// `/api/oauth/usage`. `None` when no subscription login is configured or no poll
+/// has succeeded yet. Utilization values are percentages (0-100); reset times are
+/// unix seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionUsage {
+    pub five_hour_utilization: Option<f64>,
+    pub five_hour_resets_at: Option<i64>,
+    pub seven_day_utilization: Option<f64>,
+    pub seven_day_resets_at: Option<i64>,
+}
+
 /// Clonable, shared state handed to every request handler and background task.
 #[derive(Clone)]
 pub struct AppState {
@@ -89,6 +102,13 @@ pub struct AppState {
     /// Ephemeral (like [`Self::cooldown_until`]); the stats endpoints overlay it on
     /// the persisted totals so the counter ticks during generation.
     live_usage: Arc<RwLock<Option<LiveUsage>>>,
+    /// The PKCE secrets for an in-flight Claude subscription OAuth login, held
+    /// between starting the flow (which returns the consent URL) and the operator
+    /// pasting the code back. Ephemeral; only one login is in flight at a time.
+    pending_oauth: Arc<RwLock<Option<PendingAuth>>>,
+    /// The latest polled subscription usage snapshot, refreshed by the usage loop
+    /// and read by the stats gauges. `None` until a poll succeeds.
+    usage: Arc<RwLock<Option<SubscriptionUsage>>>,
     /// Bumped by a hard reset. A turn captures it at the start and abandons its
     /// post-turn handling (session persist, task move) if it changed, so a reset
     /// that lands mid-turn is never undone by the turn it interrupted.
@@ -144,6 +164,8 @@ impl AppState {
             internal_api_url,
             cooldown_until: Arc::new(RwLock::new(None)),
             live_usage: Arc::new(RwLock::new(None)),
+            pending_oauth: Arc::new(RwLock::new(None)),
+            usage: Arc::new(RwLock::new(None)),
             reset_epoch: Arc::new(AtomicU64::new(0)),
             update,
             update_status: Arc::new(RwLock::new(update_status)),
@@ -198,6 +220,29 @@ impl AppState {
     /// the SSE tick rather than emitting on every update.
     pub fn set_live_usage(&self, usage: Option<LiveUsage>) {
         *self.live_usage.write().expect("live usage lock poisoned") = usage;
+    }
+
+    /// Stashes the PKCE secrets for an in-flight subscription OAuth login.
+    pub fn set_pending_oauth(&self, pending: PendingAuth) {
+        *self.pending_oauth.write().expect("oauth lock poisoned") = Some(pending);
+    }
+
+    /// Consumes the in-flight OAuth secrets (so a code can't be redeemed twice).
+    pub fn take_pending_oauth(&self) -> Option<PendingAuth> {
+        self.pending_oauth
+            .write()
+            .expect("oauth lock poisoned")
+            .take()
+    }
+
+    /// The latest polled subscription usage snapshot, if any.
+    pub fn usage(&self) -> Option<SubscriptionUsage> {
+        self.usage.read().expect("usage lock poisoned").clone()
+    }
+
+    /// Replaces (or clears with `None`) the cached subscription usage snapshot.
+    pub fn set_usage(&self, usage: Option<SubscriptionUsage>) {
+        *self.usage.write().expect("usage lock poisoned") = usage;
     }
 
     /// Builds a GitHub client from the token stored in the database. Built on

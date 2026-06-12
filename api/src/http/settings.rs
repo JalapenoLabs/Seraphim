@@ -130,6 +130,77 @@ pub async fn set_tokens(
     Ok(Json(settings_view(&state).await?))
 }
 
+// --- Claude authentication ---------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct OauthStartResponse {
+    /// The consent URL to open in a new tab.
+    pub authorize_url: String,
+}
+
+/// `POST /api/v1/settings/claude/oauth/start` - begins a Claude subscription
+/// OAuth login. Returns the consent URL; the PKCE secrets are held server-side
+/// until the operator pastes the resulting code back via `.../oauth/finish`.
+pub async fn claude_oauth_start(
+    State(state): State<AppState>,
+) -> ApiResult<Json<OauthStartResponse>> {
+    let (authorize_url, pending) = crate::claude::oauth::start();
+    state.set_pending_oauth(pending);
+    Ok(Json(OauthStartResponse { authorize_url }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OauthFinishRequest {
+    /// The value from the consent callback page (`<code>#<state>` or a bare code).
+    pub code: String,
+}
+
+/// `POST /api/v1/settings/claude/oauth/finish` - completes the login: exchanges
+/// the pasted code, mints the long-lived inference token the agent runs on, and
+/// stores it alongside the refreshing usage credentials (switching to
+/// subscription mode).
+pub async fn claude_oauth_finish(
+    State(state): State<AppState>,
+    Json(body): Json<OauthFinishRequest>,
+) -> ApiResult<Json<Settings>> {
+    let pending = state
+        .take_pending_oauth()
+        .ok_or_else(|| eyre::eyre!("no Claude login is in progress; start one first"))?;
+    let tokens =
+        crate::claude::oauth::exchange_code(&body.code, &pending.verifier, &pending.state).await?;
+    let inference_token = crate::claude::oauth::mint_inference_token(&tokens.access_token).await?;
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in);
+    queries::set_subscription_credentials(
+        &state.db,
+        &inference_token,
+        &tokens.access_token,
+        &tokens.refresh_token,
+        expires_at,
+        &tokens.scopes,
+    )
+    .await?;
+    Ok(Json(settings_view(&state).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiKeyRequest {
+    pub api_key: String,
+}
+
+/// `POST /api/v1/settings/claude/api-key` - stores an Anthropic API key and
+/// switches the agent to API-key auth (no subscription usage gauge applies).
+pub async fn claude_api_key(
+    State(state): State<AppState>,
+    Json(body): Json<ApiKeyRequest>,
+) -> ApiResult<Json<Settings>> {
+    let key = body.api_key.trim();
+    if key.is_empty() {
+        return Err(eyre::eyre!("the API key is empty").into());
+    }
+    queries::set_api_key(&state.db, key).await?;
+    Ok(Json(settings_view(&state).await?))
+}
+
 // --- Notification sounds ------------------------------------------------------
 
 /// The biggest custom clip we accept. Notification sounds are short, so this is

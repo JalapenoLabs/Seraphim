@@ -305,6 +305,27 @@ export function setTokens(body: TokensRequest) {
   return apiClient.post('settings/tokens', { json: body }).json<Settings>()
 }
 
+// --- Claude authentication ---------------------------------------------------
+
+export type OauthStartResponse = {
+  authorize_url: string
+}
+
+// Begins a Claude subscription OAuth login; returns the consent URL to open.
+export function startClaudeOauth() {
+  return apiClient.post('settings/claude/oauth/start').json<OauthStartResponse>()
+}
+
+// Completes the login with the code pasted from the consent callback page.
+export function finishClaudeOauth(code: string) {
+  return apiClient.post('settings/claude/oauth/finish', { json: { code } }).json<Settings>()
+}
+
+// Stores an Anthropic API key and switches the agent to API-key auth.
+export function setClaudeApiKey(apiKey: string) {
+  return apiClient.post('settings/claude/api-key', { json: { api_key: apiKey } }).json<Settings>()
+}
+
 // --- Jira --------------------------------------------------------------------
 
 export type JiraTestResult = { ok: boolean; user?: string; error?: string }

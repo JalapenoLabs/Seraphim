@@ -14,6 +14,7 @@ mod network;
 mod prompt;
 mod provision;
 mod review;
+mod subscription;
 mod thoughts;
 mod usage;
 
@@ -124,6 +125,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
+    tokio::spawn(subscription::usage_loop(state.clone()));
     tokio::spawn(agent_loop(state));
 }
 
@@ -1227,6 +1229,7 @@ async fn stream_turn(
         prompt,
         resume_session_id: settings.current_session_id.clone(),
         model: settings.claude_model.clone(),
+        auth_mode: settings.claude_auth_mode,
         oauth_token: queries::get_claude_token(&state.db).await?,
         github_token: queries::get_github_token(&state.db).await?,
         task_id: task.id.to_string(),

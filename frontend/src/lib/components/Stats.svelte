@@ -65,6 +65,7 @@
       : 0
   )
   const usagePct = $derived(stats?.usage_utilization ?? 0)
+  const sevenDayPct = $derived(stats?.usage_seven_day_utilization ?? 0)
   // When the headless stream reports no numeric utilization, fall back to its
   // categorical status (e.g. "allowed") rather than a misleading 0%.
   const usageStatusLabel = $derived(stats?.usage_status?.replace(/_/g, ' ') ?? 'Unknown')
@@ -160,9 +161,9 @@
       {#if stats.usage_utilization != null}
         {@render gauge(
           usagePct,
-          'Usage limit',
+          stats.usage_seven_day_utilization != null ? '5-hour limit' : 'Usage limit',
           usageColor(usagePct),
-          `Subscription usage limit: ${pctLabel(usagePct)} used${resetsLabel(stats.usage_resets_at)}. This is the whole subscription (all terminals), not just Seraphim.`
+          `Subscription 5-hour usage limit: ${pctLabel(usagePct)} used${resetsLabel(stats.usage_resets_at)}. This is the whole subscription (all terminals), not just Seraphim.`
         )}
       {:else}
         <!-- The headless agent stream reports a status, not a percentage. -->
@@ -177,6 +178,15 @@
           </div>
           <span class="text-xs text-muted-foreground">Usage limit</span>
         </div>
+      {/if}
+
+      {#if stats.usage_seven_day_utilization != null}
+        {@render gauge(
+          sevenDayPct,
+          'Weekly limit',
+          usageColor(sevenDayPct),
+          `Subscription 7-day usage limit: ${pctLabel(sevenDayPct)} used${resetsLabel(stats.usage_seven_day_resets_at)}. This is the whole subscription (all terminals), not just Seraphim.`
+        )}
       {/if}
 
       {@render gauge(
