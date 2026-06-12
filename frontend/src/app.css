@@ -5,6 +5,13 @@
 /* shadcn-svelte design tokens, themed to Seraphim's dark palette. The app is
    dark-only, so the values live directly on :root (no light/dark switch). */
 :root {
+  /* Tell the browser this is a dark UI so it paints native controls (the
+     <select> option popup, scrollbars, date pickers, etc.) with dark chrome.
+     Without this, a native <select>'s dropdown renders on the OS default
+     white background while our CSS forces the option text light — white text
+     on a white list, unreadable (issue #175). */
+  color-scheme: dark;
+
   --radius: 0.625rem;
 
   --background: #0d1117;
