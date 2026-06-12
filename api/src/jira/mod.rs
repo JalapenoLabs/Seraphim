@@ -323,6 +323,67 @@ impl JiraClient {
         }
         Ok(true)
     }
+
+    /// Creates a `Task`-type issue in `project_key` and returns its key + URL.
+    /// Cloud (REST v3) takes the description as Atlassian Document Format; Server
+    /// (v2) takes plain text, so the description is encoded per deployment.
+    pub async fn create_issue(
+        &self,
+        project_key: &str,
+        summary: &str,
+        description: &str,
+    ) -> Result<CreatedJiraIssue> {
+        #[derive(Deserialize)]
+        struct Created {
+            key: String,
+        }
+
+        let url = format!("{}{}/issue", self.config.base_url, self.config.api_base());
+
+        let mut fields = serde_json::json!({
+            "project": { "key": project_key },
+            "summary": summary,
+            "issuetype": { "name": "Task" },
+        });
+        if !description.trim().is_empty() {
+            fields["description"] = match self.config.deployment {
+                JiraDeployment::Cloud => serde_json::json!({
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": description }],
+                    }],
+                }),
+                JiraDeployment::Server => serde_json::json!(description),
+            };
+        }
+
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", self.config.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "fields": fields }))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(eyre!("Jira issue creation failed ({status}): {body}"));
+        }
+
+        let created: Created = response.json().await?;
+        Ok(CreatedJiraIssue {
+            url: format!("{}/browse/{}", self.config.base_url, created.key),
+        })
+    }
+}
+
+/// A freshly created Jira ticket.
+#[derive(Debug, Clone)]
+pub struct CreatedJiraIssue {
+    pub url: String,
 }
 
 /// Flattens a Jira description into plain text. Server (v2) returns a string;

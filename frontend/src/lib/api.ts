@@ -116,6 +116,17 @@ export function acknowledgeSuggestion(suggestionId: string, acknowledged: boolea
     .json<EnvSuggestion>()
 }
 
+// Where a one-click "create issue from this recommendation" lands.
+export type CreateIssueTarget = 'internal' | 'github' | 'jira'
+
+// Turns a recommendation into a tracked issue (Seraphim / GitHub / Jira) and
+// marks it done. Returns the updated suggestion and a link when there is one.
+export function createIssueFromSuggestion(suggestionId: string, target: CreateIssueTarget) {
+  return apiClient
+    .post(`suggestions/${suggestionId}/create`, { json: { target } })
+    .json<{ suggestion: EnvSuggestion; url: string | null }>()
+}
+
 // --- Questions ---------------------------------------------------------------
 
 type PendingQuestionsResponse = {

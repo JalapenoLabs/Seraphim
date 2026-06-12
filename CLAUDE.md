@@ -131,7 +131,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **`environment_suggestions`** — setup recommendations the agent makes after a
   task (`title`, `detail`, `acknowledged`). Posted by the agent's
   `seraphim-suggest` helper; shown loudly on the board and as checkboxes on the
-  task until the user acknowledges them.
+  task until the user acknowledges them. A split "Create issue" button
+  (`POST /suggestions/:id/create` with `target` internal/github/jira) turns one
+  into a tracked issue (internal task, a GitHub issue in the task's repo via
+  octocrab, or a Jira ticket) and marks the recommendation done.
 - **`questions`** — decisions the agent escalated to the user, stored on the task
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and
