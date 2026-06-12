@@ -212,10 +212,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    inside the availability schedule, it picks work by priority — (a) **resume** a
    task whose question the user just answered (`waiting_for_input` → deliver the
    answers via `prompt::build_resume`), (b) a PR with failing CI to fix
-   (`ci_failing`), (c) top of **To Do** (fresh issue → branch → Claude turn →
-   detect PR → **In Review**, or **park** as `waiting_for_input` if the agent
-   asked a question), then (d) when nothing else is queued, *revisit* a PR it gave
-   up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min). The agent
+   (`ci_failing`), (c) a PR whose auto-merge failed on a conflict to resolve
+   (`merge_conflict` → `prompt::build_merge_conflict`: merge the base in, resolve,
+   keep migrations linear), (d) top of **To Do** (fresh issue → branch → Claude
+   turn → detect PR → **In Review**, or **park** as `waiting_for_input` if the
+   agent asked a question), then (e) when nothing else is queued, *revisit* a PR it
+   gave up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min). The agent
    asks via the `seraphim-ask` CLI and records environment recommendations via the
    `seraphim-suggest` CLI (both baked into the workspace image), posting to
    `POST /agent/questions` and `POST /agent/suggestions`; the exec injects
@@ -226,8 +228,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    the linked issue with `state_reason: "completed"` when `close_issue_on_done` is
    set, the default; best-effort), else wait; red → hand back to the agent,
    bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for a
-   human. A failed merge (e.g. base conflict) also parks it `ci_blocked` rather
-   than retrying forever.
+   human. A failed auto-merge (almost always a base conflict because another PR
+   landed first) flags the task `merge_conflict` so the agent resolves it on its
+   branch instead of giving up, bounded by the same attempt budget; if the agent
+   pushes nothing (genuinely unresolvable) or the budget is exhausted, it falls
+   back to `ci_blocked` for a human.
 4. **defibrillator** (dead-agent management) — recovers turns that die mid-flight,
    which we call a **"heart attack"**: the agent hangs with no output, its stream
    breaks, or the turn aborts internally, leaving the card stranded `in_progress`

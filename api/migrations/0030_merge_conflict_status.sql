@@ -1,0 +1,13 @@
+-- Auto-merge conflict recovery.
+--
+-- When a green PR fails to auto-merge (almost always a merge conflict with the
+-- base because another PR landed first), the agent now resolves it instead of
+-- giving up. A new operational sub-state marks such a PR so the agent picks it up
+-- proactively, re-engages on its branch (merge the base in, resolve, push), and
+-- lets the review loop re-merge it. Bounded by the same fix-attempt budget as CI;
+-- once exhausted (or if the agent can't resolve it) it falls back to ci_blocked
+-- for a human.
+--
+-- Adding an enum value is transaction-safe on Postgres 12+ as long as the value
+-- isn't used in this same migration (it isn't).
+ALTER TYPE task_status ADD VALUE IF NOT EXISTS 'merge_conflict'; -- auto-merge blocked; agent to resolve

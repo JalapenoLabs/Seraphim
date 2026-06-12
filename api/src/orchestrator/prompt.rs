@@ -98,6 +98,58 @@ pub fn build_ci_fix(
     prompt
 }
 
+/// Builds the instruction text to resolve a merge conflict that blocked the PR's
+/// auto-merge.
+///
+/// Sent when a green PR fails to auto-merge, which almost always means another
+/// pull request landed on the base first and the branch now conflicts. The agent
+/// works the existing `branch`: merge the base in, resolve the conflicts, verify
+/// any migrations stay linear, and push, after which the review loop re-merges.
+/// `reason` is the note recorded when the merge failed.
+pub fn build_merge_conflict(
+    settings: &Settings,
+    repo: &Repository,
+    task: &Task,
+    branch: &str,
+    reason: &str,
+    comments: &[IssueComment],
+) -> String {
+    let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
+    let blocker = if reason.trim().is_empty() {
+        "(no reason was recorded)".to_string()
+    } else {
+        reason.trim().to_string()
+    };
+    let mut prompt = context_header(settings, repo, task, comments);
+
+    prompt.push_str(&format!(
+        "# Resolving a merge conflict\n\
+         - Auto-merge of this issue's pull request was blocked: {blocker}\n\
+         - This almost always means another pull request merged into `{default}` first and your \
+         branch now conflicts with it. Resolve it yourself rather than leaving it for a human.\n\
+         - Your cwd is `/workspace`. The focus repo `{repo}` is at `{repo_path}`, already checked \
+         out on branch `{branch}` with your earlier commits.\n\
+         - Bring the latest base in and resolve the conflict: \
+         `git fetch origin && git merge origin/{default}`, fix every conflicted file, and complete \
+         the merge. (Use a merge, not a rebase, so you don't have to force-push.)\n\
+         {migrations}\
+         - Run the project's build/tests/linters to confirm the merge is clean, then commit and \
+         push. Do not open a new pull request; the existing one updates automatically.\n\
+         - If the conflict is genuinely out of scope or you cannot resolve it safely, leave a \
+         brief comment on the PR explaining why, and stop without committing.\n\
+         - After pushing, stop and finish with a short summary. Do not wait for CI; Seraphim \
+         re-checks the PR and re-merges it (or brings you back) automatically.\n",
+        blocker = blocker,
+        default = repo.default_branch,
+        repo = repo.full_name,
+        repo_path = repo_path,
+        branch = branch,
+        migrations = MIGRATION_LINEARITY,
+    ));
+
+    prompt
+}
+
 /// Builds the instruction text to revisit a PR the agent had given up on.
 ///
 /// Unlike [`build_ci_fix`], this names merge conflicts as a likely cause (the
@@ -129,6 +181,7 @@ pub fn build_revisit(
          - If it conflicts with the base, bring the latest base in and resolve it: \
          `git fetch origin && git merge origin/{default}` (or rebase), fix the conflicts, and \
          continue.\n\
+         {migrations}\
          - Investigate any failing checks with `gh pr checks` and `gh run view --log-failed`, then \
          fix them.\n\
          - Run the project's build/tests/linters, commit, and push. Do not open a new pull \
@@ -140,6 +193,7 @@ pub fn build_revisit(
         repo = repo.full_name,
         repo_path = repo_path,
         branch = branch,
+        migrations = MIGRATION_LINEARITY,
     ));
 
     prompt
@@ -243,6 +297,19 @@ fn render_discussion(comments: &[IssueComment]) -> String {
 
     section
 }
+
+/// Guidance, shared by the conflict-resolution prompts, on keeping database
+/// migrations in a single linear order after merging the base branch in.
+///
+/// Two PRs that each add a migration are fine in isolation, but once both land
+/// the branch holds migrations authored in parallel; without a check they can end
+/// up out of order, duplicated, or numbered to collide. The agent verifies the
+/// migrations within its own scope still form one linear sequence.
+const MIGRATION_LINEARITY: &str = "\
+    - If your branch adds database migrations, double-check them after merging the base in: \
+    another PR may have added migrations too. Make sure the migrations in your scope still form a \
+    single linear sequence (correct ordering and numbering, no duplicate or colliding versions), \
+    and renumber yours onto the latest if they now clash.\n";
 
 /// Guidance, appended to every task prompt, on recommending setup improvements.
 const ENVIRONMENT_SUGGESTIONS: &str = "\n\
@@ -352,6 +419,55 @@ mod tests {
         }
     }
 
+    /// A minimal `Settings` for the prompt builders. Only `org_name` and
+    /// `global_instructions` reach the prompt; the rest are inert defaults.
+    fn sample_settings() -> Settings {
+        use crate::db::models::{JiraDeployment, NetworkAccessLevel, ReviewPolicy};
+        Settings {
+            org_name: "JalapenoLabs".to_string(),
+            global_instructions: String::new(),
+            default_review_policy: ReviewPolicy::None,
+            agent_paused: false,
+            claude_model: String::new(),
+            workspace_image_tag: String::new(),
+            base_setup_script: String::new(),
+            config_repo_url: String::new(),
+            default_branch_template: String::new(),
+            config_repo_error: None,
+            current_session_id: None,
+            updated_at: chrono::Utc::now(),
+            claude_token_set: false,
+            github_token_set: false,
+            availability_enabled: false,
+            availability_timezone: "UTC".to_string(),
+            availability_windows: Json(Vec::new()),
+            availability_skip_dates: Json(Vec::new()),
+            network_access_level: NetworkAccessLevel::Full,
+            network_access_domains: Json(Vec::new()),
+            network_access_include_defaults: true,
+            usage_limit_pause_enabled: false,
+            usage_limit_threshold: 80,
+            usage_paused_until: None,
+            post_thoughts_enabled: false,
+            close_issue_on_done: true,
+            jira_enabled: false,
+            jira_deployment: JiraDeployment::Cloud,
+            jira_base_url: String::new(),
+            jira_email: String::new(),
+            jira_token_set: false,
+            github_webhook_secret_set: false,
+            jira_webhook_secret_set: false,
+            attention_sound_enabled: true,
+            completion_sound_enabled: true,
+            attention_sound_custom: false,
+            completion_sound_custom: false,
+            jira_token_preview: None,
+            claude_token_preview: None,
+            github_token_preview: None,
+            cooldown_until: None,
+        }
+    }
+
     fn sample_repo() -> Repository {
         Repository {
             id: uuid::Uuid::nil(),
@@ -431,6 +547,43 @@ mod tests {
         assert!(prompt.contains("declined to choose"));
         assert!(prompt.contains("let's talk it over"));
         assert!(prompt.contains("seraphim-ask"));
+    }
+
+    #[test]
+    fn merge_conflict_prompt_directs_a_base_merge_and_linear_migrations() {
+        let settings = sample_settings();
+        let prompt = build_merge_conflict(
+            &settings,
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            "Auto-merge failed: not mergeable.",
+            &[],
+        );
+
+        // It reorients the agent to the conflict and the exact recovery command.
+        assert!(prompt.contains("Resolving a merge conflict"));
+        assert!(prompt.contains("Auto-merge failed: not mergeable."));
+        assert!(prompt.contains("git merge origin/v3.0.0"));
+        // It carries the migration-linearity guidance the issue asked for.
+        assert!(prompt.contains("migrations"));
+        assert!(prompt.contains("single linear sequence"));
+        // It must not tell the agent to open a new PR; the existing one updates.
+        assert!(prompt.contains("Do not open a new pull request"));
+    }
+
+    #[test]
+    fn revisit_prompt_also_carries_migration_guidance() {
+        let settings = sample_settings();
+        let prompt = build_revisit(
+            &settings,
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            "set aside as stuck",
+            &[],
+        );
+        assert!(prompt.contains("single linear sequence"));
     }
 
     #[test]

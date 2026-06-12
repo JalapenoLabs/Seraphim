@@ -107,6 +107,9 @@ enum WorkMode {
     Resume,
     /// An open PR with failing CI: re-engage on its branch to fix the checks.
     FixCi,
+    /// A PR whose auto-merge failed on a conflict: re-engage to merge the base in
+    /// and resolve it, then let the review loop re-merge.
+    ResolveConflict,
     /// A PR the agent gave up on (CI or merge conflict), retried while idle.
     Revisit,
 }
@@ -567,6 +570,12 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
     if let Some(task) = queries::pick_next_ci_fix(&state.db).await? {
         return Ok(Some((task, WorkMode::FixCi)));
     }
+    // Resolving a conflict that blocked auto-merge also takes priority over fresh
+    // work, so a PR that just lost mergeability is unblocked promptly rather than
+    // abandoned while the agent moves on to the next issue.
+    if let Some(task) = queries::pick_next_merge_conflict(&state.db).await? {
+        return Ok(Some((task, WorkMode::ResolveConflict)));
+    }
     // A blocking task in progress (being worked or parked waiting for input)
     // serializes the queue: pull no new To Do work until it finishes. Resumes
     // and CI fixes above continue existing in-flight work and are not gated.
@@ -589,8 +598,11 @@ async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
     match mode {
         WorkMode::Fresh => work_fresh(state, task, false).await,
         WorkMode::Resume => work_fresh(state, task, true).await,
-        WorkMode::FixCi => work_ci_fix(state, task, false).await,
-        WorkMode::Revisit => work_ci_fix(state, task, true).await,
+        // Every "re-engage on an existing PR" mode shares one flow; the mode only
+        // chooses the prompt and whether the attempt budget is reset.
+        WorkMode::FixCi | WorkMode::ResolveConflict | WorkMode::Revisit => {
+            work_pr_fix(state, task, mode).await
+        }
     }
 }
 
@@ -708,17 +720,19 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
     Ok(())
 }
 
-/// Re-engages the agent on an open PR that's failing CI (`revisit = false`) or
-/// one it had given up on and is being retried while idle (`revisit = true`).
+/// Re-engages the agent on an open PR that needs another turn: failing CI
+/// ([`WorkMode::FixCi`]), a conflict that blocked auto-merge
+/// ([`WorkMode::ResolveConflict`]), or a PR it had given up on, retried while idle
+/// ([`WorkMode::Revisit`]).
 ///
-/// Checks out the PR's existing branch, runs one turn, and decides what happens
-/// next by whether the agent pushed: a new commit returns the task to review for
-/// a re-check; no new commit means the agent judged it out of scope, so the PR
-/// is left for a human and the agent moves on. A revisit also resets the CI-fix
-/// counter so the renewed effort gets the full retry budget, and its prompt
-/// names merge conflicts (the usual reason auto-merge blocked) as a likely cause.
-async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> {
-    info!(task_id = %task.id, attempts = task.ci_fix_attempts, revisit, "fixing pull request");
+/// Checks out the PR's existing branch, runs one turn with the prompt for `mode`,
+/// and decides what happens next by whether the agent pushed: a new commit returns
+/// the task to review for a re-check (or a re-merge); no new commit means the agent
+/// judged it out of scope, so the PR is left for a human and the agent moves on. A
+/// revisit also resets the fix-attempt counter so the renewed effort gets the full
+/// budget again.
+async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
+    info!(task_id = %task.id, attempts = task.ci_fix_attempts, ?mode, "fixing pull request");
 
     let Some(repo_id) = task.repo_id else {
         return block(state, &task, "no repository is configured for this issue").await;
@@ -734,7 +748,7 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
 
     // A revisit is a fresh effort: clear the exhausted counter so the renewed
     // fix cycle gets the full retry budget again.
-    if revisit {
+    if mode == WorkMode::Revisit {
         queries::reset_ci_fix_attempts(&state.db, task.id).await?;
     }
 
@@ -761,27 +775,42 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
         .await
         .ok();
 
-    // Enumerate the failing checks (best-effort) to focus the agent.
-    let failing = match git::find_open_pr_for_branch(&github, owner, repo_name, &branch).await? {
-        Some(pull) => match git::ci_status(&github, owner, repo_name, &pull.head_sha).await {
-            Ok(git::CiStatus::Failing(checks)) => checks,
-            _ => Vec::new(),
-        },
-        None => Vec::new(),
-    };
-
     let comments = fetch_issue_comments(state, &repo, &task).await;
-    let prompt = if revisit {
-        prompt::build_revisit(
+    let prompt = match mode {
+        WorkMode::FixCi => {
+            // Enumerate the failing checks (best-effort) to focus the agent.
+            let failing = match git::find_open_pr_for_branch(&github, owner, repo_name, &branch)
+                .await?
+            {
+                Some(pull) => match git::ci_status(&github, owner, repo_name, &pull.head_sha).await
+                {
+                    Ok(git::CiStatus::Failing(checks)) => checks,
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing, &comments)
+        }
+        WorkMode::ResolveConflict => prompt::build_merge_conflict(
             &settings,
             &repo,
             &task,
             &branch,
             task.error.as_deref().unwrap_or_default(),
             &comments,
-        )
-    } else {
-        prompt::build_ci_fix(&settings, &repo, &task, &branch, &failing, &comments)
+        ),
+        WorkMode::Revisit => prompt::build_revisit(
+            &settings,
+            &repo,
+            &task,
+            &branch,
+            task.error.as_deref().unwrap_or_default(),
+            &comments,
+        ),
+        // work_task only routes the three PR-fix modes here.
+        WorkMode::Fresh | WorkMode::Resume => {
+            unreachable!("work_pr_fix is only called for PR-fix modes")
+        }
     };
     let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
@@ -816,20 +845,27 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
     };
 
     if !pushed {
-        return block(
-            state,
-            &task,
-            "The agent made no changes for the failing CI (likely pre-existing or out of scope). \
-             Left for human review.",
-        )
-        .await;
+        // Nothing pushed means the agent judged there was nothing it could (or
+        // should) do, so the PR is left for a human with a mode-appropriate note.
+        let note = match mode {
+            WorkMode::ResolveConflict => {
+                "The agent could not resolve the merge conflict on its own (it may need a \
+                 human decision or be out of scope). Left for human review."
+            }
+            _ => {
+                "The agent made no changes for the failing CI (likely pre-existing or out of \
+                 scope). Left for human review."
+            }
+        };
+        return block(state, &task, note).await;
     }
 
-    // Fix pushed: back to review so the loop re-checks CI on the new commit.
+    // Pushed: back to review so the loop re-checks CI and re-attempts the merge on
+    // the new commit.
     queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
     state.notify_board();
-    info!(task_id = %task.id, attempt, "pushed CI fix; awaiting re-check");
+    info!(task_id = %task.id, attempt, "pushed a fix; awaiting re-check");
     Ok(())
 }
 
@@ -1287,16 +1323,29 @@ async fn review_once(state: &AppState) -> Result<()> {
                         // issue) never affects the completed task.
                         close_linked_issue(&github, &settings, &task, owner, repo_name).await;
                     }
-                    // A merge can fail for reasons retrying won't fix (conflicts
-                    // with the base, restricted merge settings). Record it and
-                    // stop auto-retrying so the loop doesn't spin; a human takes
-                    // over from the In Review lane.
+                    // A failed auto-merge is almost always a merge conflict with
+                    // the base (another PR landed first). Rather than give up, hand
+                    // it back to the agent to merge the base in and resolve, bounded
+                    // by the same fix-attempt budget as CI. The agent's own "nothing
+                    // to push" path (in `work_pr_fix`) catches the genuinely
+                    // unresolvable cases (e.g. restricted merge settings) and leaves
+                    // them for a human; once the budget is exhausted we block here.
                     Err(error) => {
-                        let note = format!(
-                            "Auto-merge failed: {error}. The PR likely conflicts with its base \
-                             branch or merging is restricted; resolve it manually.",
-                        );
-                        block(state, &task, &note).await?;
+                        if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
+                            let note = format!(
+                                "Auto-merge failed: {error}. Re-engaging the agent to resolve \
+                                 the conflict with the base branch.",
+                            );
+                            queries::flag_merge_conflict(&state.db, task.id, &note).await?;
+                            state.notify_board();
+                        } else {
+                            let note = format!(
+                                "Auto-merge still failing after {MAX_CI_FIX_ATTEMPTS} resolution \
+                                 attempts: {error}. The PR likely conflicts with its base branch \
+                                 or merging is restricted; resolve it manually.",
+                            );
+                            block(state, &task, &note).await?;
+                        }
                     }
                 }
             }

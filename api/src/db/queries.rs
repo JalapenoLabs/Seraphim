@@ -1254,6 +1254,21 @@ pub async fn pick_next_ci_fix(pool: &PgPool) -> sqlx::Result<Option<Task>> {
     .await
 }
 
+/// The next PR whose auto-merge failed on a conflict and that the agent should
+/// resolve: top of `In Review` flagged `merge_conflict`, not on hold.
+///
+/// Unlike [`pick_next_revisit`] this has no cooldown: a fresh conflict is handed
+/// back to the agent promptly (and ahead of new To Do work) so a PR that just
+/// fell out of mergeability is unblocked rather than left to the idle revisit.
+pub async fn pick_next_merge_conflict(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'merge_conflict' \
+         AND hold = FALSE ORDER BY position ASC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 /// Increments a task's CI-fix attempt counter, returning the new count.
 pub async fn bump_ci_fix_attempt(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {
     sqlx::query_scalar(
@@ -1299,6 +1314,25 @@ pub async fn block_task_ci(pool: &PgPool, id: Uuid, note: &str) -> sqlx::Result<
     )
     .bind(id)
     .bind(TaskStatus::CiBlocked)
+    .bind(note)
+    .fetch_one(pool)
+    .await
+}
+
+/// Flags a PR whose auto-merge failed (typically a conflict with the base) for
+/// the agent to resolve. The card keeps its `in_review` lane and PR; the status
+/// and note change so the agent picks it up proactively.
+///
+/// Unlike [`block_task_ci`], this does not set `finished_at`: the task is not
+/// finished, just handed back. `last_activity_at` is refreshed so the card sorts
+/// as freshly touched and any later idle-revisit cooldown is measured from now.
+pub async fn flag_merge_conflict(pool: &PgPool, id: Uuid, note: &str) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET status = $2, error = $3, last_activity_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(TaskStatus::MergeConflict)
     .bind(note)
     .fetch_one(pool)
     .await
