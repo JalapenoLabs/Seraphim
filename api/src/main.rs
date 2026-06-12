@@ -15,6 +15,7 @@ mod jira;
 mod orchestrator;
 mod secrets;
 mod state;
+mod tailscale;
 mod update;
 
 use eyre::{Context, Result};
@@ -49,10 +50,12 @@ async fn main() -> Result<()> {
         config.workspace_container.clone(),
         settings.workspace_image_tag.clone(),
     )?;
+    let tailscale = tailscale::Tailscale::connect(config.tailscale_container.clone())?;
 
     let state = AppState::new(
         db,
         workspace,
+        tailscale,
         config.internal_api_url.clone(),
         config.update.clone(),
     );

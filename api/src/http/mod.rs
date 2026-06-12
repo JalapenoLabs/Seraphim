@@ -16,6 +16,7 @@ mod settings;
 mod sse;
 mod stats;
 mod suggestions;
+mod tailscale;
 mod tasks;
 mod update;
 mod webhooks;
@@ -124,6 +125,11 @@ pub fn router(state: AppState) -> Router {
         .route("/workspace/recreate", post(workspace::recreate))
         .route("/workspace/provision", post(workspace::provision))
         .route("/agent/reset", post(workspace::reset))
+        .route("/tailscale/status", get(tailscale::status))
+        .route("/tailscale/up", post(tailscale::up))
+        .route("/tailscale/down", post(tailscale::down))
+        .route("/tailscale/reauth", post(tailscale::reauth))
+        .route("/tailscale/restart", post(tailscale::restart))
         .route(
             "/automation/rules",
             get(automation::list).post(automation::create),

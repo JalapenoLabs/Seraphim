@@ -8,6 +8,7 @@
     Repository,
     ReviewPolicy,
     Settings,
+    TailscaleStatus,
     TaskColumn
   } from '$lib/types'
   import type { EnvVarWrite, UpdateStatus } from '$lib/api'
@@ -41,7 +42,12 @@
     updateSettings,
     uploadSound,
     clearSound,
-    soundUrl
+    soundUrl,
+    getTailscaleStatus,
+    tailscaleUp,
+    tailscaleDown,
+    tailscaleReauth,
+    tailscaleRestart
   } from '$lib/api'
   import type { SoundKind } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
@@ -71,6 +77,7 @@
     { id: 'statistics', label: 'Statistics' },
     { id: 'env', label: 'Environment variables' },
     { id: 'workspace', label: 'Workspace' },
+    { id: 'tailscale', label: 'Tailscale' },
     { id: 'updates', label: 'Updates' },
     { id: 'backup', label: 'Backup & restore' }
   ] as const
@@ -547,6 +554,80 @@
     workspaceMessage = 'Recreating + provisioning…'
     await recreateWorkspace()
     workspaceMessage = 'Workspace recreated; repos + config reprovisioned.'
+  }
+
+  // --- Tailscale management ---------------------------------------------------
+  let tailscale = $state<TailscaleStatus | null>(null)
+  let tailscaleLoading = $state(false)
+  let tailscaleBusy = $state(false)
+  let tailscaleMessage = $state<string | null>(null)
+  let reauthDialogOpen = $state(false)
+  let tailscaleRestartDialogOpen = $state(false)
+
+  function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : 'unknown error'
+  }
+
+  async function loadTailscale() {
+    tailscaleLoading = true
+    try {
+      tailscale = await getTailscaleStatus()
+    } catch (error) {
+      tailscaleMessage = `Could not read Tailscale status: ${errorText(error)}`
+    } finally {
+      tailscaleLoading = false
+    }
+  }
+
+  // Lazy-load the status the first time the operator opens the Tailscale section
+  // (it execs into the container, so we don't pay for it on every settings visit).
+  $effect(() => {
+    if (active === 'tailscale' && !tailscale && !tailscaleLoading) {
+      loadTailscale()
+    }
+  })
+
+  async function runTailscaleAction(
+    action: () => Promise<{ ok: boolean; message: string; status: TailscaleStatus }>,
+    pending: string
+  ) {
+    tailscaleBusy = true
+    tailscaleMessage = pending
+    try {
+      const result = await action()
+      tailscale = result.status
+      tailscaleMessage = result.message
+    } catch (error) {
+      tailscaleMessage = `Failed: ${errorText(error)}`
+    } finally {
+      tailscaleBusy = false
+    }
+  }
+
+  const runTailscaleUp = () => runTailscaleAction(tailscaleUp, 'Connecting…')
+  const runTailscaleDown = () => runTailscaleAction(tailscaleDown, 'Disconnecting…')
+
+  function runTailscaleReauth() {
+    reauthDialogOpen = false
+    return runTailscaleAction(() => tailscaleReauth(true), 'Starting re-authentication…')
+  }
+
+  // When the node simply needs login (no force), get the URL without a warning.
+  const runTailscaleLogin = () =>
+    runTailscaleAction(() => tailscaleReauth(false), 'Requesting a login URL…')
+
+  function runTailscaleRestart() {
+    tailscaleRestartDialogOpen = false
+    return runTailscaleAction(tailscaleRestart, 'Restarting the container…')
+  }
+
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+      tailscaleMessage = 'Copied to clipboard.'
+    } catch (error) {
+      tailscaleMessage = `Could not copy: ${errorText(error)}`
+    }
   }
 
   // Hard reset: purge the agent's history/session (and optionally memories), then
@@ -1558,6 +1639,170 @@
             </AlertDialog.Footer>
           </AlertDialog.Content>
         </AlertDialog.Root>
+      </Card.Content>
+    </Card.Root>
+    {/if}
+
+    {#if active === 'tailscale'}
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Tailscale</Card.Title>
+        <Card.Description>
+          Seraphim's UI is exposed over your tailnet by a Tailscale sidecar container. See its URL
+          and hosting status here, connect or disconnect it, restart it, or get a login link when it
+          needs to be authenticated.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-4">
+        <div class="flex items-center gap-3">
+          <Button variant="outline" disabled={tailscaleLoading} onclick={loadTailscale}>
+            {tailscaleLoading ? 'Refreshing…' : 'Refresh'}
+          </Button>
+          {#if tailscaleMessage}
+            <span class="text-sm text-muted-foreground break-words">{tailscaleMessage}</span>
+          {/if}
+        </div>
+
+        {#if tailscale && !tailscale.container_running}
+          <div class="rounded-md border border-warning/40 bg-warning/5 p-3 text-sm">
+            The Tailscale container isn't running. Start the stack (<code
+              class="rounded bg-secondary px-1 py-0.5">docker compose up -d</code
+            >), or try Restart below.
+          </div>
+        {:else if tailscale}
+          <!-- Connection state + the tailnet URL. -->
+          <div class="space-y-3 rounded-md border border-border p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              {#if tailscale.connected}
+                <Badge class="bg-success/15 text-success">Connected</Badge>
+              {:else if tailscale.needs_login}
+                <Badge class="bg-warning/15 text-warning">Needs authentication</Badge>
+              {:else}
+                <Badge variant="outline" class="text-muted-foreground">Disconnected</Badge>
+              {/if}
+              {#if tailscale.connected}
+                <Badge variant="outline" class={tailscale.online ? 'text-success' : 'text-muted-foreground'}>
+                  {tailscale.online ? 'Online' : 'Offline'}
+                </Badge>
+                <Badge variant="outline" class={tailscale.serve_active ? 'text-success' : 'text-muted-foreground'}>
+                  {tailscale.serve_active ? 'Hosting UI' : 'Not hosting'}
+                </Badge>
+              {/if}
+              {#if tailscale.backend_state}
+                <span class="text-xs text-muted-foreground">({tailscale.backend_state})</span>
+              {/if}
+            </div>
+
+            {#if tailscale.url}
+              <div>
+                <div class="text-xs uppercase tracking-wide text-muted-foreground">Tailnet URL</div>
+                <div class="mt-1 flex flex-wrap items-center gap-2">
+                  <a
+                    href={tailscale.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    class="font-mono text-sm text-primary hover:underline break-all"
+                  >
+                    {tailscale.url}
+                  </a>
+                  <Button variant="ghost" size="sm" onclick={() => copyToClipboard(tailscale!.url!)}>
+                    Copy
+                  </Button>
+                </div>
+              </div>
+            {/if}
+
+            <div class="grid grid-cols-1 gap-1 text-sm sm:grid-cols-2">
+              {#if tailscale.tailnet}
+                <div><span class="text-muted-foreground">Tailnet:</span> {tailscale.tailnet}</div>
+              {/if}
+              {#if tailscale.hostname}
+                <div><span class="text-muted-foreground">Hostname:</span> {tailscale.hostname}</div>
+              {/if}
+              {#if tailscale.tailscale_ips.length}
+                <div class="sm:col-span-2">
+                  <span class="text-muted-foreground">IPs:</span>
+                  <span class="font-mono text-xs">{tailscale.tailscale_ips.join(', ')}</span>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- A pending login URL the operator needs to visit to authenticate. -->
+          {#if tailscale.auth_url}
+            <div class="space-y-2 rounded-md border border-warning/50 bg-warning/5 p-4">
+              <div class="text-sm font-medium">This node needs to be authenticated.</div>
+              <div class="flex flex-wrap items-center gap-2">
+                <a
+                  href={tailscale.auth_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  class={buttonVariants({ variant: 'default', size: 'sm' })}
+                >
+                  Open login page
+                </a>
+                <Button variant="ghost" size="sm" onclick={() => copyToClipboard(tailscale!.auth_url!)}>
+                  Copy link
+                </Button>
+              </div>
+            </div>
+          {/if}
+        {/if}
+
+        <!-- Management actions. -->
+        <div class="flex flex-wrap items-center gap-2 border-t border-border pt-4">
+          {#if tailscale?.connected}
+            <Button variant="outline" disabled={tailscaleBusy} onclick={runTailscaleDown}>Disconnect</Button>
+          {:else}
+            <Button variant="outline" disabled={tailscaleBusy} onclick={runTailscaleUp}>Connect</Button>
+          {/if}
+
+          {#if tailscale?.needs_login && !tailscale?.auth_url}
+            <Button variant="outline" disabled={tailscaleBusy} onclick={runTailscaleLogin}>
+              Get login URL
+            </Button>
+          {/if}
+
+          <!-- Re-authenticate (force): disconnects until the new login completes. -->
+          <AlertDialog.Root bind:open={reauthDialogOpen}>
+            <AlertDialog.Trigger class={buttonVariants({ variant: 'outline' })} disabled={tailscaleBusy}>
+              Re-authenticate
+            </AlertDialog.Trigger>
+            <AlertDialog.Content>
+              <AlertDialog.Header>
+                <AlertDialog.Title>Re-authenticate this node?</AlertDialog.Title>
+                <AlertDialog.Description>
+                  This starts a fresh login and returns a new link to authenticate the node (for
+                  example to move it to a different Tailscale account). The node disconnects until the
+                  login is completed, so the tailnet URL is briefly unavailable.
+                </AlertDialog.Description>
+              </AlertDialog.Header>
+              <AlertDialog.Footer>
+                <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+                <AlertDialog.Action onclick={runTailscaleReauth}>Re-authenticate</AlertDialog.Action>
+              </AlertDialog.Footer>
+            </AlertDialog.Content>
+          </AlertDialog.Root>
+
+          <AlertDialog.Root bind:open={tailscaleRestartDialogOpen}>
+            <AlertDialog.Trigger class={buttonVariants({ variant: 'outline' })} disabled={tailscaleBusy}>
+              Restart
+            </AlertDialog.Trigger>
+            <AlertDialog.Content>
+              <AlertDialog.Header>
+                <AlertDialog.Title>Restart the Tailscale container?</AlertDialog.Title>
+                <AlertDialog.Description>
+                  Restarts the sidecar in place (re-applying its serve config and auth key). The
+                  tailnet URL is briefly unavailable while it reconnects.
+                </AlertDialog.Description>
+              </AlertDialog.Header>
+              <AlertDialog.Footer>
+                <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+                <AlertDialog.Action onclick={runTailscaleRestart}>Restart</AlertDialog.Action>
+              </AlertDialog.Footer>
+            </AlertDialog.Content>
+          </AlertDialog.Root>
+        </div>
       </Card.Content>
     </Card.Root>
     {/if}

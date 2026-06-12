@@ -29,6 +29,8 @@ import type {
   RuleSource,
   Settings,
   Stats,
+  TailscaleActionResponse,
+  TailscaleStatus,
   Task,
   TaskColumn,
   TaskDetail
@@ -360,6 +362,30 @@ export function provisionWorkspace() {
 
 export function resetAgent(purgeMemories: boolean) {
   return apiClient.post('agent/reset', { json: { purge_memories: purgeMemories } }).json()
+}
+
+// --- Tailscale ---------------------------------------------------------------
+
+export function getTailscaleStatus() {
+  return apiClient.get('tailscale/status').json<TailscaleStatus>()
+}
+
+export function tailscaleUp() {
+  return apiClient.post('tailscale/up').json<TailscaleActionResponse>()
+}
+
+export function tailscaleDown() {
+  return apiClient.post('tailscale/down').json<TailscaleActionResponse>()
+}
+
+// Start an interactive login to authenticate the node. `force` re-authenticates
+// an already-connected node (to get a fresh login URL / move it to a new tailnet).
+export function tailscaleReauth(force: boolean) {
+  return apiClient.post('tailscale/reauth', { json: { force } }).json<TailscaleActionResponse>()
+}
+
+export function tailscaleRestart() {
+  return apiClient.post('tailscale/restart').json<TailscaleActionResponse>()
 }
 
 // --- Automation rules --------------------------------------------------------
