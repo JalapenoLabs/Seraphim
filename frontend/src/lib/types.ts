@@ -396,11 +396,30 @@ export type BoardResponse = {
   heart_attacks: HeartAttack[]
 }
 
+// A pull request the task has opened. A task may span several repos, so it can
+// have more than one; the review loop gates Done on all of them.
+export type TaskPullRequest = {
+  id: string
+  task_id: string
+  repo_id: string | null
+  repo_full_name: string
+  pr_number: number
+  pr_url: string
+  head_sha: string
+  // The open PR's CI verdict: 'pending' | 'passing' | 'failing'.
+  ci_state: string
+  // The PR lifecycle: 'open' | 'merged' | 'closed'.
+  pr_state: string
+  created_at: string
+  updated_at: string
+}
+
 export type TaskDetail = {
   task: Task
   events: AgentEvent[]
   suggestions: EnvSuggestion[]
   questions: Question[]
+  pull_requests: TaskPullRequest[]
 }
 
 // The kanban lanes, in display order, with human-readable labels.
