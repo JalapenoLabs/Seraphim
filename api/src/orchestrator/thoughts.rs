@@ -81,6 +81,7 @@ async fn summarize(
         // disturb) the shared task session.
         resume_session_id: None,
         model: settings.claude_model.clone(),
+        auth_mode: settings.claude_auth_mode,
         oauth_token: queries::get_claude_token(&state.db).await?,
         github_token: queries::get_github_token(&state.db).await?,
         // A summary turn doesn't act as the task, so it gets no helper wiring.

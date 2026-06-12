@@ -12,10 +12,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AutomationRule, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite,
-    HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel, PendingQuestion,
-    Question, QuestionOption, QuestionStatus, RepoDeletionImpact, Repository, ReviewPolicy,
-    Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
+    AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
+    EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
+    PendingQuestion, Question, QuestionOption, QuestionStatus, RepoDeletionImpact, Repository,
+    ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -29,6 +29,8 @@ const SETTINGS_COLUMNS: &str =
      claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
      default_branch_template, config_repo_error, current_session_id, updated_at, \
      (claude_oauth_token <> '') AS claude_token_set, \
+     claude_auth_mode, \
+     (claude_usage_refresh_token <> '') AS claude_usage_token_set, \
      (github_token <> '') AS github_token_set, \
      availability_enabled, availability_timezone, availability_windows, \
      availability_skip_dates, network_access_level, network_access_domains, \
@@ -263,6 +265,82 @@ pub async fn set_tokens(
     Ok(())
 }
 
+/// The refreshing OAuth credentials used to poll the subscription usage gauge
+/// (all-empty when no subscription login is configured). Internal use only.
+pub async fn get_usage_credentials(pool: &PgPool) -> sqlx::Result<ClaudeUsageCredentials> {
+    sqlx::query_as::<_, ClaudeUsageCredentials>(
+        "SELECT claude_usage_access_token AS access_token, \
+         claude_usage_refresh_token AS refresh_token, \
+         claude_usage_expires_at AS expires_at FROM settings WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// Persists a completed subscription OAuth login: the long-lived inference token
+/// the agent runs on, plus the refreshing usage credentials, switching auth mode
+/// to `subscription`.
+pub async fn set_subscription_credentials(
+    pool: &PgPool,
+    inference_token: &str,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: DateTime<Utc>,
+    scopes: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE settings SET claude_oauth_token = $1, claude_auth_mode = 'subscription', \
+         claude_usage_access_token = $2, claude_usage_refresh_token = $3, \
+         claude_usage_expires_at = $4, claude_usage_scopes = $5, updated_at = now() \
+         WHERE id = 1",
+    )
+    .bind(inference_token)
+    .bind(access_token)
+    .bind(refresh_token)
+    .bind(expires_at)
+    .bind(scopes)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Updates the usage access token (and the rotated refresh token, if the endpoint
+/// returned a new one) after a refresh. An empty `refresh_token` keeps the stored
+/// one.
+pub async fn set_usage_tokens(
+    pool: &PgPool,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: DateTime<Utc>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE settings SET claude_usage_access_token = $1, \
+         claude_usage_refresh_token = COALESCE(NULLIF($2, ''), claude_usage_refresh_token), \
+         claude_usage_expires_at = $3, updated_at = now() WHERE id = 1",
+    )
+    .bind(access_token)
+    .bind(refresh_token)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Switches to API-key auth: stores the key as the inference credential and clears
+/// the subscription usage credentials (the gauge does not apply).
+pub async fn set_api_key(pool: &PgPool, api_key: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE settings SET claude_oauth_token = $1, claude_auth_mode = 'api_key', \
+         claude_usage_access_token = '', claude_usage_refresh_token = '', \
+         claude_usage_expires_at = NULL, claude_usage_scopes = '', updated_at = now() \
+         WHERE id = 1",
+    )
+    .bind(api_key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // --- Notification sounds ------------------------------------------------------
 //
 // The custom audio clips live on the settings row but are streamed by a dedicated
@@ -335,7 +413,11 @@ pub async fn list_secret_values(pool: &PgPool) -> sqlx::Result<Vec<String>> {
          UNION ALL \
          SELECT github_token FROM settings WHERE id = 1 AND github_token <> '' \
          UNION ALL \
-         SELECT jira_api_token FROM settings WHERE id = 1 AND jira_api_token <> ''",
+         SELECT jira_api_token FROM settings WHERE id = 1 AND jira_api_token <> '' \
+         UNION ALL \
+         SELECT claude_usage_access_token FROM settings WHERE id = 1 AND claude_usage_access_token <> '' \
+         UNION ALL \
+         SELECT claude_usage_refresh_token FROM settings WHERE id = 1 AND claude_usage_refresh_token <> ''",
     )
     .fetch_all(pool)
     .await?;

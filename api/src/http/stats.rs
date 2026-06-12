@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::ApiResult;
 use crate::db::models::{Settings, StatsAggregate};
 use crate::db::queries;
-use crate::state::{AppState, LiveUsage};
+use crate::state::{AppState, LiveUsage, SubscriptionUsage};
 
 #[derive(Debug, Serialize)]
 pub struct StatsResponse {
@@ -46,6 +46,10 @@ pub struct StatsResponse {
     /// The rate-limit status (e.g. "allowed") when the stream reports no numeric
     /// utilization, so the UI can show a status instead of a misleading 0%.
     pub usage_status: Option<String>,
+    /// Subscription 7-day usage utilization (0-100) and its reset, when a
+    /// subscription login is configured (polled from `/api/oauth/usage`).
+    pub usage_seven_day_utilization: Option<f64>,
+    pub usage_seven_day_resets_at: Option<i64>,
     pub turns: i64,
 }
 
@@ -113,10 +117,29 @@ fn build_response(
     latest_usage: Option<&Value>,
     rate_limit: Option<&Value>,
     live_usage: Option<LiveUsage>,
+    usage: Option<SubscriptionUsage>,
 ) -> StatsResponse {
     let input_total = agg.input_tokens + agg.cache_creation_tokens + agg.cache_read_tokens;
-    let (usage_utilization, usage_resets_at, usage_status) =
+    let (rate_utilization, rate_resets_at, usage_status) =
         rate_limit.map_or((None, None, None), rate_limit_fields);
+    // Prefer the polled subscription usage (the real 5-hour percentage from
+    // /api/oauth/usage) over the stream's status-only rate-limit event, which
+    // carries no number. Fall back to the rate-limit fields when no subscription
+    // login is configured.
+    let usage_utilization = usage
+        .as_ref()
+        .and_then(|snapshot| snapshot.five_hour_utilization)
+        .or(rate_utilization);
+    let usage_resets_at = usage
+        .as_ref()
+        .and_then(|snapshot| snapshot.five_hour_resets_at)
+        .or(rate_resets_at);
+    let usage_seven_day_utilization = usage
+        .as_ref()
+        .and_then(|snapshot| snapshot.seven_day_utilization);
+    let usage_seven_day_resets_at = usage
+        .as_ref()
+        .and_then(|snapshot| snapshot.seven_day_resets_at);
 
     // Overlay the in-progress turn's live usage (if any) on top of the persisted,
     // completed-turn totals so the counter ticks mid-turn. Only output is added to
@@ -141,6 +164,8 @@ fn build_response(
         usage_utilization,
         usage_resets_at,
         usage_status,
+        usage_seven_day_utilization,
+        usage_seven_day_resets_at,
         turns: agg.turns,
     }
 }
@@ -160,6 +185,7 @@ pub async fn global(State(state): State<AppState>) -> ApiResult<Json<StatsRespon
         rate_limit.as_ref(),
         // One shared agent, so any in-progress turn's live usage counts globally.
         state.live_usage(),
+        state.usage(),
     )))
 }
 
@@ -181,6 +207,7 @@ pub async fn task(
         rate_limit.as_ref(),
         // Only overlay the live counter when the running turn is this task's.
         state.live_usage().filter(|usage| usage.task_id == id),
+        state.usage(),
     )))
 }
 

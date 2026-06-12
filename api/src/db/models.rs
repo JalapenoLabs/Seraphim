@@ -53,6 +53,20 @@ pub enum NetworkAccessLevel {
     Custom,
 }
 
+/// How the agent authenticates to Claude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "claude_auth_mode", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeAuthMode {
+    /// A Claude subscription token (the long-lived inference token, from the
+    /// OAuth login or a manual `setup-token`), injected as
+    /// `CLAUDE_CODE_OAUTH_TOKEN`. The default and the historical behavior.
+    Subscription,
+    /// An Anthropic API key, injected as `ANTHROPIC_API_KEY`. No subscription
+    /// usage gauge applies in this mode.
+    ApiKey,
+}
+
 /// Which Jira deployment we are talking to, which decides both the auth scheme
 /// and the REST API version. Cloud uses Basic auth (email + API token) and REST
 /// v3; Server / Data Center uses a Bearer personal access token and REST v2.
@@ -169,6 +183,12 @@ pub struct Settings {
     pub updated_at: DateTime<Utc>,
     /// Whether a Claude OAuth token is stored (the token itself is never sent).
     pub claude_token_set: bool,
+    /// How the agent authenticates to Claude (subscription token vs API key).
+    pub claude_auth_mode: ClaudeAuthMode,
+    /// Whether subscription usage credentials are stored (the refreshing
+    /// access/refresh pair used only to poll the usage gauge). Only meaningful in
+    /// `subscription` mode; the tokens themselves are never sent.
+    pub claude_usage_token_set: bool,
     /// Whether a GitHub token is stored (the token itself is never sent).
     pub github_token_set: bool,
     /// When true, the agent only works during [`Self::availability_windows`].
@@ -244,6 +264,16 @@ pub struct Settings {
     /// value on [`crate::state::AppState`].
     #[sqlx(default)]
     pub cooldown_until: Option<DateTime<Utc>>,
+}
+
+/// The refreshing OAuth credentials used solely to poll the subscription usage
+/// gauge. All-empty when no subscription login is configured. Never serialized to
+/// clients.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ClaudeUsageCredentials {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// A user-defined environment variable injected into the agent's execs.
