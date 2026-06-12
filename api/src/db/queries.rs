@@ -1089,6 +1089,36 @@ pub async fn move_task(
     .await
 }
 
+/// Hard-resets a single task back to a clean, unstarted state in **Available**:
+/// clears its branch, PR link, error, session, and started/finished markers,
+/// re-queues it (`queued`), zeroes the CI-fix counter, and restarts its stats.
+/// The external cleanup (closing the PR, deleting the branch, reopening the
+/// issue) is done by the caller in the orchestrator before this is called.
+pub async fn reset_task(pool: &PgPool, id: Uuid, position: f64) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET \
+           board_column = 'available', position = $2, status = 'queued', \
+           branch = NULL, pr_url = NULL, error = NULL, session_id = NULL, \
+           ci_fix_attempts = 0, started_at = NULL, finished_at = NULL, \
+           stats_reset_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(position)
+    .fetch_one(pool)
+    .await
+}
+
+/// Drops any still-pending questions a task had escalated, so a reset card stops
+/// showing up as needing input. Answered questions are kept as history.
+pub async fn delete_pending_questions(pool: &PgPool, task_id: Uuid) -> sqlx::Result<u64> {
+    let result = sqlx::query("DELETE FROM questions WHERE task_id = $1 AND status = 'pending'")
+        .bind(task_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn set_task_hold(pool: &PgPool, id: Uuid, hold: bool) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET hold = $2, updated_at = now() WHERE id = $1 RETURNING *",

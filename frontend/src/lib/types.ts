@@ -362,6 +362,14 @@ export type HeartAttack = {
   acknowledged_at: string | null
 }
 
+// What a per-task hard reset did, returned so the UI can confirm the side effects.
+export type ResetSummary = {
+  interrupted_agent: boolean
+  pr_closed: boolean
+  branch_deleted: boolean
+  issue_reopened: boolean
+}
+
 export type BoardResponse = {
   tasks: Task[]
   settings: Settings

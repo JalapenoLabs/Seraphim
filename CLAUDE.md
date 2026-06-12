@@ -331,6 +331,16 @@ fail-fast) on every PR and on `main`/`develop`.
   epoch at its start and abandons its post-turn handling (session persist, task
   move) if it changed, so a reset landing mid-turn is never undone by the turn it
   interrupted. Keep that guard if you touch the turn-completion path.
+- **Per-task hard reset** (`POST /api/v1/tasks/:id/reset`, `orchestrator::reset_task`,
+  task page button) abandons one stuck task's attempt and starts it over: if the
+  agent is *actively* mid-turn on it (`in_progress` + `working`/`preparing`, unique
+  because the loop is single-threaded) it bumps `reset_epoch`, kills the Claude
+  process (`kill_agent_process`), and clears the shared session; then best-effort
+  closes the PR, deletes the branch (remote via `git::delete_remote_branch` + the
+  workspace clone), reopens a closed source issue, and returns the card to
+  **Available** (`queries::reset_task`, clearing branch/PR/error/session). Unlike
+  the global reset it leaves other tasks, the session (when not interrupting), and
+  history untouched. Returns a `ResetSummary` of what ran.
 - **stream-json schema can drift** across Claude Code versions; the parser keeps
   unknown shapes as `Other` rather than failing. Verify against the installed
   version when touching `claude/events.rs`.

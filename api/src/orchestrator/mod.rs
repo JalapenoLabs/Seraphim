@@ -508,6 +508,176 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
     Ok(())
 }
 
+// --- Per-task hard reset -----------------------------------------------------
+
+/// What a per-task hard reset did, returned to the UI so it can confirm exactly
+/// which side effects happened.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a flat result DTO of four independent, best-effort reset outcomes"
+)]
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ResetSummary {
+    /// The agent's in-flight turn on this task was stopped.
+    pub interrupted_agent: bool,
+    /// An open pull request was closed.
+    pub pr_closed: bool,
+    /// The branch was deleted from the remote.
+    pub branch_deleted: bool,
+    /// A closed source issue was reopened.
+    pub issue_reopened: bool,
+}
+
+/// Hard-resets a single stuck task to a clean slate (issue #72): if the agent is
+/// mid-turn on it, that turn is stopped; its pull request is closed, its branch
+/// deleted from the remote and the workspace, a closed source issue is reopened,
+/// and the card returns to **Available**, queued and unstarted.
+///
+/// The external GitHub steps are best-effort and independently logged, so a
+/// network hiccup on any one of them never prevents the card from being reset
+/// locally. The returned [`ResetSummary`] reports what actually happened.
+pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSummary> {
+    let Some(task) = queries::get_task(&state.db, task_id).await? else {
+        return Err(eyre!("task {task_id} not found"));
+    };
+    info!(task_id = %task.id, title = %task.title, "hard reset of a task requested");
+
+    let mut summary = ResetSummary::default();
+
+    // Stop the agent only if it is *actively* running a turn on THIS task. The
+    // loop is single-threaded, so the live turn is unique; a task merely parked
+    // awaiting input, or sitting in review, is not it and must not be disturbed.
+    // Interrupting the live turn bumps the reset epoch (so the turn abandons its
+    // post-turn handling rather than re-moving the card), kills the Claude
+    // process, and clears the shared session, since a turn killed mid-stream can
+    // leave the resumable conversation inconsistent for the next task.
+    let actively_working = task.board_column == TaskColumn::InProgress
+        && matches!(task.status, TaskStatus::Working | TaskStatus::Preparing);
+    if actively_working {
+        state.bump_reset_epoch();
+        kill_agent_process(state).await;
+        queries::set_current_session_id(&state.db, None).await?;
+        state.set_live_usage(None);
+        summary.interrupted_agent = true;
+        info!(task_id = %task.id, "stopped the agent's in-flight turn for the reset");
+    }
+
+    // Best-effort external cleanup for a GitHub-sourced task with a known repo.
+    if task.source_kind == SourceKind::Github {
+        if let Some(repo_id) = task.repo_id {
+            if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
+                reset_github_side(state, &task, &repo, &mut summary).await;
+            }
+        }
+    }
+
+    // Local reset: clear the branch/PR/error/session and return the card to
+    // Available, queued and unstarted, then drop any pending questions so it
+    // stops asking for input.
+    let position = top_of_column_position(state, TaskColumn::Available).await?;
+    queries::reset_task(&state.db, task.id, position).await?;
+    if let Err(error) = queries::delete_pending_questions(&state.db, task.id).await {
+        warn!(error = %error, task_id = %task.id, "failed to clear pending questions on reset");
+    }
+
+    state.notify_board();
+    info!(task_id = %task.id, ?summary, "task hard reset complete");
+    Ok(summary)
+}
+
+/// The GitHub-side cleanup of a reset: close the open PR, delete its branch from
+/// the remote and the workspace, and reopen a closed source issue. Every step is
+/// best-effort and updates `summary` with what succeeded.
+async fn reset_github_side(
+    state: &AppState,
+    task: &Task,
+    repo: &Repository,
+    summary: &mut ResetSummary,
+) {
+    let Ok((owner, name)) = split_full_name(&repo.full_name) else {
+        warn!(repo = %repo.full_name, "reset: repository is not owner/repo; skipping GitHub cleanup");
+        return;
+    };
+    let github = match state.github().await {
+        Ok(github) => github,
+        Err(error) => {
+            warn!(error = %error, "reset: GitHub client unavailable; skipping remote cleanup");
+            return;
+        }
+    };
+
+    if let Some(branch) = task.branch.as_deref() {
+        // Close any open PR on the branch first, so the close is explicit even
+        // though deleting the head branch would also close it.
+        match git::find_open_pr_for_branch(&github, owner, name, branch).await {
+            Ok(Some(pull)) => {
+                match git::close_pull_request(&github, owner, name, pull.number).await {
+                    Ok(()) => {
+                        summary.pr_closed = true;
+                        info!(task_id = %task.id, pr = pull.number, "reset: closed the pull request");
+                    }
+                    Err(error) => {
+                        warn!(error = %error, task_id = %task.id, "reset: failed to close the pull request");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "reset: failed to look up the pull request");
+            }
+        }
+
+        // Delete the branch from the remote, then from the workspace clone.
+        match git::delete_remote_branch(&github, owner, name, branch).await {
+            Ok(()) => {
+                summary.branch_deleted = true;
+                info!(task_id = %task.id, branch, "reset: deleted the remote branch");
+            }
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "reset: failed to delete the remote branch (already gone?)");
+            }
+        }
+        delete_local_branch(state, repo, branch).await;
+    }
+
+    // Reopen the source issue if Seraphim has it recorded as closed.
+    if !task.external_id.trim().is_empty() && task.external_state.as_deref() == Some("closed") {
+        match git::set_issue_state(&github, owner, name, &task.external_id, "open", None).await {
+            Ok(_) => {
+                summary.issue_reopened = true;
+                info!(task_id = %task.id, issue = %task.external_id, "reset: reopened the issue");
+            }
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "reset: failed to reopen the issue");
+            }
+        }
+    }
+}
+
+/// Deletes the task's branch from the workspace clone, switching off it first
+/// (a checked-out branch can't be deleted). Best-effort: a missing repo dir or
+/// branch is fine, since the authoritative copy was already deleted on the remote.
+async fn delete_local_branch(state: &AppState, repo: &Repository, branch: &str) {
+    let dir = format!("/workspace/{}", provision::repo_dir_name(&repo.full_name));
+    let script = format!(
+        "cd \"{dir}\" 2>/dev/null || exit 0\n\
+         git checkout \"{default}\" 2>/dev/null || true\n\
+         git branch -D \"{branch}\" 2>/dev/null || true\n",
+        default = repo.default_branch,
+    );
+    if let Err(error) = state
+        .workspace
+        .exec_capture(
+            "/workspace",
+            vec!["bash".to_string(), "-lc".to_string(), script],
+            vec![],
+        )
+        .await
+    {
+        warn!(error = %error, branch, "reset: failed to delete the local branch (continuing)");
+    }
+}
+
 // --- Agent loop --------------------------------------------------------------
 
 async fn agent_loop(state: AppState) {

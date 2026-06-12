@@ -77,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/bulk/status", post(board::bulk_status))
         .route("/tasks/bulk/delete", post(board::bulk_delete))
         .route("/tasks/:id/notes", axum::routing::put(tasks::set_notes))
+        .route("/tasks/:id/reset", post(tasks::hard_reset))
         .route("/tasks/:id/stats", get(stats::task))
         .route("/stats", get(stats::global))
         .route("/stats/reset", post(stats::reset))
