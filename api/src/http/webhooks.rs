@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use eyre::Result;
 use serde::Deserialize;
 
+use crate::automation;
 use crate::db::models::SourceKind;
 use crate::db::queries;
 use crate::state::AppState;
@@ -51,22 +52,36 @@ pub async fn github(
         return Ok((StatusCode::UNAUTHORIZED, "invalid signature").into_response());
     }
 
-    match header_str(&headers, "x-github-event").unwrap_or_default() {
-        // GitHub's first delivery after configuring the hook; acknowledge it.
-        "ping" => return Ok((StatusCode::OK, "pong").into_response()),
-        // We only act on issue lifecycle events; ignore comments, pushes, etc.
-        "issues" => {}
-        _ => return Ok(StatusCode::OK.into_response()),
-    }
+    let changed =
+        match header_str(&headers, "x-github-event").unwrap_or_default() {
+            // GitHub's first delivery after configuring the hook; acknowledge it.
+            "ping" => return Ok((StatusCode::OK, "pong").into_response()),
+            "issues" => {
+                let event: GithubIssueEvent = match serde_json::from_slice(&body) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        return Ok((StatusCode::BAD_REQUEST, format!("bad payload: {error}"))
+                            .into_response())
+                    }
+                };
+                apply_github_event(&state, event).await?
+            }
+            // Comments can fire `comment` automation rules (e.g. a trigger phrase).
+            "issue_comment" => {
+                let event: GithubCommentEvent = match serde_json::from_slice(&body) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        return Ok((StatusCode::BAD_REQUEST, format!("bad payload: {error}"))
+                            .into_response())
+                    }
+                };
+                apply_github_comment_event(&state, event).await?
+            }
+            // Any other event type (pushes, etc.) is ignored.
+            _ => return Ok(StatusCode::OK.into_response()),
+        };
 
-    let event: GithubIssueEvent = match serde_json::from_slice(&body) {
-        Ok(event) => event,
-        Err(error) => {
-            return Ok((StatusCode::BAD_REQUEST, format!("bad payload: {error}")).into_response())
-        }
-    };
-
-    if apply_github_event(&state, event).await? {
+    if changed {
         state.notify_board();
     }
     Ok(StatusCode::OK.into_response())
@@ -107,34 +122,87 @@ async fn apply_github_event(state: &AppState, event: GithubIssueEvent) -> Result
                 .any(|wanted| wanted.eq_ignore_ascii_case(&label.name))
         });
 
+    let open_issue = event.issue.to_open_issue();
+    let labels = event.issue.label_names();
+    let mut changed = false;
+
     if event.issue.state == "open" && matches_labels {
-        let issue = git::OpenIssue {
-            number: event.issue.number,
-            title: event.issue.title,
-            body: event.issue.body.unwrap_or_default(),
-            url: event.issue.html_url,
-            author_login: event.issue.user.login,
-            author_avatar_url: event.issue.user.avatar_url,
-        };
         // upsert_github_issue also reflects a reopen (closed -> open) by returning
         // the card to Available.
-        orchestrator::upsert_github_issue(state, repo.id, &issue, "open").await?;
-        Ok(true)
+        orchestrator::upsert_github_issue(state, repo.id, &open_issue, "open").await?;
+        changed = true;
     } else if event.issue.state == "closed" {
         // Closed outside Seraphim: move the tracked card to Done.
-        Ok(orchestrator::reflect_closed_github_issue(state, repo.id, &external_id).await?)
+        changed |= orchestrator::reflect_closed_github_issue(state, repo.id, &external_id).await?;
     } else {
         // Open but filtered out by the repo's labels: keep the cached state
         // current without moving a card we may not even track.
-        Ok(queries::refresh_issue_external_state(
+        changed |= queries::refresh_issue_external_state(
             &state.db,
             SourceKind::Github,
             Some(repo.id),
             &external_id,
             &event.issue.state,
         )
-        .await?)
+        .await?;
     }
+
+    // Automation: a create/update rule may pull this open issue into To Do (even
+    // past the repo's label filter, since a matching rule ensures it is tracked).
+    if event.issue.state == "open" {
+        let trigger = if event.action == "opened" {
+            automation::Trigger::Created
+        } else {
+            automation::Trigger::Updated
+        };
+        if orchestrator::run_github_automation(
+            state,
+            &repo,
+            &open_issue,
+            &labels,
+            "open",
+            trigger,
+            "",
+            "",
+        )
+        .await?
+        {
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+/// `issue_comment` events: a comment posted on an issue, which can fire `comment`
+/// automation rules (e.g. a trigger phrase). Returns whether the board changed.
+async fn apply_github_comment_event(state: &AppState, event: GithubCommentEvent) -> Result<bool> {
+    // Only newly-posted comments fire rules; edits/deletes don't re-trigger.
+    if event.action != "created" || event.issue.state != "open" {
+        return Ok(false);
+    }
+    let Some(repo) =
+        queries::get_repository_by_full_name(&state.db, &event.repository.full_name).await?
+    else {
+        return Ok(false);
+    };
+    if !repo.enabled {
+        return Ok(false);
+    }
+
+    let open_issue = event.issue.to_open_issue();
+    let labels = event.issue.label_names();
+    orchestrator::run_github_automation(
+        state,
+        &repo,
+        &open_issue,
+        &labels,
+        "open",
+        automation::Trigger::Comment,
+        event.comment.body.as_deref().unwrap_or(""),
+        &event.comment.user.login,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +226,23 @@ struct GithubIssue {
     labels: Vec<GithubLabel>,
 }
 
+impl GithubIssue {
+    fn to_open_issue(&self) -> git::OpenIssue {
+        git::OpenIssue {
+            number: self.number,
+            title: self.title.clone(),
+            body: self.body.clone().unwrap_or_default(),
+            url: self.html_url.clone(),
+            author_login: self.user.login.clone(),
+            author_avatar_url: self.user.avatar_url.clone(),
+        }
+    }
+
+    fn label_names(&self) -> Vec<String> {
+        self.labels.iter().map(|label| label.name.clone()).collect()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GithubUser {
     login: String,
@@ -167,6 +252,21 @@ struct GithubUser {
 #[derive(Debug, Deserialize)]
 struct GithubLabel {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCommentEvent {
+    action: String,
+    issue: GithubIssue,
+    comment: GithubComment,
+    repository: GithubRepo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubComment {
+    #[serde(default)]
+    body: Option<String>,
+    user: GithubUser,
 }
 
 #[derive(Debug, Deserialize)]

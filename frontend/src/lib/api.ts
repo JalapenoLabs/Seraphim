@@ -5,6 +5,8 @@ import ky from 'ky'
 
 import type {
   AnswerKind,
+  AutomationRule,
+  AutomationTrigger,
   AvailabilityWindow,
   BoardResponse,
   ConfigBundle,
@@ -21,6 +23,9 @@ import type {
   RepoDeletionImpact,
   Repository,
   ReviewPolicy,
+  RuleAction,
+  RuleGroup,
+  RuleSource,
   Settings,
   Stats,
   Task,
@@ -291,6 +296,33 @@ export function provisionWorkspace() {
 
 export function resetAgent(purgeMemories: boolean) {
   return apiClient.post('agent/reset', { json: { purge_memories: purgeMemories } }).json()
+}
+
+// --- Automation rules --------------------------------------------------------
+
+export type RuleRequest = {
+  name: string
+  enabled: boolean
+  source_kind: RuleSource
+  triggers: AutomationTrigger[]
+  criteria: RuleGroup
+  action: RuleAction
+}
+
+export function listAutomationRules() {
+  return apiClient.get('automation/rules').json<AutomationRule[]>()
+}
+
+export function createAutomationRule(body: RuleRequest) {
+  return apiClient.post('automation/rules', { json: body }).json<AutomationRule>()
+}
+
+export function updateAutomationRule(id: string, body: RuleRequest) {
+  return apiClient.put(`automation/rules/${id}`, { json: body }).json<AutomationRule>()
+}
+
+export function deleteAutomationRule(id: string) {
+  return apiClient.delete(`automation/rules/${id}`)
 }
 
 // --- Config export / import --------------------------------------------------

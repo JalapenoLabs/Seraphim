@@ -12,11 +12,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite, InternalComment, JiraBoard,
-    JiraDeployment, NetworkAccessLevel, PendingQuestion, Question, QuestionOption, QuestionStatus,
-    RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task,
-    TaskColumn, TaskStatus, Turn,
+    AnswerKind, AutomationRule, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite,
+    InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel, PendingQuestion, Question,
+    QuestionOption, QuestionStatus, RepoDeletionImpact, Repository, ReviewPolicy, Settings,
+    SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
 };
+use crate::automation::{RuleAction, RuleGroup, Trigger};
 
 // --- Settings ----------------------------------------------------------------
 
@@ -705,6 +706,115 @@ pub async fn delete_jira_board(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// --- Automation rules --------------------------------------------------------
+
+/// Every rule, in evaluation order (first match wins).
+pub async fn list_automation_rules(pool: &PgPool) -> sqlx::Result<Vec<AutomationRule>> {
+    sqlx::query_as::<_, AutomationRule>(
+        "SELECT * FROM automation_rules ORDER BY position, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The enabled rules only, in evaluation order. Used by the event handlers.
+pub async fn list_enabled_automation_rules(pool: &PgPool) -> sqlx::Result<Vec<AutomationRule>> {
+    sqlx::query_as::<_, AutomationRule>(
+        "SELECT * FROM automation_rules WHERE enabled = TRUE ORDER BY position, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The bottom rank, so a newly created rule sorts after the others.
+pub async fn max_automation_rule_position(pool: &PgPool) -> sqlx::Result<Option<f64>> {
+    sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(position) FROM automation_rules")
+        .fetch_one(pool)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_automation_rule(
+    pool: &PgPool,
+    name: &str,
+    enabled: bool,
+    source_kind: &str,
+    triggers: &[Trigger],
+    criteria: &RuleGroup,
+    action: &RuleAction,
+    position: f64,
+) -> sqlx::Result<AutomationRule> {
+    sqlx::query_as::<_, AutomationRule>(
+        "INSERT INTO automation_rules \
+         (name, enabled, source_kind, triggers, criteria, action, position) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+    )
+    .bind(name)
+    .bind(enabled)
+    .bind(source_kind)
+    .bind(Json(triggers))
+    .bind(Json(criteria))
+    .bind(Json(action))
+    .bind(position)
+    .fetch_one(pool)
+    .await
+}
+
+/// Updates a rule's editable fields, preserving its rank. `None` if it's gone.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_automation_rule(
+    pool: &PgPool,
+    id: Uuid,
+    name: &str,
+    enabled: bool,
+    source_kind: &str,
+    triggers: &[Trigger],
+    criteria: &RuleGroup,
+    action: &RuleAction,
+) -> sqlx::Result<Option<AutomationRule>> {
+    sqlx::query_as::<_, AutomationRule>(
+        "UPDATE automation_rules SET \
+         name = $2, enabled = $3, source_kind = $4, triggers = $5, criteria = $6, \
+         action = $7, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(enabled)
+    .bind(source_kind)
+    .bind(Json(triggers))
+    .bind(Json(criteria))
+    .bind(Json(action))
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn delete_automation_rule(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let result = sqlx::query("DELETE FROM automation_rules WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Looks up a tracked task by its source identity (the way sync dedupes it).
+pub async fn find_issue_task(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    repo_id: Option<Uuid>,
+    external_id: &str,
+) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks \
+         WHERE source_kind = $1 AND repo_id IS NOT DISTINCT FROM $2 AND external_id = $3",
+    )
+    .bind(source_kind)
+    .bind(repo_id)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Records the source ticket's state on a task (e.g. "open"/"closed" after a
