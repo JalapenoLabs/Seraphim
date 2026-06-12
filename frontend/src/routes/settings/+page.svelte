@@ -1072,7 +1072,7 @@
             >
               personal access token
             </a>
-            with read/write on Contents, Pull requests, and Issues, plus read on Checks and Commit
+            with read/write on Contents, Pull requests, and Issues, plus read on Actions and Commit
             statuses (so the agent can read CI results).
           </p>
         </div>

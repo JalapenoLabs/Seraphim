@@ -229,19 +229,6 @@ pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) ->
 }
 
 #[derive(Debug, Deserialize)]
-struct CheckRunsResponse {
-    total_count: u64,
-    check_runs: Vec<CheckRun>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CheckRun {
-    name: String,
-    status: String,
-    conclusion: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct CombinedStatus {
     state: String,
     total_count: u64,
@@ -258,36 +245,44 @@ pub enum CiStatus {
     Failing(Vec<String>),
 }
 
-/// The aggregate CI verdict for a commit, combining Actions check runs and the
-/// legacy combined commit status.
+/// The aggregate CI verdict for a commit, from GitHub Actions workflow runs plus
+/// the legacy combined commit status.
 ///
-/// Waits for every check to finish before reporting [`CiStatus::Failing`], so a
+/// CI is read from the Actions API (`/actions/runs?head_sha=`), not the Checks
+/// API: the Checks API is accessible only to GitHub Apps, so the fine-grained PAT
+/// Seraphim authenticates with gets a 403 there. A PAT with `Actions: read` can
+/// list workflow runs, which carry the same pass/fail verdict (their jobs are the
+/// check runs). Legacy non-Actions CI is folded in via the combined commit status.
+///
+/// Waits for every run to finish before reporting [`CiStatus::Failing`], so a
 /// downstream fix sees the complete set of failures rather than a partial one.
-/// A commit with no checks at all is [`CiStatus::Passing`].
+/// A commit with no CI at all is [`CiStatus::Passing`].
 pub async fn ci_status(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -> Result<CiStatus> {
-    let check_runs: CheckRunsResponse = octo
+    let runs: WorkflowRunsPage = octo
         .get(
-            format!("/repos/{owner}/{repo}/commits/{sha}/check-runs"),
+            format!("/repos/{owner}/{repo}/actions/runs?head_sha={sha}&per_page={PER_PAGE}"),
             None::<&()>,
         )
         .await
-        .wrap_err("failed to fetch check runs")?;
+        .wrap_err("failed to list workflow runs")?;
 
     let mut pending = false;
     let mut failures: Vec<String> = Vec::new();
-    for run in &check_runs.check_runs {
+    for run in &runs.workflow_runs {
         if run.status != "completed" {
             pending = true;
         } else if !matches!(
             run.conclusion.as_deref(),
-            Some("success" | "neutral" | "skipped")
+            // `cancelled` is not a failure: a run superseded by `cancel-in-progress`
+            // concurrency is replaced by a newer run, not a real CI failure.
+            Some("success" | "neutral" | "skipped" | "cancelled")
         ) {
             failures.push(run.name.clone());
         }
     }
 
-    // Legacy commit statuses (non-Actions CI). A "pending" here only matters when
-    // there are legacy contexts and no check runs supersede them.
+    // Legacy commit statuses (non-Actions CI). Only relevant when real contexts are
+    // present; GitHub reports `pending` with `total_count = 0` when there are none.
     let combined: CombinedStatus = octo
         .get(
             format!("/repos/{owner}/{repo}/commits/{sha}/status"),
@@ -297,7 +292,7 @@ pub async fn ci_status(octo: &Octocrab, owner: &str, repo: &str, sha: &str) -> R
         .wrap_err("failed to fetch combined commit status")?;
     match combined.state.as_str() {
         "failure" | "error" => failures.push("commit status".to_string()),
-        "pending" if combined.total_count > 0 && check_runs.total_count == 0 => pending = true,
+        "pending" if combined.total_count > 0 => pending = true,
         _ => {}
     }
 
@@ -318,6 +313,8 @@ struct WorkflowRunsPage {
 #[derive(Debug, Deserialize)]
 struct WorkflowRun {
     id: u64,
+    /// The workflow's display name, reported as the failing check when it fails.
+    name: String,
     status: String,
     conclusion: Option<String>,
     run_attempt: u32,
