@@ -24,6 +24,7 @@
   import * as Resizable from '$lib/components/ui/resizable'
   import { buttonVariants } from '$lib/components/ui/button'
   import IssueView from '$lib/components/IssueView.svelte'
+  import SuggestionCreateButton from '$lib/components/SuggestionCreateButton.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
   import JsonHighlight from '$lib/components/JsonHighlight.svelte'
@@ -60,6 +61,15 @@
     } catch (error) {
       console.debug('failed to update suggestion, reverting', error)
       suggestion.acknowledged = !next
+    }
+  }
+
+  // After a recommendation is turned into an issue, the server marks it done;
+  // reflect that so it checks off and the create button drops away.
+  function onSuggestionCreated(updated: EnvSuggestion) {
+    const index = suggestions.findIndex((entry) => entry.id === updated.id)
+    if (index !== -1) {
+      suggestions[index] = updated
     }
   }
 
@@ -426,8 +436,8 @@
         </p>
         <ul class="mt-2 divide-y divide-border">
           {#each suggestions as suggestion (suggestion.id)}
-            <li>
-              <label class="flex cursor-pointer items-start gap-2 py-2">
+            <li class="flex items-start justify-between gap-3 py-2">
+              <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-2">
                 <input
                   type="checkbox"
                   checked={suggestion.acknowledged}
@@ -449,6 +459,14 @@
                   {/if}
                 </span>
               </label>
+              {#if !suggestion.acknowledged && task}
+                <SuggestionCreateButton
+                  {suggestion}
+                  source={task.source_kind}
+                  repoLinked={!!task.repo_id}
+                  oncreated={onSuggestionCreated}
+                />
+              {/if}
             </li>
           {/each}
         </ul>

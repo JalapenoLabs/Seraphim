@@ -1541,6 +1541,14 @@ pub async fn create_suggestion(
     .await
 }
 
+/// One suggestion by id (to act on it, e.g. create an issue from it).
+pub async fn get_suggestion(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<EnvSuggestion>> {
+    sqlx::query_as::<_, EnvSuggestion>("SELECT * FROM environment_suggestions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
 /// Every suggestion on a task, oldest first, for the task detail view.
 pub async fn list_suggestions_for_task(
     pool: &PgPool,

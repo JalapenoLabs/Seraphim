@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/stats/reset", post(stats::reset))
         .route("/agent/suggestions", post(suggestions::create))
         .route("/suggestions/:id/ack", post(suggestions::acknowledge))
+        .route("/suggestions/:id/create", post(suggestions::create_issue))
         .route("/agent/questions", post(questions::ask))
         .route("/questions/pending", get(questions::pending))
         .route("/questions/:id/answer", post(questions::answer))

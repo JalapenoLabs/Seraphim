@@ -515,6 +515,30 @@ pub async fn set_issue_state(
 }
 
 /// Posts a comment to an issue and returns the created comment.
+/// A freshly opened GitHub issue, enough to link to it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatedIssue {
+    pub html_url: String,
+}
+
+/// Opens a new issue on `owner/repo` and returns its number + URL.
+pub async fn create_issue(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+) -> Result<CreatedIssue> {
+    let issue: CreatedIssue = octo
+        .post(
+            format!("/repos/{owner}/{repo}/issues"),
+            Some(&json!({ "title": title, "body": body })),
+        )
+        .await
+        .wrap_err("failed to create GitHub issue")?;
+    Ok(issue)
+}
+
 pub async fn add_issue_comment(
     octo: &Octocrab,
     owner: &str,
