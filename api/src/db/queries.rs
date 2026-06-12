@@ -1111,6 +1111,55 @@ pub async fn set_task_blocking(pool: &PgPool, id: Uuid, blocking: bool) -> sqlx:
     .await
 }
 
+// --- Bulk operations ---------------------------------------------------------
+//
+// Power the board's multi-select bulk edit. Each takes a set of task ids and
+// applies one change in a single statement, so a selection of many cards is one
+// round-trip rather than N.
+
+/// Loads the tasks for a set of ids (board order), for bulk operations that need
+/// each card's source/repo to also reflect the change onto its ticket.
+pub async fn list_tasks_by_ids(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE id = ANY($1) ORDER BY board_column, position",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+}
+
+/// Sets `hold` and/or `blocking` on a set of tasks. A `None` field is left as is
+/// (`COALESCE` keeps the existing value), so the caller changes only the fields
+/// the user actually picked. Returns how many rows were updated.
+pub async fn bulk_set_fields(
+    pool: &PgPool,
+    ids: &[Uuid],
+    hold: Option<bool>,
+    blocking: Option<bool>,
+) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE tasks SET hold = COALESCE($2, hold), blocking = COALESCE($3, blocking), \
+         updated_at = now() WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(hold)
+    .bind(blocking)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Permanently deletes a set of tasks. Child rows (turns, events, suggestions,
+/// questions, internal comments) cascade; heart attacks keep their snapshot with
+/// a nulled task id. Returns how many tasks were removed.
+pub async fn delete_tasks(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {
+    let result = sqlx::query("DELETE FROM tasks WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// Whether any blocking task is currently in progress. A fresh task that
 /// finishes (success or failure) leaves `in_progress`, so a blocking task still
 /// sitting here is unfinished, being worked or parked waiting for input, and the

@@ -12,12 +12,21 @@
     task,
     onchange,
     repoName,
-    suggestionCount = 0
+    suggestionCount = 0,
+    selectionMode = false,
+    selected = false,
+    onselect
   }: {
     task: Task
     onchange: () => void
     repoName?: string
     suggestionCount?: number
+    // Multi-select (bulk edit) mode: a click toggles selection instead of opening
+    // the task, the card shows a loud highlight when selected, and unselected
+    // cards dim so it is obvious which are picked.
+    selectionMode?: boolean
+    selected?: boolean
+    onselect?: () => void
   } = $props()
 
   // Show just the repo name (after the owner); the full owner/repo is on hover.
@@ -26,7 +35,12 @@
   // The source ticket's open/closed (GitHub) or workflow (Jira) state, or null.
   const ticketState = $derived(ticketStateBadge(task))
 
-  function open() {
+  // A click opens the task normally, or toggles its selection in bulk mode.
+  function activate() {
+    if (selectionMode) {
+      onselect?.()
+      return
+    }
     goto(`/task/${task.id}`)
   }
 </script>
@@ -34,13 +48,20 @@
 <div
   role="button"
   tabindex="0"
-  onclick={open}
-  onkeydown={(event) => event.key === 'Enter' && open()}
-  class="cursor-grab rounded-lg border bg-secondary p-3 transition-colors hover:border-primary {task.hold
-    ? 'border-dashed border-border opacity-60'
-    : task.blocking
-      ? 'border-warning'
-      : 'border-border'}"
+  aria-pressed={selectionMode ? selected : undefined}
+  onclick={activate}
+  onkeydown={(event) => event.key === 'Enter' && activate()}
+  class="rounded-lg border bg-secondary p-3 transition-all {selectionMode
+    ? 'cursor-pointer'
+    : 'cursor-grab'} {selected
+    ? 'border-primary ring-2 ring-primary bg-primary/10'
+    : selectionMode
+      ? 'border-border opacity-50 hover:opacity-100 hover:border-primary'
+      : task.hold
+        ? 'border-dashed border-border opacity-60 hover:border-primary'
+        : task.blocking
+          ? 'border-warning hover:border-primary'
+          : 'border-border hover:border-primary'}"
 >
   <div class="flex items-center justify-between gap-2">
     <span class="flex min-w-0 items-center gap-1 text-xs tabular-nums text-muted-foreground">

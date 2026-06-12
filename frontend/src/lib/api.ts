@@ -104,6 +104,24 @@ export function setTaskBlocking(taskId: string, blocking: boolean) {
   return apiClient.post(`tasks/${taskId}/blocking`, { json: { blocking } }).json<Task>()
 }
 
+// --- Bulk edit (board multi-select) ------------------------------------------
+
+// Set hold and/or blocking across a selection. Omit a field to leave it as is.
+export function bulkSetTaskFields(ids: string[], fields: { hold?: boolean; blocking?: boolean }) {
+  return apiClient.post('tasks/bulk/fields', { json: { ids, ...fields } }).json<{ updated: number }>()
+}
+
+// Move a selection into a column. Done closes the linked tickets; moving out of
+// Done reopens any that were closed.
+export function bulkSetTaskStatus(ids: string[], column: TaskColumn) {
+  return apiClient.post('tasks/bulk/status', { json: { ids, column } }).json<{ updated: number }>()
+}
+
+// Permanently delete a selection of tasks.
+export function bulkDeleteTasks(ids: string[]) {
+  return apiClient.post('tasks/bulk/delete', { json: { ids } }).json<{ deleted: number }>()
+}
+
 // Save the private per-task notepad. Stored only in our DB, never sent to the ticket.
 export function setTaskNotes(taskId: string, notes: string) {
   return apiClient.put(`tasks/${taskId}/notes`, { json: { notes } }).json<{ saved: boolean }>()
