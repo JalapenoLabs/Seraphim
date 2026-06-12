@@ -1059,9 +1059,22 @@
             id="gh-token"
             type="password"
             autocomplete="off"
-            placeholder="PAT with repo + issues scope"
+            placeholder="fine-grained PAT"
             bind:value={githubTokenInput}
           />
+          <p class="text-xs text-muted-foreground">
+            Create a fine-grained
+            <a
+              href="https://github.com/settings/personal-access-tokens"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="underline"
+            >
+              personal access token
+            </a>
+            with read/write on Contents, Pull requests, and Issues, plus read on Checks and Commit
+            statuses (so the agent can read CI results).
+          </p>
         </div>
 
         <!-- Realtime issue webhooks: set the shared secret here, then point the
