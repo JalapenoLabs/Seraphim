@@ -95,6 +95,9 @@ pub enum TaskStatus {
     /// The agent stopped fixing CI (out of scope, or the retry cap hit); the PR
     /// is left in review for a human.
     CiBlocked,
+    /// Auto-merge failed (typically a conflict with the base because another PR
+    /// landed first); queued for the agent to resolve and push, then re-merge.
+    MergeConflict,
     Merging,
     Done,
     Failed,
