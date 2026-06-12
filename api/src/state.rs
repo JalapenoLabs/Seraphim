@@ -81,11 +81,48 @@ pub struct AppState {
     /// post-turn handling (session persist, task move) if it changed, so a reset
     /// that lands mid-turn is never undone by the turn it interrupted.
     reset_epoch: Arc<AtomicU64>,
+    /// Static self-update config (the build's commit/branch + host paths).
+    pub update: crate::config::UpdateConfig,
+    /// The cached result of the last self-update check, refreshed hourly.
+    update_status: Arc<RwLock<UpdateStatus>>,
+}
+
+/// The cached result of the last self-update check, plus whether an update is
+/// running. Refreshed hourly in the background and on demand from the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateStatus {
+    /// The commit the running build is on (`unknown` if not stamped at build).
+    pub current_sha: String,
+    pub current_branch: String,
+    /// The latest commit on the branch upstream, when the last check succeeded.
+    pub latest_sha: Option<String>,
+    pub update_available: bool,
+    /// Whether self-update is wired up (a host repo dir is set) so it can run.
+    pub configured: bool,
+    /// True from the moment an update is triggered until this process is replaced.
+    pub updating: bool,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, workspace: Workspace, internal_api_url: String) -> Self {
+    pub fn new(
+        db: PgPool,
+        workspace: Workspace,
+        internal_api_url: String,
+        update: crate::config::UpdateConfig,
+    ) -> Self {
         let (events, _receiver) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let update_status = UpdateStatus {
+            current_sha: update.git_sha.clone(),
+            current_branch: update.git_branch.clone(),
+            latest_sha: None,
+            update_available: false,
+            configured: !update.host_repo_dir.trim().is_empty(),
+            updating: false,
+            checked_at: None,
+            error: None,
+        };
         Self {
             db,
             workspace,
@@ -94,7 +131,25 @@ impl AppState {
             cooldown_until: Arc::new(RwLock::new(None)),
             live_usage: Arc::new(RwLock::new(None)),
             reset_epoch: Arc::new(AtomicU64::new(0)),
+            update,
+            update_status: Arc::new(RwLock::new(update_status)),
         }
+    }
+
+    /// The cached self-update status.
+    pub fn update_status(&self) -> UpdateStatus {
+        self.update_status
+            .read()
+            .expect("update status lock poisoned")
+            .clone()
+    }
+
+    /// Replaces the cached self-update status.
+    pub fn set_update_status(&self, status: UpdateStatus) {
+        *self
+            .update_status
+            .write()
+            .expect("update status lock poisoned") = status;
     }
 
     /// The current hard-reset generation. A turn captures this at its start and

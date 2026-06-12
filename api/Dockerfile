@@ -28,5 +28,14 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/seraphim-api /usr/local/bin/seraphim-api
 
+# Stamp the commit/branch this image was built from (passed by scripts/start.sh
+# and the self-updater) so the running API knows its version for the update check
+# and the "reload when done" signal. Placed after the binary copy so a new stamp
+# never busts the build cache.
+ARG GIT_SHA=unknown
+ARG GIT_BRANCH=unknown
+ENV GIT_SHA=$GIT_SHA \
+    GIT_BRANCH=$GIT_BRANCH
+
 EXPOSE 27182
 CMD ["seraphim-api"]

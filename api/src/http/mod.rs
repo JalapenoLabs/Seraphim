@@ -16,6 +16,7 @@ mod sse;
 mod stats;
 mod suggestions;
 mod tasks;
+mod update;
 mod webhooks;
 mod workspace;
 
@@ -119,6 +120,10 @@ pub fn router(state: AppState) -> Router {
             "/automation/rules/:id",
             axum::routing::put(automation::update).delete(automation::delete),
         )
+        .route("/version", get(update::version))
+        .route("/update/status", get(update::status))
+        .route("/update/check", post(update::check))
+        .route("/update", post(update::run))
         .route("/export", get(data::export))
         .route("/import", post(data::import))
         .with_state(state);
