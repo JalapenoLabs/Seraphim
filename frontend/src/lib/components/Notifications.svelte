@@ -7,7 +7,7 @@
   import { Bell, Check, Trash2, X } from '@lucide/svelte'
 
   import { Button } from '$lib/components/ui/button'
-  import { getPendingQuestions } from '$lib/api'
+  import { getPendingQuestions, getSettings, soundUrl } from '$lib/api'
 
   // How long a toast stays on screen before auto-dismissing.
   const TOAST_TIMEOUT_MS = 8000
@@ -55,6 +55,43 @@
   let nextToastId = 0
 
   let eventSource: EventSource | null = null
+
+  // Sound preferences, refreshed alongside the pending list. Default to on so the
+  // very first sound can play before the settings have loaded.
+  let attentionSoundEnabled = $state(true)
+  let completionSoundEnabled = $state(true)
+  let attentionSoundCustom = $state(false)
+  let completionSoundCustom = $state(false)
+
+  async function loadSoundPrefs() {
+    try {
+      const settings = await getSettings()
+      attentionSoundEnabled = settings.attention_sound_enabled
+      completionSoundEnabled = settings.completion_sound_enabled
+      attentionSoundCustom = settings.attention_sound_custom
+      completionSoundCustom = settings.completion_sound_custom
+    } catch (error) {
+      console.debug('failed to load sound settings', error)
+    }
+  }
+
+  // Plays a notification sound (the custom clip if uploaded, else the bundled
+  // default). Browsers block audio until the user has interacted with the page,
+  // so a play() rejected before the first gesture is ignored rather than thrown.
+  function playSound(kind: 'attention' | 'completion') {
+    const enabled = kind === 'attention' ? attentionSoundEnabled : completionSoundEnabled
+    if (!enabled || typeof Audio === 'undefined') {
+      return
+    }
+    const custom = kind === 'attention' ? attentionSoundCustom : completionSoundCustom
+    try {
+      const audio = new Audio(soundUrl(kind, custom))
+      audio.volume = 0.6
+      void audio.play().catch((error) => console.debug('sound play blocked', error))
+    } catch (error) {
+      console.debug('sound playback failed', error)
+    }
+  }
 
   // What the bell surfaces: pending questions the user hasn't cleared away. The
   // unread count drives the badge.
@@ -148,6 +185,7 @@
     const data = JSON.parse(event.data) as { task_id: string; task_title: string; prompt: string }
     pushToast(data.task_id, data.task_title, data.prompt)
     notifyNatively(`Seraphim needs you: ${data.task_title}`, data.prompt)
+    playSound('attention')
     refresh()
   }
 
@@ -162,10 +200,18 @@
     }
     pushToast(data.task_id, data.task_title, data.summary, 'heart_attack')
     notifyNatively(`Agent heart attack: ${data.task_title}`, data.summary)
+    playSound('attention')
+  }
+
+  // A task finished (auto-merged to Done). Sound-only: the board already reflects
+  // it, so no toast, just the completion chime.
+  function handleTaskFinished() {
+    playSound('completion')
   }
 
   onMount(() => {
     refresh()
+    loadSoundPrefs()
     // Prompt for native desktop notifications on first load, as the issue asks.
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
       Notification.requestPermission().catch((error) =>
@@ -177,7 +223,12 @@
     eventSource = new EventSource('/api/v1/notifications/stream')
     eventSource.addEventListener('notification', handleNotification)
     eventSource.addEventListener('heart_attack', handleHeartAttack)
-    eventSource.addEventListener('refresh', () => refresh())
+    eventSource.addEventListener('task_finished', handleTaskFinished)
+    eventSource.addEventListener('refresh', () => {
+      refresh()
+      // Pick up sound-preference changes the operator just saved.
+      loadSoundPrefs()
+    })
   })
 
   onDestroy(() => eventSource?.close())

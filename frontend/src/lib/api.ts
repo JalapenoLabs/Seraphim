@@ -228,10 +228,37 @@ export type UpdateSettingsRequest = {
   jira_deployment?: JiraDeployment
   jira_base_url?: string
   jira_email?: string
+  attention_sound_enabled?: boolean
+  completion_sound_enabled?: boolean
 }
 
 export function updateSettings(body: UpdateSettingsRequest) {
   return apiClient.patch('settings', { json: body }).json<Settings>()
+}
+
+// --- Notification sounds -----------------------------------------------------
+
+export type SoundKind = 'attention' | 'completion'
+
+// The URL to play for a sound: the stored custom clip when one is uploaded, else
+// the bundled default chime in static/. `custom` comes from settings.*_sound_custom.
+export function soundUrl(kind: SoundKind, custom: boolean): string {
+  return custom ? `/api/v1/settings/sounds/${kind}` : `/sounds/${kind}.wav`
+}
+
+// Upload a custom clip (the raw file is the body; its type sets the MIME).
+export function uploadSound(kind: SoundKind, file: File) {
+  return apiClient
+    .post(`settings/sounds/${kind}`, {
+      body: file,
+      headers: { 'content-type': file.type || 'application/octet-stream' }
+    })
+    .json<Settings>()
+}
+
+// Clear a custom clip so the event falls back to the bundled default.
+export function clearSound(kind: SoundKind) {
+  return apiClient.delete(`settings/sounds/${kind}`).json<Settings>()
 }
 
 export function setPaused(paused: boolean) {

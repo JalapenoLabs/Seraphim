@@ -44,6 +44,8 @@ pub enum ServerEvent {
         /// A one-line summary of what happened and what the defibrillator did.
         summary: String,
     },
+    /// A task finished (auto-merged to Done); drives the completion sound.
+    TaskFinished { task_id: Uuid, task_title: String },
     /// A throttled tick that the in-progress turn's token usage advanced, so the
     /// stats gauges refetch and the counter ticks live mid-turn. Carries no
     /// numbers; the live values live on [`AppState::live_usage`] and are read by
@@ -250,6 +252,14 @@ impl AppState {
             task_id,
             task_title,
             summary,
+        });
+    }
+
+    /// Announces that a task finished, so the UI can play the completion sound.
+    pub fn notify_task_finished(&self, task_id: Uuid, task_title: String) {
+        let _ = self.events.send(ServerEvent::TaskFinished {
+            task_id,
+            task_title,
         });
     }
 }

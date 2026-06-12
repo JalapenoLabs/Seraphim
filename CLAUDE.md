@@ -111,7 +111,17 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   work during the configured weekly windows in the operator's time zone, skipping
   listed dates; empty windows mean "any time of day". The gate is the pure,
   unit-tested `orchestrator::availability::is_available`, checked alongside
-  `agent_paused`.
+  `agent_paused`. It also holds the **notification-sound** prefs
+  (`{attention,completion}_sound_enabled` toggles plus the optional uploaded
+  `{attention,completion}_sound_audio`/`_mime` clips). Like the tokens, the audio
+  bytes never appear in the settings payload (only `*_sound_custom` "is a clip
+  set" booleans do); a dedicated `GET/POST/DELETE /settings/sounds/:kind`
+  (`kind` = `attention`|`completion`) streams, uploads, or clears them. The UI
+  plays the bundled default chime (`frontend/static/sounds/{attention,completion}.wav`,
+  regenerable via `frontend/scripts/gen-sounds.py`) when no custom clip is set.
+  Attention sounds fire on the `notification`/`heart_attack` SSE events; the
+  completion sound fires on a new `task_finished` SSE event emitted from the
+  review loop's auto-merge-to-Done path (`ServerEvent::TaskFinished`).
 - **`environment_variables`** — user-defined `key` / `value` / `is_secret` rows,
   injected into the agent's turn and setup execs at runtime. A secret value is
   scrubbed out of Claude's output before anything is persisted or streamed

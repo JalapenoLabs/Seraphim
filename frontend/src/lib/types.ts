@@ -175,6 +175,14 @@ export type Settings = {
   // raw secrets are never sent back).
   github_webhook_secret_set: boolean
   jira_webhook_secret_set: boolean
+  // Play a sound when a task needs attention (a question / heart attack) and when
+  // a task finishes. The "*_custom" flags say whether a custom clip is uploaded;
+  // when false the UI plays the bundled default chime. The clip bytes are never
+  // in this payload (a dedicated endpoint streams them).
+  attention_sound_enabled: boolean
+  completion_sound_enabled: boolean
+  attention_sound_custom: boolean
+  completion_sound_custom: boolean
   // Masked previews of the stored tokens (e.g. "sk-ant-****abcd"), or null when
   // unset. The raw tokens are never sent.
   claude_token_preview: string | null

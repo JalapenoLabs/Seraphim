@@ -38,8 +38,12 @@
     setTokens,
     testJira,
     updateJiraBoard,
-    updateSettings
+    updateSettings,
+    uploadSound,
+    clearSound,
+    soundUrl
   } from '$lib/api'
+  import type { SoundKind } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
   import * as Select from '$lib/components/ui/select'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -62,6 +66,7 @@
     { id: 'availability', label: 'Availability' },
     { id: 'network', label: 'Network access' },
     { id: 'usage', label: 'Usage limits' },
+    { id: 'sounds', label: 'Notification sounds' },
     { id: 'issue-updates', label: 'Issue updates' },
     { id: 'statistics', label: 'Statistics' },
     { id: 'env', label: 'Environment variables' },
@@ -127,6 +132,55 @@
   let usageSavedAt = $state<string | null>(null)
   let thoughtsSavedAt = $state<string | null>(null)
   let closeIssueSavedAt = $state<string | null>(null)
+  let soundsSavedAt = $state<string | null>(null)
+  // Cache-buster bumped after an upload/clear so the <audio> preview refetches.
+  let soundVersion = $state(0)
+
+  async function saveSounds() {
+    if (!settings) {
+      return
+    }
+    settings = await updateSettings({
+      attention_sound_enabled: settings.attention_sound_enabled,
+      completion_sound_enabled: settings.completion_sound_enabled
+    })
+    soundsSavedAt = new Date().toLocaleTimeString()
+  }
+
+  // Plays the clip an operator would hear for this event (custom if uploaded, else
+  // the bundled default), so they can check it from Settings.
+  function previewSound(kind: SoundKind) {
+    if (!settings || typeof Audio === 'undefined') {
+      return
+    }
+    const custom = kind === 'attention' ? settings.attention_sound_custom : settings.completion_sound_custom
+    const audio = new Audio(`${soundUrl(kind, custom)}?v=${soundVersion}`)
+    audio.volume = 0.6
+    void audio.play().catch((error) => console.debug('preview blocked', error))
+  }
+
+  async function onSoundFile(kind: SoundKind, event: Event) {
+    const input = event.target as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = ''
+    if (!file) {
+      return
+    }
+    try {
+      settings = await uploadSound(kind, file)
+      soundVersion += 1
+      soundsSavedAt = new Date().toLocaleTimeString()
+    } catch (error) {
+      console.debug('sound upload failed', error)
+      window.alert('Could not upload that file. Use a short audio clip under 1 MB.')
+    }
+  }
+
+  async function resetSound(kind: SoundKind) {
+    settings = await clearSound(kind)
+    soundVersion += 1
+    soundsSavedAt = new Date().toLocaleTimeString()
+  }
 
   // Order and copy mirror the claude.ai network-access selector.
   const NETWORK_LEVELS: { value: NetworkAccessLevel; title: string; description: string }[] = [
@@ -1100,6 +1154,77 @@
         <div class="flex items-center gap-3">
           <Button onclick={saveUsage}>Save usage limits</Button>
           {#if usageSavedAt}<span class="text-sm text-muted-foreground">Saved at {usageSavedAt}</span>{/if}
+        </div>
+      </Card.Content>
+    </Card.Root>
+    {/if}
+
+    {#if active === 'sounds'}
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Notification sounds</Card.Title>
+        <Card.Description>
+          Play a sound in this browser when a task needs your attention and when a task finishes, so
+          you notice without watching the board. Each event uses a built-in chime by default; upload a
+          short custom clip (under 1 MB) to override it. Sounds play only while this app is open in a
+          tab, and the browser may stay silent until you have clicked the page once.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content class="space-y-6">
+        <!-- Attention: questions + heart attacks. -->
+        <div>
+          <div class="flex items-center gap-2">
+            <Switch id="attention-sound" bind:checked={settings.attention_sound_enabled} />
+            <Label for="attention-sound">Play a sound when a task needs your attention</Label>
+          </div>
+          <p class="mt-1.5 text-sm text-muted-foreground">
+            Fires when the agent asks you a question, or when a turn has a heart attack.
+          </p>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onclick={() => previewSound('attention')}>Preview</Button>
+            <label class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+              {settings.attention_sound_custom ? 'Replace clip' : 'Upload custom clip'}
+              <input type="file" accept="audio/*" onchange={(event) => onSoundFile('attention', event)} hidden />
+            </label>
+            {#if settings.attention_sound_custom}
+              <Button variant="ghost" size="sm" onclick={() => resetSound('attention')}>Reset to default</Button>
+              <span class="text-xs text-muted-foreground">Custom clip set</span>
+            {:else}
+              <span class="text-xs text-muted-foreground">Using the default chime</span>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Completion: a task auto-merged to Done. -->
+        <div class="border-t border-border pt-5">
+          <div class="flex items-center gap-2">
+            <Switch id="completion-sound" bind:checked={settings.completion_sound_enabled} />
+            <Label for="completion-sound">Play a sound when a task finishes</Label>
+          </div>
+          <p class="mt-1.5 text-sm text-muted-foreground">
+            Fires when a task auto-merges its pull request and moves to Done.
+          </p>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onclick={() => previewSound('completion')}>Preview</Button>
+            <label class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+              {settings.completion_sound_custom ? 'Replace clip' : 'Upload custom clip'}
+              <input type="file" accept="audio/*" onchange={(event) => onSoundFile('completion', event)} hidden />
+            </label>
+            {#if settings.completion_sound_custom}
+              <Button variant="ghost" size="sm" onclick={() => resetSound('completion')}>Reset to default</Button>
+              <span class="text-xs text-muted-foreground">Custom clip set</span>
+            {:else}
+              <span class="text-xs text-muted-foreground">Using the default chime</span>
+            {/if}
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 border-t border-border pt-5">
+          <Button onclick={saveSounds}>Save</Button>
+          {#if soundsSavedAt}<span class="text-sm text-muted-foreground">Saved at {soundsSavedAt}</span>{/if}
+          <span class="text-xs text-muted-foreground">
+            (Uploads and resets save immediately; this saves the on/off toggles.)
+          </span>
         </div>
       </Card.Content>
     </Card.Root>
