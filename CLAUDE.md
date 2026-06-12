@@ -136,6 +136,17 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and
   surfaced as toasts + native notifications + a sidebar.
+- **`automation_rules`** — user-defined rules (Automation page). When a GitHub
+  webhook delivers an issue `created`/`updated`/`comment` event, each enabled
+  rule whose source + trigger match is checked against the event; if its
+  condition group (AND/OR of `{field, operator, values}`, operators
+  exactly/contains/has_one_of/is_empty/is_not_empty over labels/author/repo/
+  title/body/comment/state) matches, its action runs (move the card to top/bottom
+  of To Do). The rule shape + the pure matcher live in `src/automation/`
+  (unit-tested, I/O-free); firing lives in `orchestrator::run_github_automation`
+  (called from `http/webhooks.rs`). Source-agnostic (rules can target `any`), but
+  only GitHub events are wired so far; it's webhook-driven (the poll sync does not
+  fire rules, to avoid re-firing every cycle).
 
 ## How the agent runtime works (the workspace)
 

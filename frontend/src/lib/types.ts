@@ -238,6 +238,8 @@ export type Stats = {
   // Subscription usage-limit utilization (0-100), or null when unknown.
   usage_utilization: number | null
   usage_resets_at: number | null
+  // Rate-limit status (e.g. "allowed") shown when the stream reports no number.
+  usage_status: string | null
   turns: number
 }
 
@@ -296,6 +298,41 @@ export type PendingQuestion = {
   prompt: string
   options: QuestionOption[]
   created_at: string
+}
+
+// --- Automation rules --------------------------------------------------------
+
+export type AutomationTrigger = 'created' | 'updated' | 'comment'
+export type RuleCombinator = 'and' | 'or'
+export type RuleField =
+  | 'labels'
+  | 'author'
+  | 'repo'
+  | 'title'
+  | 'body'
+  | 'comment'
+  | 'comment_author'
+  | 'state'
+export type RuleOperator = 'exactly' | 'contains' | 'has_one_of' | 'is_empty' | 'is_not_empty'
+export type QueuePosition = 'top' | 'bottom'
+// A rule's source: a real source kind or 'any' to match all.
+export type RuleSource = 'github' | 'jira' | 'internal' | 'any'
+
+export type RuleCondition = { field: RuleField; operator: RuleOperator; values: string[] }
+export type RuleGroup = { combinator: RuleCombinator; conditions: RuleCondition[] }
+export type RuleAction = { type: 'move_to_todo'; position: QueuePosition }
+
+export type AutomationRule = {
+  id: string
+  name: string
+  enabled: boolean
+  source_kind: RuleSource
+  triggers: AutomationTrigger[]
+  criteria: RuleGroup
+  action: RuleAction
+  position: number
+  created_at: string
+  updated_at: string
 }
 
 export type BoardResponse = {

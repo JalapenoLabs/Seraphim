@@ -4,6 +4,7 @@
 //! the background loops (issue sync, the autonomous agent, and auto-merge review)
 //! and serves the REST + SSE surface the kanban UI talks to.
 
+mod automation;
 mod claude;
 mod config;
 mod db;
