@@ -181,6 +181,53 @@ pub async fn find_open_pr_for_branch(
     }))
 }
 
+/// The lifecycle state of a specific pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrLifecycle {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// A tracked PR's current state: whether it's still open (and its latest head, to
+/// re-check CI) or has since merged/closed.
+#[derive(Debug, Clone)]
+pub struct PrStatus {
+    pub lifecycle: PrLifecycle,
+    pub head_sha: String,
+}
+
+/// Looks up one PR by number, to learn whether it's still open (and its head) or
+/// was merged (counts toward the task) vs just closed (abandoned).
+pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) -> Result<PrStatus> {
+    #[derive(Deserialize)]
+    struct Head {
+        sha: String,
+    }
+    #[derive(Deserialize)]
+    struct Pull {
+        state: String,
+        #[serde(default)]
+        merged: bool,
+        head: Head,
+    }
+    let pull: Pull = octo
+        .get(format!("/repos/{owner}/{repo}/pulls/{number}"), None::<&()>)
+        .await
+        .wrap_err("failed to fetch pull request state")?;
+    let lifecycle = if pull.merged {
+        PrLifecycle::Merged
+    } else if pull.state == "open" {
+        PrLifecycle::Open
+    } else {
+        PrLifecycle::Closed
+    };
+    Ok(PrStatus {
+        lifecycle,
+        head_sha: pull.head.sha,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct CheckRunsResponse {
     total_count: u64,

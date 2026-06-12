@@ -34,7 +34,11 @@ pub fn build(
          - Implement the change, then run the project's build/tests/linters and make them pass.\n\
          - Commit your work and push the branch.\n\
          - Open a pull request against `{default}` with `gh pr create`, referencing issue #{number}.\n\
-         - After the PR is open, stop. Do not poll, watch, or wait for CI to finish: Seraphim \
+         - If this issue needs changes in more than one repo, make them in each affected sibling \
+         repo on a branch with the SAME name `{branch}`, and open a pull request in each. Seraphim \
+         tracks every PR you open on `{branch}`: the task is not done until all of them pass CI and \
+         merge, so do not leave a needed repo without its PR.\n\
+         - After the PR(s) are open, stop. Do not poll, watch, or wait for CI to finish: Seraphim \
          watches every PR's checks for you and automatically brings you back to fix anything that \
          fails, so a long `gh pr checks` wait only blocks the queue behind you.\n\
          - Finish with a short summary of what you changed.\n",
@@ -75,7 +79,9 @@ pub fn build_ci_fix(
         "# Fixing CI\n\
          - You previously opened a pull request for this issue, but its CI is failing: {checks}.\n\
          - Your cwd is `/workspace`. The focus repo `{repo}` is at `{repo_path}`, already checked \
-         out on branch `{branch}` with your earlier commits.\n\
+         out on branch `{branch}` with your earlier commits. If this issue spans several repos, \
+         each one with a PR is also checked out on `{branch}` as a sibling directory; a failing \
+         check above is tagged with its `repo#pr` so you know which repo to fix.\n\
          - Investigate the failures first: use `gh pr checks` and `gh run view --log-failed` (or \
          open the PR's checks) to read the actual errors before changing anything.\n\
          - Fix the failures on this branch, then run the project's build/tests/linters, commit, and \

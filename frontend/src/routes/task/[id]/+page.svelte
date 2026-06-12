@@ -1,11 +1,27 @@
 <script lang="ts">
-  import type { AgentEvent, AnswerSubmission, EnvSuggestion, Question, Task } from '$lib/types'
+  import type {
+    AgentEvent,
+    AnswerSubmission,
+    EnvSuggestion,
+    Question,
+    Task,
+    TaskPullRequest
+  } from '$lib/types'
 
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
   import { goto } from '$app/navigation'
-  import { Ban, ChevronDown, NotebookPen, Pause, Play, RotateCcw } from '@lucide/svelte'
+  import {
+    Ban,
+    ChevronDown,
+    ExternalLink,
+    GitPullRequest,
+    NotebookPen,
+    Pause,
+    Play,
+    RotateCcw
+  } from '@lucide/svelte'
 
   import {
     acknowledgeSuggestion,
@@ -42,7 +58,26 @@
   let events = $state<StreamEvent[]>([])
   let suggestions = $state<EnvSuggestion[]>([])
   let questions = $state<Question[]>([])
+  let pullRequests = $state<TaskPullRequest[]>([])
   let eventSource: EventSource | null = null
+
+  // A one-word status for a PR row, combining its lifecycle and (while open) its
+  // CI verdict, and the badge color that goes with it.
+  function prStatusLabel(pr: TaskPullRequest): string {
+    if (pr.pr_state === 'merged') return 'Merged'
+    if (pr.pr_state === 'closed') return 'Closed'
+    if (pr.ci_state === 'passing') return 'CI passing'
+    if (pr.ci_state === 'failing') return 'CI failing'
+    return 'CI pending'
+  }
+
+  function prStatusClass(pr: TaskPullRequest): string {
+    if (pr.pr_state === 'merged') return 'bg-primary/15 text-primary'
+    if (pr.pr_state === 'closed') return 'bg-muted text-muted-foreground'
+    if (pr.ci_state === 'passing') return 'bg-success/15 text-success'
+    if (pr.ci_state === 'failing') return 'bg-destructive/15 text-destructive'
+    return 'bg-warning/15 text-warning'
+  }
 
   // A live clock driving the "Running …" timer below the latest event; ticks
   // once a second while a turn is in flight.
@@ -255,6 +290,7 @@
     }))
     suggestions = detail.suggestions
     questions = detail.questions
+    pullRequests = detail.pull_requests
     // Seed the notepad once, and open it if there is already something to read.
     if (!notesInitialized) {
       notes = detail.task.notes
@@ -503,6 +539,45 @@
                   oncreated={onSuggestionCreated}
                 />
               {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    {#if pullRequests.length}
+      <!-- Every PR the task opened, across all repos it spans. The task only
+           reaches Done once all of these pass CI and merge. -->
+      <section class="rounded-lg border border-border bg-card p-3">
+        <h2 class="flex items-center gap-1.5 text-sm font-semibold">
+          <GitPullRequest class="size-4 text-muted-foreground" />
+          Pull requests
+          {#if pullRequests.length > 1}
+            <span class="text-xs font-normal text-muted-foreground">
+              ({pullRequests.length} repos, all must merge)
+            </span>
+          {/if}
+        </h2>
+        <ul class="mt-2 divide-y divide-border">
+          {#each pullRequests as pr (pr.id)}
+            <li class="flex items-center gap-2 py-2">
+              <a
+                href={pr.pr_url}
+                target="_blank"
+                rel="noreferrer"
+                class="flex min-w-0 items-center gap-1.5 text-sm hover:underline"
+              >
+                <span class="truncate font-medium">{pr.repo_full_name}</span>
+                <span class="flex-none text-muted-foreground">#{pr.pr_number}</span>
+                <ExternalLink class="size-3 flex-none text-muted-foreground" />
+              </a>
+              <span
+                class="ml-auto flex-none rounded-full px-2 py-0.5 text-xs font-medium {prStatusClass(
+                  pr
+                )}"
+              >
+                {prStatusLabel(pr)}
+              </span>
             </li>
           {/each}
         </ul>

@@ -15,7 +15,7 @@ use super::models::{
     AnswerKind, AutomationRule, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite,
     HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel, PendingQuestion,
     Question, QuestionOption, QuestionStatus, RepoDeletionImpact, Repository, ReviewPolicy,
-    Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
+    Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -1442,6 +1442,50 @@ pub async fn set_task_pr(pool: &PgPool, id: Uuid, pr_url: &str) -> sqlx::Result<
     )
     .bind(id)
     .bind(pr_url)
+    .fetch_one(pool)
+    .await
+}
+
+/// Every pull request tracked for a task, oldest first.
+pub async fn list_task_prs(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<TaskPullRequest>> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "SELECT * FROM task_pull_requests WHERE task_id = $1 ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Records (or refreshes) a task's pull request, keyed by `(task, repo, number)`.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_task_pr(
+    pool: &PgPool,
+    task_id: Uuid,
+    repo_id: Option<Uuid>,
+    repo_full_name: &str,
+    pr_number: i64,
+    pr_url: &str,
+    head_sha: &str,
+    ci_state: &str,
+    pr_state: &str,
+) -> sqlx::Result<TaskPullRequest> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "INSERT INTO task_pull_requests \
+           (task_id, repo_id, repo_full_name, pr_number, pr_url, head_sha, ci_state, pr_state) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         ON CONFLICT (task_id, repo_full_name, pr_number) DO UPDATE SET \
+           repo_id = EXCLUDED.repo_id, pr_url = EXCLUDED.pr_url, head_sha = EXCLUDED.head_sha, \
+           ci_state = EXCLUDED.ci_state, pr_state = EXCLUDED.pr_state, updated_at = now() \
+         RETURNING *",
+    )
+    .bind(task_id)
+    .bind(repo_id)
+    .bind(repo_full_name)
+    .bind(pr_number)
+    .bind(pr_url)
+    .bind(head_sha)
+    .bind(ci_state)
+    .bind(pr_state)
     .fetch_one(pool)
     .await
 }
