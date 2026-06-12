@@ -266,13 +266,15 @@ pub async fn set_tokens(
     Ok(())
 }
 
-/// The refreshing OAuth credentials used to poll the subscription usage gauge
-/// (all-empty when no subscription login is configured). Internal use only.
+/// The refreshing OAuth credentials from a subscription login (all-empty when none
+/// is configured). Drives both the on-demand inference-token refresh and the usage
+/// gauge. Internal use only.
 pub async fn get_usage_credentials(pool: &PgPool) -> sqlx::Result<ClaudeUsageCredentials> {
     sqlx::query_as::<_, ClaudeUsageCredentials>(
         "SELECT claude_usage_access_token AS access_token, \
          claude_usage_refresh_token AS refresh_token, \
-         claude_usage_expires_at AS expires_at FROM settings WHERE id = 1",
+         claude_usage_expires_at AS expires_at, \
+         claude_usage_scopes AS scopes FROM settings WHERE id = 1",
     )
     .fetch_one(pool)
     .await
@@ -305,17 +307,18 @@ pub async fn set_subscription_credentials(
     Ok(())
 }
 
-/// Updates the usage access token (and the rotated refresh token, if the endpoint
-/// returned a new one) after a refresh. An empty `refresh_token` keeps the stored
-/// one.
-pub async fn set_usage_tokens(
+/// Persists a refreshed subscription token. The new access token becomes both the
+/// inference credential the agent runs on (`claude_oauth_token`) and the usage
+/// copy, keeping them in lockstep; the rotated refresh token is stored when the
+/// endpoint returned one (an empty `refresh_token` keeps the existing one).
+pub async fn set_oauth_tokens(
     pool: &PgPool,
     access_token: &str,
     refresh_token: &str,
     expires_at: DateTime<Utc>,
 ) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE settings SET claude_usage_access_token = $1, \
+        "UPDATE settings SET claude_oauth_token = $1, claude_usage_access_token = $1, \
          claude_usage_refresh_token = COALESCE(NULLIF($2, ''), claude_usage_refresh_token), \
          claude_usage_expires_at = $3, updated_at = now() WHERE id = 1",
     )

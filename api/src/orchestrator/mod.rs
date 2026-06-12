@@ -51,9 +51,14 @@ const DEFAULT_SYNC_POLL: Duration = Duration::from_secs(120);
 /// up. GitHub's pull-request list lags a few seconds behind `gh pr create`
 /// (read-replica/index propagation), so a single check the instant the turn
 /// ends races GitHub's own indexing and spuriously reports "no PR".
-const PR_DETECT_ATTEMPTS: u32 = 6;
-/// Delay between PR-detection attempts (so detection waits up to ~15s total).
+const PR_DETECT_ATTEMPTS: u32 = 8;
+/// Delay between PR-detection attempts (so detection waits up to ~24s total).
 const PR_DETECT_DELAY: Duration = Duration::from_secs(3);
+/// How long the review loop keeps re-detecting a freshly opened PR before it
+/// concludes the agent genuinely opened none and fails the task. Generously above
+/// any plausible GitHub list-indexing lag, so a transient miss after the turn ends
+/// is recovered rather than turned into a permanent false failure.
+const PR_DETECT_GRACE: Duration = Duration::from_secs(15 * 60);
 
 /// How many fix turns the agent spends on a PR's failing CI before leaving it
 /// for a human. Bounds thrash when a failure is unfixable or out of scope.
@@ -125,7 +130,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
-    tokio::spawn(subscription::usage_loop(state.clone()));
+    tokio::spawn(subscription::token_loop(state.clone()));
     tokio::spawn(agent_loop(state));
 }
 
@@ -888,24 +893,18 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         }
     }
     if detected == 0 {
-        return fail(
-            state,
-            &task,
-            "the agent finished without opening a pull request",
-        )
-        .await;
+        // The turn finished cleanly but no PR is visible yet. GitHub's PR-list
+        // endpoint lags behind `gh pr create`, so rather than fail outright we move
+        // the task into review as awaiting; the review loop keeps re-detecting the
+        // branch and only fails it if no PR appears within `PR_DETECT_GRACE`.
+        info!(task_id = %task.id, "no PR detected yet; awaiting GitHub indexing via the review loop");
+        queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
+        queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
+        state.notify_board();
+        return Ok(());
     }
 
-    // Keep the board card's primary PR pointing at the focus repo's PR when it has
-    // one, else the first PR opened. The full set lives in `task_pull_requests`.
-    let prs = queries::list_task_prs(&state.db, task.id).await?;
-    let primary = prs
-        .iter()
-        .find(|pr| pr.repo_full_name == repo.full_name)
-        .or_else(|| prs.first());
-    if let Some(primary) = primary {
-        queries::set_task_pr(&state.db, task.id, &primary.pr_url).await?;
-    }
+    set_primary_pr(state, task.id, &repo.full_name).await?;
     queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
     queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
     state.notify_board();
@@ -1230,7 +1229,9 @@ async fn stream_turn(
         resume_session_id: settings.current_session_id.clone(),
         model: settings.claude_model.clone(),
         auth_mode: settings.claude_auth_mode,
-        oauth_token: queries::get_claude_token(&state.db).await?,
+        // Refresh the subscription token if it is near expiry, so a turn never runs
+        // on an expired token, even the first turn after a long downtime.
+        oauth_token: subscription::fresh_inference_token(state).await?,
         github_token: queries::get_github_token(&state.db).await?,
         task_id: task.id.to_string(),
         internal_api_url: state.internal_api_url.clone(),
@@ -1479,7 +1480,26 @@ async fn review_task(
         detect_task_prs(state, github, task).await?;
         prs = queries::list_task_prs(&state.db, task.id).await?;
         if prs.is_empty() {
-            return Ok(()); // PR closed/merged externally, or none yet.
+            // The agent finished but no PR is visible yet. Keep re-detecting (GitHub
+            // list indexing lags) until the grace period elapses, then conclude none
+            // was opened and fail, so a genuinely PR-less task does not wait forever.
+            if Utc::now().signed_duration_since(task.updated_at)
+                > chrono::Duration::from_std(PR_DETECT_GRACE).unwrap_or(chrono::Duration::zero())
+            {
+                return fail(
+                    state,
+                    task,
+                    "the agent finished without opening a pull request",
+                )
+                .await;
+            }
+            return Ok(()); // PR closed/merged externally, or not indexed yet.
+        }
+        // A PR surfaced after the turn ended: point the card's primary link at it.
+        if let Some(repo_id) = task.repo_id {
+            if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
+                set_primary_pr(state, task.id, &repo.full_name).await?;
+            }
         }
     }
 
@@ -1695,6 +1715,21 @@ async fn detect_task_prs(
         found += 1;
     }
     Ok(found)
+}
+
+/// Points the board card's primary PR (`task.pr_url`) at the focus repo's PR, or
+/// the first PR opened if the focus repo has none. The full set lives in
+/// `task_pull_requests`; this is only the single link the card shows.
+async fn set_primary_pr(state: &AppState, task_id: uuid::Uuid, focus_repo: &str) -> Result<()> {
+    let prs = queries::list_task_prs(&state.db, task_id).await?;
+    let primary = prs
+        .iter()
+        .find(|pr| pr.repo_full_name == focus_repo)
+        .or_else(|| prs.first());
+    if let Some(primary) = primary {
+        queries::set_task_pr(&state.db, task_id, &primary.pr_url).await?;
+    }
+    Ok(())
 }
 
 /// Refreshes every tracked PR: an open PR's head + CI, or, once it's no longer

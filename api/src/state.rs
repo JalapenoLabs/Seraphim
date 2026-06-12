@@ -8,7 +8,7 @@ use eyre::Result;
 use octocrab::Octocrab;
 use serde::Serialize;
 use sqlx::PgPool;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use crate::claude::oauth::PendingAuth;
@@ -109,6 +109,11 @@ pub struct AppState {
     /// The latest polled subscription usage snapshot, refreshed by the usage loop
     /// and read by the stats gauges. `None` until a poll succeeds.
     usage: Arc<RwLock<Option<SubscriptionUsage>>>,
+    /// Serializes refreshes of the Claude subscription token. The provider rotates
+    /// the refresh token on each use, so a turn and the background keepalive
+    /// refreshing at once would race and one would persist an already-invalidated
+    /// token; this lock makes the refresh-or-reuse decision atomic.
+    claude_token_refresh: Arc<AsyncMutex<()>>,
     /// Bumped by a hard reset. A turn captures it at the start and abandons its
     /// post-turn handling (session persist, task move) if it changed, so a reset
     /// that lands mid-turn is never undone by the turn it interrupted.
@@ -166,6 +171,7 @@ impl AppState {
             live_usage: Arc::new(RwLock::new(None)),
             pending_oauth: Arc::new(RwLock::new(None)),
             usage: Arc::new(RwLock::new(None)),
+            claude_token_refresh: Arc::new(AsyncMutex::new(())),
             reset_epoch: Arc::new(AtomicU64::new(0)),
             update,
             update_status: Arc::new(RwLock::new(update_status)),
@@ -243,6 +249,13 @@ impl AppState {
     /// Replaces (or clears with `None`) the cached subscription usage snapshot.
     pub fn set_usage(&self, usage: Option<SubscriptionUsage>) {
         *self.usage.write().expect("usage lock poisoned") = usage;
+    }
+
+    /// The lock that serializes Claude subscription token refreshes. Callers hold
+    /// the returned guard across the read-decide-refresh-persist sequence so two
+    /// refreshers never race on the rotating refresh token.
+    pub fn claude_token_refresh(&self) -> &AsyncMutex<()> {
+        &self.claude_token_refresh
     }
 
     /// Builds a GitHub client from the token stored in the database. Built on

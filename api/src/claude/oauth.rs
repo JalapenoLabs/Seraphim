@@ -1,19 +1,19 @@
-//! Claude.ai subscription OAuth: the same Authorization-Code + PKCE flow the
-//! Claude Code CLI uses (`claude setup-token` / `claude auth login`), so an
-//! operator can connect their subscription from Seraphim's UI instead of pasting
-//! a `setup-token`.
+//! Claude.ai subscription OAuth: the same Authorization-Code + PKCE flow
+//! `claude auth login` uses, so an operator can connect their subscription from
+//! Seraphim's UI instead of pasting a `setup-token`.
 //!
-//! One consent yields two things, deliberately separated:
-//! - a **long-lived inference token** (minted via `create_api_key`), which the
-//!   agent runs on - rock-solid, never depends on a refresh loop; and
-//! - the short-lived **access/refresh** pair, used *only* to poll
-//!   `/api/oauth/usage` for the subscription usage gauge (`user:profile` scope).
+//! The code exchange yields an OAuth **access token the agent runs on directly**
+//! (an `sk-ant-oat01-...` token, like `claude setup-token` returns). There is no
+//! `create_api_key` mint step: it requires the `org:create_api_key` scope, which
+//! this login does not request, and the access token already authorizes inference.
+//! The token is short-lived (~8h), so the same access/refresh pair is refreshed
+//! ahead of expiry by [`crate::orchestrator::subscription`] to keep the agent
+//! running, including after Seraphim has been offline for days.
 //!
-//! The endpoints, client id, scopes, and redirect were taken from the authorize
-//! URL `claude setup-token` prints. A few request/response shapes (the
-//! `create_api_key` token field, the exact `/api/oauth/usage` body) are not fully
-//! pinned down and are parsed defensively; they are verified during the live
-//! end-to-end test. Such spots are flagged with `WIRE:` comments.
+//! The login requests `user:profile user:inference`: `user:inference` runs the
+//! agent and `user:profile` authorizes `/api/oauth/usage`, which drives the
+//! subscription usage gauge. Both are accepted by the consent screen (the full
+//! `claude auth login` "grant access to..." screen).
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -21,21 +21,33 @@ use eyre::{eyre, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tracing::{info, warn};
 
 /// Claude Code's public OAuth client (the same one `claude` uses; visible in the
 /// authorize URL `claude setup-token` prints).
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+// The consent host. The Claude Code CLI enters at `claude.com/cai/oauth/authorize`,
+// which 302-redirects here with the query string preserved, so navigating straight
+// to `claude.ai/oauth/authorize` is equivalent and what we use.
+const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
-const CREATE_API_KEY_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// Beta header required on the OAuth-authenticated Anthropic endpoints.
 const OAUTH_BETA: &str = "oauth-2025-04-20";
-/// Full scope: `user:inference` (run the agent + mint the long-lived key),
-/// `user:profile` (required by `/api/oauth/usage`), and `org:create_api_key`
-/// (authorizes the mint step).
-const SCOPES: &str = "org:create_api_key user:profile user:inference";
+/// OAuth scope, matched to what `claude auth login` (the interactive login, not
+/// `setup-token`) requests for this client. `user:inference` runs the agent;
+/// `user:profile` authorizes `/api/oauth/usage`, which drives the subscription
+/// usage gauge.
+///
+/// Both scopes are accepted by the consent screen (it is the same "grant access
+/// to..." screen `claude auth login` shows, with the full set of checkboxes). An
+/// earlier revision dropped `user:profile` believing it caused the consent to
+/// reject with "Invalid request format"; that rejection was actually a too-short
+/// `state` (since fixed in [`start`]), not the scope. The literal
+/// `user:profile user:inference` scope string is present verbatim in the Claude
+/// Code binary.
+const SCOPES: &str = "user:profile user:inference";
 
 /// The PKCE secrets for one in-flight authorization, held until the operator
 /// pastes the code back.
@@ -71,7 +83,11 @@ pub struct Usage {
 pub fn start() -> (String, PendingAuth) {
     let verifier = url_safe(&random_bytes_32());
     let challenge = url_safe(&sha256(verifier.as_bytes()));
-    let state = url_safe(uuid::Uuid::new_v4().as_bytes());
+    // `state` must carry the same entropy the CLI uses (32 bytes -> 43 base64url
+    // chars). The consent endpoint rejects a shorter value with "Authorization
+    // failed"; a 16-byte UUID state was the real cause of the failed logins, even
+    // once the scope and host already matched the CLI exactly.
+    let state = url_safe(&random_bytes_32());
     let url = format!(
         "{AUTHORIZE_URL}?code=true&client_id={CLIENT_ID}&response_type=code\
          &redirect_uri={redirect}&scope={scope}&code_challenge={challenge}\
@@ -79,6 +95,10 @@ pub fn start() -> (String, PendingAuth) {
         redirect = percent_encode(REDIRECT_URI),
         scope = percent_encode(SCOPES),
     );
+    // Log the full consent URL (it carries only ephemeral PKCE/state, no secret)
+    // so an operator hitting "Invalid request format" can confirm the exact
+    // scope/redirect/client the request used.
+    info!(scope = SCOPES, redirect = REDIRECT_URI, %url, "built Claude OAuth authorize URL");
     (url, PendingAuth { verifier, state })
 }
 
@@ -117,33 +137,6 @@ pub async fn refresh(refresh_token: &str) -> Result<Tokens> {
         "refresh_token": refresh_token,
     }))
     .await
-}
-
-/// Mints the long-lived inference token the agent runs on (what `setup-token`
-/// produces), using a freshly-exchanged OAuth access token.
-pub async fn mint_inference_token(access_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
-    let response = client
-        .post(CREATE_API_KEY_URL)
-        .bearer_auth(access_token)
-        .header("anthropic-beta", OAUTH_BETA)
-        .json(&json!({}))
-        .send()
-        .await
-        .wrap_err("create_api_key request failed")?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(eyre!("create_api_key returned {status}: {text}"));
-    }
-    let value: Value = serde_json::from_str(&text)
-        .wrap_err_with(|| format!("unexpected create_api_key response: {text}"))?;
-    // WIRE: the long-lived key's field name is unconfirmed; try the likely ones.
-    ["raw_key", "key", "token", "api_key", "raw_api_key"]
-        .into_iter()
-        .find_map(|field| value.get(field).and_then(Value::as_str))
-        .map(str::to_string)
-        .ok_or_else(|| eyre!("create_api_key response had no recognizable token field: {text}"))
 }
 
 /// Polls the subscription usage. Returns a distinct error on 429 so the caller
@@ -194,8 +187,11 @@ async fn token_request(body: &Value) -> Result<Tokens> {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The body is the provider's error description, not a secret.
+        warn!(%status, body = %text, "Claude OAuth token endpoint returned an error");
         return Err(eyre!("oauth token endpoint returned {status}: {text}"));
     }
+    info!(%status, "Claude OAuth token exchange/refresh succeeded");
     let parsed: Response = serde_json::from_str(&text)
         .wrap_err_with(|| format!("unexpected token response: {text}"))?;
     Ok(Tokens {
@@ -305,6 +301,16 @@ mod tests {
         assert!(url.contains(&format!("client_id={CLIENT_ID}")));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains(&format!("state={}", pending.state)));
+
+        // The scope must request both `user:profile` (for the usage gauge) and
+        // `user:inference` (to run the agent), space-separated and percent-encoded,
+        // matching the `claude auth login` consent.
+        assert!(url.contains("scope=user%3Aprofile%20user%3Ainference"));
+
+        // The state must be 32 bytes of entropy (43 base64url chars), matching the
+        // CLI. A shorter state makes the consent endpoint reject with
+        // "Authorization failed".
+        assert_eq!(pending.state.len(), 43, "state must be 32-byte base64url");
 
         // The challenge in the URL must be base64url(sha256(verifier)).
         let expected_challenge = url_safe(&sha256(pending.verifier.as_bytes()));

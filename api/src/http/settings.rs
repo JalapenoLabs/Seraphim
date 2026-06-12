@@ -10,6 +10,8 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json as SqlxJson;
 
+use tracing::{info, warn};
+
 use super::ApiResult;
 use crate::db::models::{
     AvailabilityWindow, EnvVarWrite, JiraDeployment, NetworkAccessLevel, ReviewPolicy, Settings,
@@ -144,6 +146,7 @@ pub struct OauthStartResponse {
 pub async fn claude_oauth_start(
     State(state): State<AppState>,
 ) -> ApiResult<Json<OauthStartResponse>> {
+    info!("Claude OAuth login started; issuing authorize URL");
     let (authorize_url, pending) = crate::claude::oauth::start();
     state.set_pending_oauth(pending);
     Ok(Json(OauthStartResponse { authorize_url }))
@@ -163,12 +166,22 @@ pub async fn claude_oauth_finish(
     State(state): State<AppState>,
     Json(body): Json<OauthFinishRequest>,
 ) -> ApiResult<Json<Settings>> {
-    let pending = state
-        .take_pending_oauth()
-        .ok_or_else(|| eyre::eyre!("no Claude login is in progress; start one first"))?;
+    info!("completing Claude OAuth login: exchanging code");
+    let Some(pending) = state.take_pending_oauth() else {
+        warn!("Claude OAuth finish called with no login in progress");
+        return Err(eyre::eyre!("no Claude login is in progress; start one first").into());
+    };
     let tokens =
         crate::claude::oauth::exchange_code(&body.code, &pending.verifier, &pending.state).await?;
-    let inference_token = crate::claude::oauth::mint_inference_token(&tokens.access_token).await?;
+    // The OAuth access token IS the long-lived token the agent runs on (exactly
+    // what `claude setup-token` returns). There is no create_api_key mint step:
+    // that endpoint requires the `org:create_api_key` scope, which this user-scope
+    // consent does not grant (it 403s), and setup-token does not use it either.
+    info!(
+        expires_in = tokens.expires_in,
+        "Claude OAuth access token obtained; using it directly as the inference token"
+    );
+    let inference_token = tokens.access_token.clone();
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in);
     queries::set_subscription_credentials(
         &state.db,
@@ -179,6 +192,10 @@ pub async fn claude_oauth_finish(
         &tokens.scopes,
     )
     .await?;
+    info!(
+        scopes = %tokens.scopes,
+        "Claude OAuth login completed; subscription credentials stored"
+    );
     Ok(Json(settings_view(&state).await?))
 }
 

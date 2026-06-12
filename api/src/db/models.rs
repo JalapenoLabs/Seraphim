@@ -266,14 +266,17 @@ pub struct Settings {
     pub cooldown_until: Option<DateTime<Utc>>,
 }
 
-/// The refreshing OAuth credentials used solely to poll the subscription usage
-/// gauge. All-empty when no subscription login is configured. Never serialized to
-/// clients.
+/// The refreshing OAuth credentials from a subscription login: the short-lived
+/// access token the agent runs on, its long-lived refresh token, and the expiry.
+/// All-empty when no subscription login is configured. Never serialized to clients.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ClaudeUsageCredentials {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: Option<DateTime<Utc>>,
+    /// The scopes the consent granted, space-separated. Used to decide whether the
+    /// usage gauge (`/api/oauth/usage`, needs `user:profile`) can be polled.
+    pub scopes: String,
 }
 
 /// A user-defined environment variable injected into the agent's execs.
