@@ -17,9 +17,6 @@ use crate::db::queries;
 use crate::git;
 use crate::state::AppState;
 
-/// A header so the operator can recognize these auto-posted notes at a glance.
-const COMMENT_HEADER: &str = "Seraphim reasoning summary";
-
 /// Best-effort: summarize this turn's `thoughts` and post them as one comment on
 /// the task's GitHub issue.
 ///
@@ -58,13 +55,12 @@ pub async fn post_turn_thoughts(
         return Ok(());
     }
 
-    let body = format!("**{COMMENT_HEADER}**\n\n{summary}");
     git::add_issue_comment(
         &state.github().await?,
         owner,
         name,
         &task.external_id,
-        &body,
+        summary,
     )
     .await?;
     Ok(())
