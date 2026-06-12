@@ -98,6 +98,18 @@ pub async fn set_notes(
     Ok(Json(json!({ "saved": true })))
 }
 
+/// `POST /api/v1/tasks/:id/reset` - hard-reset a stuck task: stop the agent if it
+/// is mid-turn on it, close its PR, delete its branch (remote + workspace), reopen
+/// a closed source issue, and return the card to Available. Returns a summary of
+/// what was done so the UI can confirm it.
+pub async fn hard_reset(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<crate::orchestrator::ResetSummary>> {
+    let summary = crate::orchestrator::reset_task(&state, id).await?;
+    Ok(Json(summary))
+}
+
 /// Resolves a task to its GitHub `(owner, repo, issue number)`, or an error
 /// response when the task isn't a GitHub issue with a linked repository.
 async fn issue_coords(

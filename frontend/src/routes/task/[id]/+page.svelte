@@ -4,12 +4,14 @@
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
   import { page } from '$app/stores'
-  import { Ban, ChevronDown, NotebookPen, Pause, Play } from '@lucide/svelte'
+  import { goto } from '$app/navigation'
+  import { Ban, ChevronDown, NotebookPen, Pause, Play, RotateCcw } from '@lucide/svelte'
 
   import {
     acknowledgeSuggestion,
     answerQuestion,
     getTask,
+    hardResetTask,
     setTaskBlocking,
     setTaskHold,
     setTaskNotes
@@ -270,6 +272,33 @@
     await setTaskHold(task.id, held)
     await load()
     toast.success(held ? 'Task held — the agent will skip it' : 'Hold released')
+  }
+
+  // Hard reset: a destructive, irreversible action, so behind a confirmation. On
+  // success the card has moved to Available, so return to the board and report
+  // exactly which side effects ran.
+  let resetting = $state(false)
+  async function confirmReset() {
+    if (!task || resetting) {
+      return
+    }
+    resetting = true
+    try {
+      const summary = await hardResetTask(task.id)
+      const done = [
+        summary.interrupted_agent && 'stopped the agent',
+        summary.pr_closed && 'closed the PR',
+        summary.branch_deleted && 'deleted the branch',
+        summary.issue_reopened && 'reopened the issue'
+      ].filter(Boolean)
+      const detail = done.length ? ` (${done.join(', ')})` : ''
+      toast.success(`Task reset to Available${detail}`)
+      goto('/')
+    } catch (error) {
+      console.debug('hard reset failed', error)
+      toast.error('Hard reset failed. See the server logs.')
+      resetting = false
+    }
   }
 
   // Blocking toggle: a quick, reversible flag, so no confirmation dialog.
@@ -586,6 +615,36 @@
                     <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
                     <AlertDialog.Action onclick={confirmHold}>
                       {task.hold ? 'Release hold' : 'Hold task'}
+                    </AlertDialog.Action>
+                  </AlertDialog.Footer>
+                </AlertDialog.Content>
+              </AlertDialog.Root>
+              <AlertDialog.Root>
+                <AlertDialog.Trigger
+                  class={buttonVariants({ variant: 'destructive', size: 'sm' })}
+                  disabled={resetting}
+                  title="Abandon this attempt and start the task over from scratch"
+                >
+                  <RotateCcw class="size-3.5" />
+                  Hard reset
+                </AlertDialog.Trigger>
+                <AlertDialog.Content>
+                  <AlertDialog.Header>
+                    <AlertDialog.Title>Hard reset this task?</AlertDialog.Title>
+                    <AlertDialog.Description>
+                      This abandons the current attempt and starts the task over. It will:
+                      stop the agent if it is working this task right now, close its pull request,
+                      delete its branch (from GitHub and the workspace), reopen the source issue if
+                      it was closed, and move the card back to Available. This cannot be undone.
+                    </AlertDialog.Description>
+                  </AlertDialog.Header>
+                  <AlertDialog.Footer>
+                    <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+                    <AlertDialog.Action
+                      class={buttonVariants({ variant: 'destructive' })}
+                      onclick={confirmReset}
+                    >
+                      Hard reset
                     </AlertDialog.Action>
                   </AlertDialog.Footer>
                 </AlertDialog.Content>

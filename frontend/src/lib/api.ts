@@ -23,6 +23,7 @@ import type {
   Question,
   RepoDeletionImpact,
   Repository,
+  ResetSummary,
   ReviewPolicy,
   RuleAction,
   RuleGroup,
@@ -125,6 +126,13 @@ export function bulkDeleteTasks(ids: string[]) {
 // Save the private per-task notepad. Stored only in our DB, never sent to the ticket.
 export function setTaskNotes(taskId: string, notes: string) {
   return apiClient.put(`tasks/${taskId}/notes`, { json: { notes } }).json<{ saved: boolean }>()
+}
+
+// Hard-reset a stuck task: stop the agent if it's mid-turn on it, close the PR,
+// delete the branch (remote + workspace), reopen a closed issue, and return the
+// card to Available. Returns a summary of what was actually done.
+export function hardResetTask(taskId: string) {
+  return apiClient.post(`tasks/${taskId}/reset`).json<ResetSummary>()
 }
 
 // --- Environment suggestions -------------------------------------------------

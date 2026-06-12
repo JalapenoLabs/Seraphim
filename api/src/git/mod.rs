@@ -378,6 +378,41 @@ pub async fn squash_merge(octo: &Octocrab, owner: &str, repo: &str, number: u64)
     Ok(())
 }
 
+/// Closes a pull request without merging it (used by a task hard reset). Leaves
+/// the head branch intact; [`delete_remote_branch`] removes that separately.
+pub async fn close_pull_request(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<()> {
+    octo.pulls(owner, repo)
+        .update(number)
+        .state(octocrab::params::pulls::State::Closed)
+        .send()
+        .await
+        .wrap_err("failed to close pull request")?;
+    Ok(())
+}
+
+/// Deletes a branch from the remote (its `heads/<branch>` ref). Used by a task
+/// hard reset to discard the work; deleting an open PR's head branch also closes
+/// that PR on GitHub, but we close it explicitly first so the order never matters.
+pub async fn delete_remote_branch(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<()> {
+    octo.repos(owner, repo)
+        .delete_ref(&octocrab::params::repos::Reference::Branch(
+            branch.to_string(),
+        ))
+        .await
+        .wrap_err("failed to delete remote branch")?;
+    Ok(())
+}
+
 // --- Issue thread (GitHub-style detail view) ---------------------------------
 //
 // These structs deserialize straight from the GitHub REST shapes and serialize
