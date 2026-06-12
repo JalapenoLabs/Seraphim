@@ -3,8 +3,11 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
 use tracing::warn;
@@ -12,6 +15,7 @@ use tracing::warn;
 use super::ApiResult;
 use crate::db::models::{HeartAttack, Settings, SourceKind, Task, TaskColumn};
 use crate::db::queries;
+use crate::git;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -129,4 +133,142 @@ pub async fn set_blocking(
     let task = queries::set_task_blocking(&state.db, id, body.blocking).await?;
     state.notify_board();
     Ok(Json(task))
+}
+
+// --- Bulk edit ---------------------------------------------------------------
+//
+// Back the board's multi-select bulk actions. Each takes a set of task ids; the
+// board is notified once at the end so a large selection ticks the UI a single
+// time rather than per card.
+
+#[derive(Debug, Deserialize)]
+pub struct BulkFieldsRequest {
+    pub ids: Vec<Uuid>,
+    /// Each is `None` ("keep as is") or `Some(value)` to set across the selection.
+    #[serde(default)]
+    pub hold: Option<bool>,
+    #[serde(default)]
+    pub blocking: Option<bool>,
+}
+
+/// `POST /api/v1/tasks/bulk/fields` - set `hold` and/or `blocking` across a
+/// selection of cards. Omitted fields are left untouched.
+pub async fn bulk_fields(
+    State(state): State<AppState>,
+    Json(body): Json<BulkFieldsRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let updated = queries::bulk_set_fields(&state.db, &body.ids, body.hold, body.blocking).await?;
+    state.notify_board();
+    Ok(Json(json!({ "updated": updated })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkDeleteRequest {
+    pub ids: Vec<Uuid>,
+}
+
+/// `POST /api/v1/tasks/bulk/delete` - permanently delete a selection of cards.
+pub async fn bulk_delete(
+    State(state): State<AppState>,
+    Json(body): Json<BulkDeleteRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let deleted = queries::delete_tasks(&state.db, &body.ids).await?;
+    state.notify_board();
+    Ok(Json(json!({ "deleted": deleted })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkStatusRequest {
+    pub ids: Vec<Uuid>,
+    pub column: TaskColumn,
+}
+
+/// `POST /api/v1/tasks/bulk/status` - move a selection of cards into a column.
+///
+/// Only the operator-pickable destinations are allowed: `available`, `todo`,
+/// `done`, and `ignored` (never `in_progress` / `in_review`, which the agent
+/// owns). Moving to Done also closes each linked GitHub/Jira/internal ticket;
+/// moving anywhere else reopens a ticket that was closed.
+pub async fn bulk_status(
+    State(state): State<AppState>,
+    Json(body): Json<BulkStatusRequest>,
+) -> ApiResult<Response> {
+    if matches!(body.column, TaskColumn::InProgress | TaskColumn::InReview) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cannot bulk-move cards into In Progress or In Review" })),
+        )
+            .into_response());
+    }
+
+    // Append the selection to the bottom of the target column, preserving its
+    // current relative order (the fetch is board-ordered).
+    let tasks = queries::list_tasks_by_ids(&state.db, &body.ids).await?;
+    let mut position = queries::max_position_in_column(&state.db, body.column)
+        .await?
+        .unwrap_or(0.0);
+
+    for task in &tasks {
+        position += 1.0;
+        let moved = queries::move_task(&state.db, task.id, body.column, position).await?;
+        // Reflect the move onto the source ticket (close on Done, reopen
+        // otherwise). Best-effort: a service hiccup must not fail the whole move.
+        if let Err(error) = sync_ticket_to_column(&state, &moved, body.column).await {
+            warn!(error = %error, task = %moved.id, "failed to sync ticket state on bulk move");
+        }
+    }
+
+    state.notify_board();
+    Ok(Json(json!({ "updated": tasks.len() })).into_response())
+}
+
+/// Reflects a card's new column onto its source ticket: closed when it lands in
+/// Done, open otherwise. A no-op when the ticket is already in the desired state.
+///
+/// GitHub issues are closed (reason "completed") or reopened directly; Jira
+/// tickets transition through the board's column->status map (same path as a
+/// drag); internal tickets just flip their stored state.
+async fn sync_ticket_to_column(
+    state: &AppState,
+    task: &Task,
+    column: TaskColumn,
+) -> eyre::Result<()> {
+    let desired = if column == TaskColumn::Done {
+        "closed"
+    } else {
+        "open"
+    };
+
+    match task.source_kind {
+        SourceKind::Jira => transition_jira(state, task, column).await,
+        SourceKind::Internal => {
+            if task.external_state.as_deref() != Some(desired) {
+                queries::set_task_external_state(&state.db, task.id, desired).await?;
+            }
+            Ok(())
+        }
+        SourceKind::Github => {
+            if task.external_state.as_deref() == Some(desired) {
+                return Ok(());
+            }
+            let Some(repo_id) = task.repo_id else {
+                return Ok(());
+            };
+            let Some(repo) = queries::get_repository(&state.db, repo_id).await? else {
+                return Ok(());
+            };
+            let Some((owner, name)) = repo.full_name.split_once('/') else {
+                return Ok(());
+            };
+            let github = state.github().await?;
+            let reason = if desired == "closed" {
+                Some("completed")
+            } else {
+                None
+            };
+            git::set_issue_state(&github, owner, name, &task.external_id, desired, reason).await?;
+            queries::set_task_external_state(&state.db, task.id, desired).await?;
+            Ok(())
+        }
+    }
 }

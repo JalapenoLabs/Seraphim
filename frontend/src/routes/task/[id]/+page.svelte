@@ -555,7 +555,7 @@
                 })}
               >
                 <Ban class="size-3.5" />
-                {task.blocking ? 'Blocking' : 'Block'}
+                {task.blocking ? 'Blocking' : 'Make blocking'}
               </button>
               <AlertDialog.Root>
                 <AlertDialog.Trigger class={buttonVariants({ variant: 'outline', size: 'sm' })}>

@@ -3,13 +3,28 @@
   import type { HeartAttack, Settings, Task, TaskColumn } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
+  import { SvelteSet } from 'svelte/reactivity'
   import { dndzone } from 'svelte-dnd-action'
-  import { HeartPulse, NotebookPen, RefreshCw, Pause, Play, Eye, EyeOff, X } from '@lucide/svelte'
+  import { toast } from 'svelte-sonner'
+  import {
+    HeartPulse,
+    NotebookPen,
+    RefreshCw,
+    Pause,
+    Play,
+    Eye,
+    EyeOff,
+    X,
+    ListChecks
+  } from '@lucide/svelte'
   import { PaneGroup } from 'paneforge'
 
   import { COLUMNS } from '$lib/types'
   import {
     acknowledgeHeartAttack,
+    bulkDeleteTasks,
+    bulkSetTaskFields,
+    bulkSetTaskStatus,
     getBoard,
     getNotepad,
     listRepos,
@@ -21,6 +36,7 @@
   } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
   import { type SortKey, sortTasks, loadSort, saveSort } from '$lib/columnSort'
+  import BulkActionBar from '$lib/components/BulkActionBar.svelte'
   import Card from '$lib/components/Card.svelte'
   import ColumnSort from '$lib/components/ColumnSort.svelte'
   import Stats from '$lib/components/Stats.svelte'
@@ -49,6 +65,75 @@
   let eventSource: EventSource | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
   let repoNames = $state<Record<string, string>>({})
+
+  // --- Multi-select (bulk edit) ----------------------------------------------
+  // In bulk mode a click selects a card instead of opening it; the floating
+  // BulkActionBar then edits the whole selection at once.
+  let bulkMode = $state(false)
+  let selected = new SvelteSet<string>()
+  // True while the bulk bar has a modal/menu open, so Escape closes that first
+  // rather than exiting bulk mode out from under it.
+  let bulkDialogOpen = $state(false)
+
+  function enterBulkMode() {
+    bulkMode = true
+  }
+
+  // Clear the selection and leave bulk mode (the bar's X and the Escape key).
+  function exitBulkMode() {
+    bulkMode = false
+    selected.clear()
+  }
+
+  function toggleSelected(id: string) {
+    if (selected.has(id)) {
+      selected.delete(id)
+    } else {
+      selected.add(id)
+    }
+  }
+
+  // Clicking a column header in bulk mode selects every card in that lane, or
+  // clears them when all are already selected (a partial selection fills in).
+  function toggleColumnSelected(column: TaskColumn) {
+    const ids = columns[column].map((task) => task.id)
+    const allSelected = ids.length > 0 && ids.every((id) => selected.has(id))
+    for (const id of ids) {
+      if (allSelected) {
+        selected.delete(id)
+      } else {
+        selected.add(id)
+      }
+    }
+  }
+
+  async function applyBulkFields(fields: { hold?: boolean; blocking?: boolean }) {
+    const ids = [...selected]
+    await bulkSetTaskFields(ids, fields)
+    await load()
+    toast.success(`Updated ${ids.length} ${ids.length === 1 ? 'task' : 'tasks'}`)
+  }
+
+  async function applyBulkStatus(column: TaskColumn) {
+    const ids = [...selected]
+    await bulkSetTaskStatus(ids, column)
+    await load()
+    toast.success(`Moved ${ids.length} ${ids.length === 1 ? 'task' : 'tasks'}`)
+  }
+
+  async function applyBulkDelete() {
+    const ids = [...selected]
+    await bulkDeleteTasks(ids)
+    selected.clear()
+    await load()
+    toast.success(`Deleted ${ids.length} ${ids.length === 1 ? 'task' : 'tasks'}`)
+  }
+
+  function onWindowKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && bulkMode && !bulkDialogOpen) {
+      exitBulkMode()
+    }
+  }
 
   // Per-column sort level (default "custom" = the board's manual order). Hydrated
   // from session storage on mount; the header sort button changes it.
@@ -155,6 +240,17 @@
       grouped[key] = sortTasks(grouped[key], sortState[key])
     }
     columns = grouped
+
+    // Drop any selected ids that no longer exist (deleted or closed elsewhere),
+    // so the bulk bar's count stays truthful across live board refreshes.
+    if (bulkMode && selected.size > 0) {
+      const present = new Set(board.tasks.map((task) => task.id))
+      for (const id of selected) {
+        if (!present.has(id)) {
+          selected.delete(id)
+        }
+      }
+    }
   }
 
   // Clears a heart-attack alert once the operator has read it. Optimistic: drop
@@ -277,6 +373,8 @@
   (the lanes) instead of the page and the lanes both scrolling. The height cap is
   `lg`-only; on narrow screens the lanes stack and the page scrolls normally.
 -->
+<svelte:window onkeydown={onWindowKeydown} />
+
 <div class="flex flex-col lg:h-full lg:min-h-0">
   {#each heartAttacks as incident (incident.id)}
     <!-- A turn died and the defibrillator handled it. Keep the diagnostic detail
@@ -378,6 +476,14 @@
           {/if}
         </Button>
       {/if}
+      <Button
+        variant={bulkMode ? 'default' : 'outline'}
+        size="sm"
+        onclick={() => (bulkMode ? exitBulkMode() : enterBulkMode())}
+      >
+        <ListChecks class="size-4" />
+        {bulkMode ? 'Done' : 'Bulk edit'}
+      </Button>
     </div>
   </div>
 
@@ -393,12 +499,30 @@
            cards are kept in the dnd list (just display:none) so drag-and-drop
            never desyncs from the rendered children. -->
       {@const collapsed = isDone && !showAllDone}
+      {@const columnSelected = columns[column.key].filter((task) => selected.has(task.id)).length}
       <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
         <header
           class="flex items-center justify-between border-b border-border px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
         >
           <div class="flex items-center gap-1.5">
-            <span>{column.label}</span>
+            {#if bulkMode}
+              <!-- In bulk mode the lane title selects (or clears) the whole lane. -->
+              <button
+                type="button"
+                onclick={() => toggleColumnSelected(column.key)}
+                title={`Select all in ${column.label}`}
+                class="-mx-1 rounded px-1 uppercase tracking-wide transition-colors hover:bg-secondary hover:text-foreground {columnSelected >
+                0
+                  ? 'text-primary'
+                  : ''}"
+              >
+                {column.label}{#if columnSelected > 0}<span class="ml-1 normal-case"
+                    >({columnSelected})</span
+                  >{/if}
+              </button>
+            {:else}
+              <span>{column.label}</span>
+            {/if}
             {#if isDone && hasHiddenDone}
               <button
                 type="button"
@@ -426,12 +550,15 @@
           </div>
         </header>
         <div
-          class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3"
+          class="flex min-h-[120px] flex-1 flex-col gap-2 overflow-y-auto rounded-b-lg p-3 {bulkMode
+            ? 'pb-24'
+            : ''}"
           use:dndzone={{
             items: columns[column.key],
             flipDurationMs: FLIP_MS,
             dropTargetStyle: {},
-            dropTargetClasses: ['drop-active']
+            dropTargetClasses: ['drop-active'],
+            dragDisabled: bulkMode
           }}
           onconsider={(event) => handleConsider(column.key, event)}
           onfinalize={(event) => handleFinalize(column.key, event)}
@@ -443,6 +570,9 @@
                 onchange={load}
                 repoName={task.repo_id ? repoNames[task.repo_id] : undefined}
                 suggestionCount={suggestionCounts[task.id] ?? 0}
+                selectionMode={bulkMode}
+                selected={selected.has(task.id)}
+                onselect={() => toggleSelected(task.id)}
               />
             </div>
           {/each}
@@ -463,7 +593,9 @@
     >
       <Resizable.Pane defaultSize={72} minSize={40} class="min-w-0">
         <div
-          class="grid h-full min-h-0 grid-cols-1 items-start gap-3 p-4 lg:grid-cols-6 lg:px-6 lg:pb-6"
+          class="grid h-full min-h-0 grid-cols-1 items-start gap-3 p-4 lg:grid-cols-6 lg:px-6 lg:pb-6 {bulkMode
+            ? 'rounded-lg ring-1 ring-inset ring-primary/40'
+            : ''}"
         >
           {@render kanbanColumns()}
         </div>
@@ -505,9 +637,22 @@
     </PaneGroup>
   {:else}
     <div
-      class="grid grid-cols-1 items-start gap-3 p-4 lg:min-h-0 lg:flex-1 lg:grid-cols-6 lg:px-6 lg:pb-6"
+      class="grid grid-cols-1 items-start gap-3 p-4 lg:min-h-0 lg:flex-1 lg:grid-cols-6 lg:px-6 lg:pb-6 {bulkMode
+        ? 'rounded-lg ring-1 ring-inset ring-primary/40'
+        : ''}"
     >
       {@render kanbanColumns()}
     </div>
+  {/if}
+
+  {#if bulkMode}
+    <BulkActionBar
+      count={selected.size}
+      bind:dialogOpen={bulkDialogOpen}
+      onClear={exitBulkMode}
+      onEditFields={applyBulkFields}
+      onChangeStatus={applyBulkStatus}
+      onDelete={applyBulkDelete}
+    />
   {/if}
 </div>
