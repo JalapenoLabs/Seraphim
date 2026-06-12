@@ -27,7 +27,11 @@ pub async fn board_stream(
                 Ok(ServerEvent::Usage { .. }) => {
                     yield Ok(Event::default().event("usage").data("{}"));
                 }
-                Ok(ServerEvent::Task { .. } | ServerEvent::Notification { .. }) => {}
+                Ok(
+                    ServerEvent::Task { .. }
+                    | ServerEvent::Notification { .. }
+                    | ServerEvent::HeartAttack { .. },
+                ) => {}
                 // A lagged consumer just resyncs; a closed channel ends the stream.
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
@@ -56,6 +60,15 @@ pub async fn notification_stream(
                     });
                     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                     yield Ok(Event::default().event("notification").data(data));
+                }
+                Ok(ServerEvent::HeartAttack { task_id, task_title, summary }) => {
+                    let payload = serde_json::json!({
+                        "task_id": task_id,
+                        "task_title": task_title,
+                        "summary": summary,
+                    });
+                    let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("heart_attack").data(data));
                 }
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("refresh").data("{}"));

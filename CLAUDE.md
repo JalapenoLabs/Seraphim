@@ -139,6 +139,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and
   surfaced as toasts + native notifications + a sidebar.
+- **`heart_attacks`** — recorded "heart attacks" (turns that died mid-flight),
+  written by the defibrillator loop (see above), never by a request. Each holds a
+  task snapshot, the status at death, the diagnostic `detail` (error logs kept for
+  later patching), what the defibrillator did (`recovery`), and `acknowledged`.
+  The board reads the unacknowledged ones into its payload and shows a dismissible
+  red banner; `POST /heart-attacks/:id/ack` clears one.
 - **`automation_rules`** — user-defined rules (Automation page). When a GitHub
   webhook delivers an issue `created`/`updated`/`comment` event, each enabled
   rule whose source + trigger match is checked against the event; if its
@@ -175,7 +181,7 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **Auth:** `CLAUDE_CODE_OAUTH_TOKEN` (subscription) for Claude; mounted host
   `~/.ssh` for `git@` clones; `GH_TOKEN` for HTTPS + octocrab.
 
-### The three orchestrator loops (`api/src/orchestrator/mod.rs`)
+### The orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
    them into the **top** of **Available** (never clobbers human-set
    column/position). Tasks are unique per `(repo_id, source_kind, external_id)`.
@@ -212,6 +218,23 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    bounded by `MAX_CI_FIX_ATTEMPTS` (3) before parking it `ci_blocked` for a
    human. A failed merge (e.g. base conflict) also parks it `ci_blocked` rather
    than retrying forever.
+4. **defibrillator** (dead-agent management) — recovers turns that die mid-flight,
+   which we call a **"heart attack"**: the agent hangs with no output, its stream
+   breaks, or the turn aborts internally, leaving the card stranded `in_progress`
+   and the `claude -p` child possibly leaked. Detection is layered: an **in-turn
+   heartbeat** in `stream_turn` (each wait for the next event is bounded by
+   `HEARTBEAT_TIMEOUT`, 20 min; a longer silence ends the turn as a heart attack),
+   the `agent_loop` catching a turn that aborted with an error, and a background
+   **watchdog** (`defibrillator_loop`) that reaps any task left `working` with no
+   activity past `WATCHDOG_TIMEOUT` (25 min, strictly above the heartbeat so it
+   never races a live turn). All three funnel into `defibrillate`, which kills the
+   orphaned process (`kill_agent_process`), records a `heart_attacks` incident with
+   the diagnostic detail, and revives the task — requeue to **To Do** if it had no
+   PR, else back to **In Review** — bounded by `MAX_DEFIBRILLATIONS` (3) before it
+   leaves the task failed for a human. Each incident alerts the operator: a
+   persistent, dismissible red banner on the board (carrying the error logs) plus a
+   toast and native notification. The revive-vs-give-up choice is the pure,
+   unit-tested `decide_recovery`.
 
 ## Ports & URLs
 

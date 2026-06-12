@@ -7,6 +7,7 @@
 mod automation;
 mod board;
 mod data;
+mod heart_attacks;
 mod jira;
 mod notepad;
 mod questions;
@@ -83,6 +84,7 @@ pub fn router(state: AppState) -> Router {
         .route("/questions/pending", get(questions::pending))
         .route("/questions/:id/answer", post(questions::answer))
         .route("/notifications/stream", get(sse::notification_stream))
+        .route("/heart-attacks/:id/ack", post(heart_attacks::acknowledge))
         .route("/repos", get(repos::list).post(repos::upsert))
         .route(
             "/repos/:id",

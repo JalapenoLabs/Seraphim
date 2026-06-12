@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use eyre::{eyre, Result};
 use futures::StreamExt;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 
 use crate::automation::{self, QueuePosition, RuleAction, RuleContext};
@@ -74,6 +74,30 @@ const RATE_LIMIT_RETRY_MAX: u32 = 5;
 /// the UI.
 const LIVE_USAGE_TICK: Duration = Duration::from_millis(350);
 
+/// How long a turn may go without emitting a single event before it is presumed
+/// dead (a "heart attack"). A healthy turn streams partial-message usage events
+/// continuously while generating and a tool event around each call, so the only
+/// legitimate silence is one long-running tool (a build or test). This is set
+/// well above the longest realistic silent step so a slow build is never mistaken
+/// for a hang, while still bounding how long a genuinely dead turn wastes the
+/// single-threaded agent before the defibrillator steps in.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// How often the defibrillator watchdog scans for a stranded turn.
+const DEFIB_POLL: Duration = Duration::from_secs(60);
+
+/// How long a task may sit `working` with no activity before the watchdog treats
+/// it as stranded. Strictly greater than [`HEARTBEAT_TIMEOUT`] so a live turn
+/// always self-terminates through the in-turn heartbeat first; only a turn the
+/// in-turn path could not catch (an aborted loop, a wedged non-stream await) is
+/// ever reaped here, so the watchdog never races a healthy turn.
+const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(25 * 60);
+
+/// How many heart attacks one task may suffer before the defibrillator stops
+/// reviving it and leaves it for a human. Bounds a task that dies every run from
+/// looping forever.
+const MAX_DEFIBRILLATIONS: i64 = 3;
+
 /// What kind of work a pulled card needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkMode {
@@ -93,6 +117,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(provision_on_startup(state.clone()));
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
+    tokio::spawn(defibrillator_loop(state.clone()));
     tokio::spawn(agent_loop(state));
 }
 
@@ -483,8 +508,18 @@ async fn agent_loop(state: AppState) {
     loop {
         match next_actionable_task(&state).await {
             Ok(Some((task, mode))) => {
+                // Keep a snapshot: if the turn aborts (a `?` propagated, leaving
+                // the card stranded and possibly an orphaned process), the
+                // defibrillator needs the task to record and recover it.
+                let snapshot = task.clone();
                 if let Err(error) = work_task(&state, task, mode).await {
-                    error!(error = %error, "task run failed");
+                    error!(error = %error, task_id = %snapshot.id, "task run aborted; defibrillating");
+                    let detail = format!("The turn aborted with an error: {error}");
+                    if let Err(defib_error) =
+                        defibrillate(&state, &snapshot, "working", &detail).await
+                    {
+                        error!(error = %defib_error, task_id = %snapshot.id, "defibrillator failed after a turn abort");
+                    }
                 }
                 // Immediately look for the next card; only sleep when idle.
             }
@@ -626,6 +661,16 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         info!(task_id = %task.id, "hard reset during turn; leaving the task to the reset");
         return Ok(());
     }
+    // The turn died (hung or its stream broke), not merely reported a problem:
+    // hand it to the defibrillator (kill the orphan, revive, alert) rather than a
+    // plain failure.
+    if outcome.heart_attack {
+        let detail = outcome
+            .error
+            .as_deref()
+            .unwrap_or("the agent stopped responding");
+        return defibrillate(state, &task, "working", detail).await;
+    }
     // Surface a turn failure (e.g. "Not logged in") on the task itself, instead
     // of letting it fall through to the generic "no pull request" message.
     if let Some(message) = outcome.error {
@@ -746,6 +791,15 @@ async fn work_ci_fix(state: &AppState, task: Task, revisit: bool) -> Result<()> 
         info!(task_id = %task.id, "hard reset during turn; leaving the task to the reset");
         return Ok(());
     }
+    // A turn that died mid-fix goes to the defibrillator: it already has a PR, so
+    // recovery returns it to review rather than re-queuing it as fresh work.
+    if outcome.heart_attack {
+        let detail = outcome
+            .error
+            .as_deref()
+            .unwrap_or("the agent stopped responding");
+        return defibrillate(state, &task, "working", detail).await;
+    }
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
     }
@@ -803,6 +857,10 @@ struct TurnOutcome {
     session_id: Option<String>,
     /// A failure message to surface on the task, if the turn errored.
     error: Option<String>,
+    /// Whether the turn *died* rather than merely reporting a problem: it hung with
+    /// no output past the heartbeat, or its stream broke. These are routed to the
+    /// defibrillator (kill the orphan, revive, alert) instead of a plain failure.
+    heart_attack: bool,
     /// The hard-reset epoch captured when the turn started, so the caller can tell
     /// whether a reset interrupted it.
     epoch: u64,
@@ -932,20 +990,8 @@ async fn stream_turn(
 
     // Clear any claude process leaked by a previously aborted turn. The agent is
     // single-threaded, so none should legitimately be running; a leftover would
-    // otherwise contend on the same shared session. The `[c]` keeps pkill from
-    // matching its own command line. Best-effort.
-    let _ = state
-        .workspace
-        .exec_capture(
-            "/workspace",
-            vec![
-                "bash".to_string(),
-                "-lc".to_string(),
-                "pkill -9 -f '[c]laude -p' || true".to_string(),
-            ],
-            vec![],
-        )
-        .await;
+    // otherwise contend on the same shared session. Best-effort.
+    kill_agent_process(state).await;
 
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));
     // seq 0 is the prompt event recorded above; the stream's events follow.
@@ -957,6 +1003,9 @@ async fn stream_turn(
     // persisted on the turn so the stats endpoints can aggregate it.
     let mut token_usage: Option<serde_json::Value> = None;
     let mut error_message: Option<String> = None;
+    // Set when the turn *died* (hung past the heartbeat, or its stream broke), as
+    // opposed to the agent merely reporting a problem; routes to the defibrillator.
+    let mut heart_attack = false;
     // The reset time of the last usage pause we applied this turn, so repeated
     // rate-limit notices don't re-write the same value.
     let mut usage_pause_reset: Option<i64> = None;
@@ -972,12 +1021,34 @@ async fn stream_turn(
     // A stale overlay from a prior turn would otherwise show until the first tick.
     state.set_live_usage(None);
 
-    while let Some(item) = stream.next().await {
+    loop {
+        // Bound each wait for the next event by the heartbeat: a turn that goes
+        // silent past it is presumed dead (a heart attack), not merely slow.
+        let item = match timeout(HEARTBEAT_TIMEOUT, stream.next()).await {
+            Ok(Some(item)) => item,
+            // The stream ended: the claude process exited. Normal completion.
+            Ok(None) => break,
+            Err(_elapsed) => {
+                let minutes = HEARTBEAT_TIMEOUT.as_secs() / 60;
+                warn!(task_id = %task.id, minutes, "agent heartbeat timed out; presumed hung");
+                error_message = Some(format!(
+                    "No output from the agent for {minutes} minutes; presumed hung."
+                ));
+                heart_attack = true;
+                // Stop the stalled process now so it can't keep spinning orphaned
+                // and so the dropped stream's exec is reaped promptly.
+                kill_agent_process(state).await;
+                break;
+            }
+        };
         let event = match item {
             Ok(event) => event,
             Err(error) => {
+                // A broken stream means the docker exec/process died under us: a
+                // heart attack, not an agent-reported failure.
                 warn!(error = %error, "claude stream error");
                 error_message = Some(format!("Claude stream error: {error}"));
+                heart_attack = true;
                 break;
             }
         };
@@ -1111,6 +1182,7 @@ async fn stream_turn(
     Ok(TurnOutcome {
         session_id,
         error: error_message,
+        heart_attack,
         epoch: reset_epoch,
     })
 }
@@ -1295,6 +1367,161 @@ async fn block(state: &AppState, task: &Task, message: &str) -> Result<()> {
     Ok(())
 }
 
+// --- Dead-agent management (heart attacks / the defibrillator) ----------------
+
+/// Kills any `claude -p` process left running in the workspace. The agent is
+/// single-threaded, so on a healthy machine none should be running between turns;
+/// a leftover is an orphan from an aborted turn that would otherwise keep spinning
+/// (and contend on the shared session). The `[c]` keeps pkill from matching its
+/// own command line. Best-effort: a cleanup failure must never abort the caller.
+async fn kill_agent_process(state: &AppState) {
+    let _ = state
+        .workspace
+        .exec_capture(
+            "/workspace",
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "pkill -9 -f '[c]laude -p' || true".to_string(),
+            ],
+            vec![],
+        )
+        .await;
+}
+
+/// What the defibrillator should do with a task it just revived from a heart
+/// attack. A pure decision so the gating is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    /// Send a fresh task back to To Do to be reworked from a clean branch.
+    Requeue,
+    /// Return a task that already has a PR to In Review, where the review loop
+    /// re-evaluates it (and its own CI-fix budget bounds further attempts).
+    ReturnToReview,
+    /// Stop reviving and leave it failed for a human: it has died too many times.
+    GiveUp,
+}
+
+/// Decides how to recover a task given how many heart attacks it has now suffered
+/// (this one included) and whether it already has a pull request. A task that
+/// keeps dying is left for a human once it hits [`MAX_DEFIBRILLATIONS`].
+fn decide_recovery(incident_count: i64, has_pr: bool) -> Recovery {
+    if incident_count >= MAX_DEFIBRILLATIONS {
+        Recovery::GiveUp
+    } else if has_pr {
+        Recovery::ReturnToReview
+    } else {
+        Recovery::Requeue
+    }
+}
+
+/// The defibrillator: handles a task whose turn died (a heart attack). It stops
+/// the orphaned process, records the incident with its diagnostic detail so the
+/// operator can patch the cause later, revives the task (or leaves it for a human
+/// once it has died too often), and raises a UI alert.
+///
+/// `detail` is the diagnosis (why we think it died). `status_label` is the task's
+/// operational status at death, captured for the incident record.
+async fn defibrillate(
+    state: &AppState,
+    task: &Task,
+    status_label: &str,
+    detail: &str,
+) -> Result<()> {
+    warn!(task_id = %task.id, detail, "heart attack: defibrillating");
+
+    // Shock first: make sure no orphaned claude process keeps spinning.
+    kill_agent_process(state).await;
+
+    // Decide recovery from how many times this task has now died.
+    let incident_count = queries::count_heart_attacks_for_task(&state.db, task.id).await? + 1;
+    let recovery = decide_recovery(incident_count, task.pr_url.is_some());
+    let recovery_note = match recovery {
+        Recovery::Requeue => "Revived: requeued to To Do for a clean re-run.",
+        Recovery::ReturnToReview => "Revived: returned the pull request to review.",
+        Recovery::GiveUp => "Left for a human: too many heart attacks on this task.",
+    };
+
+    // Record the incident before acting, so the alert and its logs survive even if
+    // the recovery move below fails. A blank title is unhelpful in the banner.
+    let title = if task.title.trim().is_empty() {
+        "(untitled task)"
+    } else {
+        task.title.trim()
+    };
+    let detail: String = detail.trim().chars().take(2000).collect();
+    queries::create_heart_attack(
+        &state.db,
+        Some(task.id),
+        title,
+        status_label,
+        &detail,
+        recovery_note,
+    )
+    .await?;
+
+    // Carry out the recovery.
+    match recovery {
+        Recovery::Requeue => {
+            let position = top_of_column_position(state, TaskColumn::Todo).await?;
+            queries::move_task(&state.db, task.id, TaskColumn::Todo, position).await?;
+        }
+        Recovery::ReturnToReview => {
+            queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
+            queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
+        }
+        Recovery::GiveUp => {
+            let note = format!("{detail} ({recovery_note})");
+            let trimmed: String = note.trim().chars().take(800).collect();
+            queries::set_task_error(&state.db, task.id, &trimmed).await?;
+            queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
+        }
+    }
+
+    state.notify_board();
+    state.notify_heart_attack(
+        Some(task.id),
+        title.to_string(),
+        format!("Agent heart attack. {recovery_note}"),
+    );
+    Ok(())
+}
+
+/// The defibrillator watchdog: a backstop for a turn that died without the
+/// in-turn heartbeat catching it (an aborted agent loop, a wedged non-stream
+/// await). It runs independently of the single-threaded agent loop, so it can act
+/// even while that loop is blocked.
+///
+/// It only reaps a task left `working` with no activity for longer than
+/// [`WATCHDOG_TIMEOUT`], which is strictly greater than [`HEARTBEAT_TIMEOUT`]; a
+/// healthy turn keeps its activity fresh on every event and self-terminates
+/// through the in-turn heartbeat well before this fires, so it never races a live
+/// turn.
+async fn defibrillator_loop(state: AppState) {
+    loop {
+        sleep(DEFIB_POLL).await;
+        let stale_secs = i64::try_from(WATCHDOG_TIMEOUT.as_secs()).unwrap_or(i64::MAX);
+        match queries::find_stranded_task(&state.db, stale_secs).await {
+            Ok(Some(task)) => {
+                // Invalidate the wedged turn so that, if it ever unblocks, its
+                // post-turn handling abandons rather than clobbering the recovery
+                // (the same guard a hard reset relies on).
+                state.bump_reset_epoch();
+                let detail = format!(
+                    "The turn was stuck working with no activity for over {} minutes and did \
+                     not recover on its own.",
+                    WATCHDOG_TIMEOUT.as_secs() / 60,
+                );
+                if let Err(error) = defibrillate(&state, &task, "working", &detail).await {
+                    error!(error = %error, task_id = %task.id, "defibrillator failed to recover a stranded task");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => warn!(error = %error, "defibrillator watchdog query failed"),
+        }
+    }
+}
+
 /// Detects the open PR for `branch`, retrying to absorb GitHub's indexing lag.
 ///
 /// A freshly created PR can take a few seconds to surface in the head-filtered
@@ -1390,6 +1617,25 @@ mod tests {
     fn slugify_is_branch_safe() {
         assert_eq!(slugify("Fix the Login Bug!"), "fix-the-login-bug");
         assert_eq!(slugify("   spaces   "), "spaces");
+    }
+
+    #[test]
+    fn defibrillator_revives_then_gives_up() {
+        // A fresh task (no PR) is requeued; one with a PR returns to review.
+        assert_eq!(decide_recovery(1, false), Recovery::Requeue);
+        assert_eq!(decide_recovery(1, true), Recovery::ReturnToReview);
+        assert_eq!(decide_recovery(2, false), Recovery::Requeue);
+        // Once it has died too many times, stop reviving and leave it for a human,
+        // regardless of whether it has a PR.
+        assert_eq!(
+            decide_recovery(MAX_DEFIBRILLATIONS, false),
+            Recovery::GiveUp
+        );
+        assert_eq!(decide_recovery(MAX_DEFIBRILLATIONS, true), Recovery::GiveUp);
+        assert_eq!(
+            decide_recovery(MAX_DEFIBRILLATIONS + 1, false),
+            Recovery::GiveUp
+        );
     }
 
     #[test]
