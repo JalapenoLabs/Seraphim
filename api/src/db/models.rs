@@ -441,6 +441,29 @@ pub struct EnvSuggestion {
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
+/// A recorded "heart attack": a turn that died mid-flight (the agent hung with no
+/// output, its stream broke, or the turn aborted internally). The defibrillator
+/// records one so the operator is alerted and the diagnostic detail survives for
+/// later patching, even after the task is requeued, finished, or deleted.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct HeartAttack {
+    pub id: Uuid,
+    /// The task that died; `None` once that task has been deleted.
+    pub task_id: Option<Uuid>,
+    /// The task's title at the time, so the alert reads even if the task is gone.
+    pub task_title: String,
+    /// The task's operational status when it died (e.g. `working`).
+    pub status_label: String,
+    /// The diagnosis / error logs: why we think the agent died.
+    pub detail: String,
+    /// What the defibrillator did about it (revived, or left for a human).
+    pub recovery: String,
+    /// Cleared once the operator has seen it; the board banner shows the rest.
+    pub acknowledged: bool,
+    pub created_at: DateTime<Utc>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+}
+
 /// One environment suggestion as posted by the agent's `seraphim-suggest`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnvSuggestionWrite {

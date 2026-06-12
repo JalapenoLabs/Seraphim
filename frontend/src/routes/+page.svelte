@@ -1,14 +1,15 @@
 <script lang="ts">
   import type { DndEvent } from 'svelte-dnd-action'
-  import type { Settings, Task, TaskColumn } from '$lib/types'
+  import type { HeartAttack, Settings, Task, TaskColumn } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { dndzone } from 'svelte-dnd-action'
-  import { NotebookPen, RefreshCw, Pause, Play, Eye, EyeOff } from '@lucide/svelte'
+  import { HeartPulse, NotebookPen, RefreshCw, Pause, Play, Eye, EyeOff, X } from '@lucide/svelte'
   import { PaneGroup } from 'paneforge'
 
   import { COLUMNS } from '$lib/types'
   import {
+    acknowledgeHeartAttack,
     getBoard,
     getNotepad,
     listRepos,
@@ -32,6 +33,9 @@
 
   let settings = $state<Settings | null>(null)
   let suggestionCounts = $state<Record<string, number>>({})
+  // Unacknowledged heart attacks (dead turns) the defibrillator recorded; shown
+  // as a dismissible alert banner so the operator notices and can read the logs.
+  let heartAttacks = $state<HeartAttack[]>([])
   // One array per lane; svelte-dnd-action mutates these during a drag.
   let columns = $state<Record<TaskColumn, Task[]>>({
     available: [],
@@ -131,6 +135,7 @@
     const [board, repos] = await Promise.all([getBoard(), listRepos()])
     settings = board.settings
     suggestionCounts = board.suggestion_counts
+    heartAttacks = board.heart_attacks
     repoNames = Object.fromEntries(repos.map((repo) => [repo.id, repo.full_name]))
     const grouped: Record<TaskColumn, Task[]> = {
       available: [],
@@ -150,6 +155,17 @@
       grouped[key] = sortTasks(grouped[key], sortState[key])
     }
     columns = grouped
+  }
+
+  // Clears a heart-attack alert once the operator has read it. Optimistic: drop
+  // it locally first so the banner feels instant, then persist.
+  async function dismissHeartAttack(id: string) {
+    heartAttacks = heartAttacks.filter((incident) => incident.id !== id)
+    try {
+      await acknowledgeHeartAttack(id)
+    } catch (error) {
+      console.debug('failed to acknowledge heart attack', error)
+    }
   }
 
   function handleConsider(column: TaskColumn, event: CustomEvent<DndEvent<Task>>) {
@@ -262,6 +278,41 @@
   `lg`-only; on narrow screens the lanes stack and the page scrolls normally.
 -->
 <div class="flex flex-col lg:h-full lg:min-h-0">
+  {#each heartAttacks as incident (incident.id)}
+    <!-- A turn died and the defibrillator handled it. Keep the diagnostic detail
+         visible (monospaced) so the operator can patch the underlying cause, with
+         a dismiss once they have read it. -->
+    <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <Alert.Title class="flex items-center gap-1.5">
+          <HeartPulse class="size-4 flex-none" />
+          Agent heart attack: "{incident.task_title}"
+        </Alert.Title>
+        <Alert.Description class="break-words">
+          <span class="font-mono text-xs break-words">{incident.detail}</span>
+          {#if incident.recovery}
+            <span class="mt-1 block text-xs opacity-80">{incident.recovery}</span>
+          {/if}
+          {#if incident.task_id}
+            <a href={`/task/${incident.task_id}`} class="mt-1 inline-block text-xs underline">
+              Open the task to see the full activity log
+            </a>
+          {/if}
+        </Alert.Description>
+      </div>
+      <Button
+        variant="outline"
+        size="icon"
+        class="flex-none"
+        title="Dismiss"
+        aria-label="Dismiss heart attack"
+        onclick={() => dismissHeartAttack(incident.id)}
+      >
+        <X class="size-4" />
+      </Button>
+    </Alert.Root>
+  {/each}
+
   {#if settings?.config_repo_error}
     <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-center justify-between gap-4">
       <div>

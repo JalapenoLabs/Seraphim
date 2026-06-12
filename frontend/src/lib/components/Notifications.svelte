@@ -21,9 +21,12 @@
 
   type Toast = {
     id: number
-    taskId: string
+    // The task to open when clicked; null for a heart attack whose task is gone.
+    taskId: string | null
     taskTitle: string
     prompt: string
+    // 'question' is the agent asking for input; 'heart_attack' is a dead turn.
+    kind: 'question' | 'heart_attack'
   }
 
   function loadIds(key: string): Set<string> {
@@ -112,9 +115,14 @@
     }
   }
 
-  function pushToast(taskId: string, taskTitle: string, prompt: string) {
+  function pushToast(
+    taskId: string | null,
+    taskTitle: string,
+    prompt: string,
+    kind: Toast['kind'] = 'question'
+  ) {
     const id = nextToastId++
-    toasts = [...toasts, { id, taskId, taskTitle, prompt }]
+    toasts = [...toasts, { id, taskId, taskTitle, prompt, kind }]
     setTimeout(() => dismissToast(id), TOAST_TIMEOUT_MS)
   }
 
@@ -122,10 +130,13 @@
     toasts = toasts.filter((toast) => toast.id !== id)
   }
 
-  function goToTask(taskId: string) {
+  function goToTask(taskId: string | null) {
     open = false
     toasts = []
-    goto(`/task/${taskId}`)
+    // A heart attack whose task was deleted has nowhere to navigate.
+    if (taskId) {
+      goto(`/task/${taskId}`)
+    }
   }
 
   function openTask(question: PendingQuestion) {
@@ -140,6 +151,19 @@
     refresh()
   }
 
+  // A turn died (a "heart attack"); the defibrillator already handled recovery.
+  // Surface it immediately as an alert toast and native notification; the board's
+  // own banner persists the detail until the operator clears it.
+  function handleHeartAttack(event: MessageEvent) {
+    const data = JSON.parse(event.data) as {
+      task_id: string | null
+      task_title: string
+      summary: string
+    }
+    pushToast(data.task_id, data.task_title, data.summary, 'heart_attack')
+    notifyNatively(`Agent heart attack: ${data.task_title}`, data.summary)
+  }
+
   onMount(() => {
     refresh()
     // Prompt for native desktop notifications on first load, as the issue asks.
@@ -152,6 +176,7 @@
     // question answered elsewhere) refreshes the pending list.
     eventSource = new EventSource('/api/v1/notifications/stream')
     eventSource.addEventListener('notification', handleNotification)
+    eventSource.addEventListener('heart_attack', handleHeartAttack)
     eventSource.addEventListener('refresh', () => refresh())
   })
 
@@ -243,16 +268,25 @@
 <div class="pointer-events-none fixed bottom-5 right-5 z-50 flex max-w-sm flex-col gap-2">
   {#each toasts as toast (toast.id)}
     <div
-      class="pointer-events-auto flex items-start overflow-hidden rounded-lg border border-warning/50 bg-card shadow-2xl"
+      class="pointer-events-auto flex items-start overflow-hidden rounded-lg border bg-card shadow-2xl {toast.kind ===
+      'heart_attack'
+        ? 'border-destructive/60'
+        : 'border-warning/50'}"
     >
       <button
         type="button"
         class="flex flex-1 flex-col gap-0.5 px-4 py-3 text-left"
         onclick={() => goToTask(toast.taskId)}
       >
-        <span class="text-[10px] font-bold uppercase tracking-wide text-warning"
-          >Seraphim needs your input</span
-        >
+        {#if toast.kind === 'heart_attack'}
+          <span class="text-[10px] font-bold uppercase tracking-wide text-destructive"
+            >Agent heart attack</span
+          >
+        {:else}
+          <span class="text-[10px] font-bold uppercase tracking-wide text-warning"
+            >Seraphim needs your input</span
+          >
+        {/if}
         <span class="text-xs text-muted-foreground">{toast.taskTitle}</span>
         <span class="text-sm">{toast.prompt}</span>
       </button>

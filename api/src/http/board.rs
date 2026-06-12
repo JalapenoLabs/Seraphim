@@ -10,7 +10,7 @@ use uuid::Uuid;
 use tracing::warn;
 
 use super::ApiResult;
-use crate::db::models::{Settings, SourceKind, Task, TaskColumn};
+use crate::db::models::{HeartAttack, Settings, SourceKind, Task, TaskColumn};
 use crate::db::queries;
 use crate::state::AppState;
 
@@ -21,10 +21,13 @@ pub struct BoardResponse {
     /// Unacknowledged setup-suggestion counts, keyed by task id, so a card can
     /// shout when the agent left recommendations. Tasks with none are omitted.
     pub suggestion_counts: HashMap<Uuid, i64>,
+    /// Unacknowledged heart attacks (turns that died), newest first, so the board
+    /// can alert the operator with the diagnostic detail until they clear them.
+    pub heart_attacks: Vec<HeartAttack>,
 }
 
-/// `GET /api/v1/board` - every card, the org/pause settings, and per-card
-/// counts of open environment suggestions.
+/// `GET /api/v1/board` - every card, the org/pause settings, per-card counts of
+/// open environment suggestions, and any unacknowledged heart attacks.
 pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardResponse>> {
     let tasks = queries::list_tasks(&state.db).await?;
     let mut settings = queries::get_settings(&state.db).await?;
@@ -34,10 +37,12 @@ pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardRes
         .await?
         .into_iter()
         .collect();
+    let heart_attacks = queries::list_unacknowledged_heart_attacks(&state.db).await?;
     Ok(Json(BoardResponse {
         tasks,
         settings,
         suggestion_counts,
+        heart_attacks,
     }))
 }
 

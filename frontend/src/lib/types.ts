@@ -335,11 +335,29 @@ export type AutomationRule = {
   updated_at: string
 }
 
+// A recorded "heart attack": a turn that died mid-flight. The defibrillator
+// records one so the operator is alerted with the diagnostic logs.
+export type HeartAttack = {
+  id: string
+  task_id: string | null
+  task_title: string
+  status_label: string
+  // The diagnosis / error logs, kept so the cause can be patched later.
+  detail: string
+  // What the defibrillator did about it (revived, or left for a human).
+  recovery: string
+  acknowledged: boolean
+  created_at: string
+  acknowledged_at: string | null
+}
+
 export type BoardResponse = {
   tasks: Task[]
   settings: Settings
   // Unacknowledged suggestion counts keyed by task id (tasks with none omitted).
   suggestion_counts: Record<string, number>
+  // Unacknowledged heart attacks (dead turns), newest first, for the alert banner.
+  heart_attacks: HeartAttack[]
 }
 
 export type TaskDetail = {

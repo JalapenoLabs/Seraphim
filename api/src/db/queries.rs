@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use super::models::{
     AnswerKind, AutomationRule, AvailabilityWindow, EnvSuggestion, EnvVar, EnvVarWrite,
-    InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel, PendingQuestion, Question,
-    QuestionOption, QuestionStatus, RepoDeletionImpact, Repository, ReviewPolicy, Settings,
-    SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
+    HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel, PendingQuestion,
+    Question, QuestionOption, QuestionStatus, RepoDeletionImpact, Repository, ReviewPolicy,
+    Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -1587,6 +1587,79 @@ pub async fn unacknowledged_suggestion_counts(pool: &PgPool) -> sqlx::Result<Vec
          WHERE acknowledged = FALSE GROUP BY task_id",
     )
     .fetch_all(pool)
+    .await
+}
+
+// --- Heart attacks (dead-agent management) -----------------------------------
+
+/// Records a heart attack: a turn that died mid-flight. The detail is the
+/// diagnosis kept for later patching; `recovery` is what the defibrillator did.
+pub async fn create_heart_attack(
+    pool: &PgPool,
+    task_id: Option<Uuid>,
+    task_title: &str,
+    status_label: &str,
+    detail: &str,
+    recovery: &str,
+) -> sqlx::Result<HeartAttack> {
+    sqlx::query_as::<_, HeartAttack>(
+        "INSERT INTO heart_attacks (task_id, task_title, status_label, detail, recovery) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING *",
+    )
+    .bind(task_id)
+    .bind(task_title)
+    .bind(status_label)
+    .bind(detail)
+    .bind(recovery)
+    .fetch_one(pool)
+    .await
+}
+
+/// The unacknowledged heart attacks, newest first, for the board's alert banner.
+/// Bounded so a storm of incidents can't bloat the board payload.
+pub async fn list_unacknowledged_heart_attacks(pool: &PgPool) -> sqlx::Result<Vec<HeartAttack>> {
+    sqlx::query_as::<_, HeartAttack>(
+        "SELECT * FROM heart_attacks WHERE acknowledged = FALSE \
+         ORDER BY created_at DESC LIMIT 20",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Clears a heart attack once the operator has seen it.
+pub async fn acknowledge_heart_attack(pool: &PgPool, id: Uuid) -> sqlx::Result<HeartAttack> {
+    sqlx::query_as::<_, HeartAttack>(
+        "UPDATE heart_attacks SET acknowledged = TRUE, acknowledged_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// How many heart attacks a task has suffered. Bounds how many times the
+/// defibrillator revives the same task before leaving it for a human.
+pub async fn count_heart_attacks_for_task(pool: &PgPool, task_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM heart_attacks WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// The task that has been mid-turn (`working`) with no activity for at least
+/// `stale_secs`, if any. The defibrillator watchdog uses this to catch a turn
+/// that hung or stranded the card without the in-turn heartbeat noticing. Picks
+/// the most stale first.
+pub async fn find_stranded_task(pool: &PgPool, stale_secs: i64) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks \
+         WHERE board_column = 'in_progress' AND status = 'working' \
+         AND last_activity_at IS NOT NULL \
+         AND last_activity_at < now() - ($1 * interval '1 second') \
+         ORDER BY last_activity_at ASC LIMIT 1",
+    )
+    .bind(stale_secs)
+    .fetch_optional(pool)
     .await
 }
 

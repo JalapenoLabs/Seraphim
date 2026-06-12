@@ -12,6 +12,7 @@ import type {
   ConfigBundle,
   EnvSuggestion,
   EnvVar,
+  HeartAttack,
   IssueComment,
   IssueDetail,
   IssueThread,
@@ -125,6 +126,13 @@ export function createIssueFromSuggestion(suggestionId: string, target: CreateIs
   return apiClient
     .post(`suggestions/${suggestionId}/create`, { json: { target } })
     .json<{ suggestion: EnvSuggestion; url: string | null }>()
+}
+
+// --- Heart attacks (dead-agent management) -----------------------------------
+
+// Clears a heart attack from the board banner once the operator has read it.
+export function acknowledgeHeartAttack(id: string) {
+  return apiClient.post(`heart-attacks/${id}/ack`).json<HeartAttack>()
 }
 
 // --- Questions ---------------------------------------------------------------

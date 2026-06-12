@@ -36,6 +36,14 @@ pub enum ServerEvent {
         task_title: String,
         prompt: String,
     },
+    /// A turn died mid-flight (a "heart attack") and the defibrillator handled it;
+    /// drives an alert toast and native notification so the operator notices.
+    HeartAttack {
+        task_id: Option<Uuid>,
+        task_title: String,
+        /// A one-line summary of what happened and what the defibrillator did.
+        summary: String,
+    },
     /// A throttled tick that the in-progress turn's token usage advanced, so the
     /// stats gauges refetch and the counter ticks live mid-turn. Carries no
     /// numbers; the live values live on [`AppState::live_usage`] and are read by
@@ -232,6 +240,16 @@ impl AppState {
             task_id,
             task_title,
             prompt,
+        });
+    }
+
+    /// Announces a heart attack so the UI alerts the operator immediately, in
+    /// addition to the persistent board banner driven by [`Self::notify_board`].
+    pub fn notify_heart_attack(&self, task_id: Option<Uuid>, task_title: String, summary: String) {
+        let _ = self.events.send(ServerEvent::HeartAttack {
+            task_id,
+            task_title,
+            summary,
         });
     }
 }
