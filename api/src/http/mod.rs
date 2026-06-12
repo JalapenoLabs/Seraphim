@@ -108,6 +108,12 @@ pub fn router(state: AppState) -> Router {
         .route("/notepad", get(notepad::get).put(notepad::set))
         .route("/settings/tokens", post(settings::set_tokens))
         .route(
+            "/settings/sounds/:kind",
+            get(settings::get_sound)
+                .post(settings::upload_sound)
+                .delete(settings::clear_sound),
+        )
+        .route(
             "/settings/env",
             get(settings::list_env).put(settings::set_env),
         )

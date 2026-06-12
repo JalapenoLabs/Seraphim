@@ -1276,6 +1276,8 @@ async fn review_once(state: &AppState) -> Result<()> {
                         )
                         .await?;
                         state.notify_board();
+                        // Let the UI play the task-finished sound.
+                        state.notify_task_finished(task.id, task.title.clone());
                         info!(task_id = %task.id, "auto-merged and marked done");
 
                         // Close the linked GitHub issue so Done doesn't leave it

@@ -1,7 +1,10 @@
 //! Org/environment settings endpoints, including the agent pause switch and the
 //! user-defined environment variables.
 
-use axum::extract::State;
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -57,6 +60,8 @@ pub struct UpdateSettingsRequest {
     pub jira_deployment: Option<JiraDeployment>,
     pub jira_base_url: Option<String>,
     pub jira_email: Option<String>,
+    pub attention_sound_enabled: Option<bool>,
+    pub completion_sound_enabled: Option<bool>,
 }
 
 /// `PATCH /api/v1/settings` - patch the org profile (omitted fields untouched).
@@ -88,6 +93,8 @@ pub async fn update(
         body.jira_base_url,
         body.jira_email,
         body.close_issue_on_done,
+        body.attention_sound_enabled,
+        body.completion_sound_enabled,
     )
     .await?;
     state.notify_board();
@@ -121,6 +128,116 @@ pub async fn set_tokens(
     )
     .await?;
     Ok(Json(settings_view(&state).await?))
+}
+
+// --- Notification sounds ------------------------------------------------------
+
+/// The biggest custom clip we accept. Notification sounds are short, so this is
+/// generous; it also keeps a stray large upload from bloating the settings row.
+const MAX_SOUND_BYTES: usize = 1_048_576;
+
+/// Which notification event a `:kind` path segment refers to.
+enum SoundKind {
+    Attention,
+    Completion,
+}
+
+impl SoundKind {
+    fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            "attention" => Some(Self::Attention),
+            "completion" => Some(Self::Completion),
+            _ => None,
+        }
+    }
+}
+
+/// `GET /api/v1/settings/sounds/:kind` - stream the uploaded custom clip for an
+/// event (`attention` or `completion`). Returns 404 when none is uploaded, which
+/// the UI treats as "play the bundled default".
+pub async fn get_sound(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> ApiResult<Response> {
+    let Some(kind) = SoundKind::parse(&kind) else {
+        return Ok((StatusCode::NOT_FOUND, "unknown sound").into_response());
+    };
+    let (audio, mime) = match kind {
+        SoundKind::Attention => queries::get_attention_sound(&state.db).await?,
+        SoundKind::Completion => queries::get_completion_sound(&state.db).await?,
+    };
+    if audio.is_empty() {
+        return Ok((StatusCode::NOT_FOUND, "no custom sound").into_response());
+    }
+    let content_type = if mime.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        mime
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            // The settings row carries no version, so never let a stale clip linger.
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+        ],
+        audio,
+    )
+        .into_response())
+}
+
+/// `POST /api/v1/settings/sounds/:kind` - upload a custom clip (the raw audio is
+/// the request body; its `Content-Type` is stored so playback gets the right MIME).
+/// Responds with the refreshed settings so the UI's "custom set" flag updates.
+pub async fn upload_sound(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let Some(kind) = SoundKind::parse(&kind) else {
+        return Ok((StatusCode::NOT_FOUND, "unknown sound").into_response());
+    };
+    if body.is_empty() {
+        return Ok((StatusCode::BAD_REQUEST, "empty audio").into_response());
+    }
+    if body.len() > MAX_SOUND_BYTES {
+        return Ok((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "audio is too large (max 1 MB); use a short clip",
+        )
+            .into_response());
+    }
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !mime.starts_with("audio/") {
+        return Ok((StatusCode::BAD_REQUEST, "file must be an audio clip").into_response());
+    }
+
+    match kind {
+        SoundKind::Attention => queries::set_attention_sound(&state.db, &body, mime).await?,
+        SoundKind::Completion => queries::set_completion_sound(&state.db, &body, mime).await?,
+    }
+    state.notify_board();
+    Ok(Json(settings_view(&state).await?).into_response())
+}
+
+/// `DELETE /api/v1/settings/sounds/:kind` - clear a custom clip so the event falls
+/// back to the bundled default chime.
+pub async fn clear_sound(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> ApiResult<Response> {
+    let Some(kind) = SoundKind::parse(&kind) else {
+        return Ok((StatusCode::NOT_FOUND, "unknown sound").into_response());
+    };
+    match kind {
+        SoundKind::Attention => queries::set_attention_sound(&state.db, &[], "").await?,
+        SoundKind::Completion => queries::set_completion_sound(&state.db, &[], "").await?,
+    }
+    state.notify_board();
+    Ok(Json(settings_view(&state).await?).into_response())
 }
 
 #[derive(Debug, Deserialize)]

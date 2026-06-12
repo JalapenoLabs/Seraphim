@@ -38,7 +38,10 @@ const SETTINGS_COLUMNS: &str =
      jira_enabled, jira_deployment, jira_base_url, jira_email, \
      (jira_api_token <> '') AS jira_token_set, \
      (github_webhook_secret <> '') AS github_webhook_secret_set, \
-     (jira_webhook_secret <> '') AS jira_webhook_secret_set";
+     (jira_webhook_secret <> '') AS jira_webhook_secret_set, \
+     attention_sound_enabled, completion_sound_enabled, \
+     (length(attention_sound_audio) > 0) AS attention_sound_custom, \
+     (length(completion_sound_audio) > 0) AS completion_sound_custom";
 
 pub async fn get_settings(pool: &PgPool) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
@@ -78,6 +81,8 @@ pub async fn update_settings(
     jira_base_url: Option<String>,
     jira_email: Option<String>,
     close_issue_on_done: Option<bool>,
+    attention_sound_enabled: Option<bool>,
+    completion_sound_enabled: Option<bool>,
 ) -> sqlx::Result<Settings> {
     sqlx::query_as::<_, Settings>(&format!(
         "UPDATE settings SET \
@@ -105,6 +110,8 @@ pub async fn update_settings(
          jira_base_url = COALESCE($20, jira_base_url), \
          jira_email = COALESCE($21, jira_email), \
          close_issue_on_done = COALESCE($22, close_issue_on_done), \
+         attention_sound_enabled = COALESCE($23, attention_sound_enabled), \
+         completion_sound_enabled = COALESCE($24, completion_sound_enabled), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -131,6 +138,8 @@ pub async fn update_settings(
     .bind(jira_base_url)
     .bind(jira_email)
     .bind(close_issue_on_done)
+    .bind(attention_sound_enabled)
+    .bind(completion_sound_enabled)
     .fetch_one(pool)
     .await
 }
@@ -249,6 +258,57 @@ pub async fn set_tokens(
     .bind(jira_api_token)
     .bind(github_webhook_secret)
     .bind(jira_webhook_secret)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// --- Notification sounds ------------------------------------------------------
+//
+// The custom audio clips live on the settings row but are streamed by a dedicated
+// endpoint, never in the settings payload (which the board fetches constantly).
+// Each getter returns `(bytes, mime)`; an empty `bytes` means "no custom clip, use
+// the bundled default". Setting empty bytes clears a clip back to the default.
+
+/// The uploaded attention clip and its MIME type (empty bytes if none).
+pub async fn get_attention_sound(pool: &PgPool) -> sqlx::Result<(Vec<u8>, String)> {
+    sqlx::query_as::<_, (Vec<u8>, String)>(
+        "SELECT attention_sound_audio, attention_sound_mime FROM settings WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// The uploaded completion clip and its MIME type (empty bytes if none).
+pub async fn get_completion_sound(pool: &PgPool) -> sqlx::Result<(Vec<u8>, String)> {
+    sqlx::query_as::<_, (Vec<u8>, String)>(
+        "SELECT completion_sound_audio, completion_sound_mime FROM settings WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// Stores (or, with empty `audio`, clears) the custom attention clip.
+pub async fn set_attention_sound(pool: &PgPool, audio: &[u8], mime: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE settings SET attention_sound_audio = $1, attention_sound_mime = $2, \
+         updated_at = now() WHERE id = 1",
+    )
+    .bind(audio)
+    .bind(mime)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Stores (or, with empty `audio`, clears) the custom completion clip.
+pub async fn set_completion_sound(pool: &PgPool, audio: &[u8], mime: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE settings SET completion_sound_audio = $1, completion_sound_mime = $2, \
+         updated_at = now() WHERE id = 1",
+    )
+    .bind(audio)
+    .bind(mime)
     .execute(pool)
     .await?;
     Ok(())

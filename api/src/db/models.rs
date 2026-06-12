@@ -211,6 +211,17 @@ pub struct Settings {
     pub github_webhook_secret_set: bool,
     /// Whether a Jira webhook secret is stored (the realtime equivalent for Jira).
     pub jira_webhook_secret_set: bool,
+    /// Play a sound when a task needs the operator's attention (a question, or a
+    /// heart attack).
+    pub attention_sound_enabled: bool,
+    /// Play a sound when a task finishes (auto-merges to Done).
+    pub completion_sound_enabled: bool,
+    /// Whether a custom attention clip is uploaded (computed; the bytes are never
+    /// sent in this payload). When false the UI plays the bundled default chime.
+    pub attention_sound_custom: bool,
+    /// Whether a custom completion clip is uploaded (computed, like
+    /// [`Self::attention_sound_custom`]).
+    pub completion_sound_custom: bool,
     /// Masked preview of the stored Jira API token. Filled like
     /// [`Self::claude_token_preview`].
     #[sqlx(default)]
