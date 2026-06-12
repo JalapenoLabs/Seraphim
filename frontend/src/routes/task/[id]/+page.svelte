@@ -18,6 +18,7 @@
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
   import { Badge } from '$lib/components/ui/badge'
+  import { Switch } from '$lib/components/ui/switch'
   import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -437,12 +438,18 @@
         <ul class="mt-2 divide-y divide-border">
           {#each suggestions as suggestion (suggestion.id)}
             <li class="flex items-start justify-between gap-3 py-2">
-              <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-2">
-                <input
-                  type="checkbox"
+              <button
+                type="button"
+                role="switch"
+                aria-checked={suggestion.acknowledged}
+                onclick={() => toggleSuggestion(suggestion)}
+                class="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-left"
+              >
+                <Switch
                   checked={suggestion.acknowledged}
-                  onchange={() => toggleSuggestion(suggestion)}
-                  class="mt-0.5"
+                  tabindex={-1}
+                  aria-hidden="true"
+                  class="mt-0.5 pointer-events-none"
                 />
                 <span class="flex min-w-0 flex-col gap-0.5">
                   <span
@@ -458,7 +465,7 @@
                     >
                   {/if}
                 </span>
-              </label>
+              </button>
               {#if !suggestion.acknowledged && task}
                 <SuggestionCreateButton
                   {suggestion}

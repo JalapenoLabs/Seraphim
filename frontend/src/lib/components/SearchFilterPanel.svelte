@@ -7,6 +7,7 @@
   import { COLUMNS, STATUS_LABELS } from '$lib/types'
   import { countActiveFilters, distinctAuthors, emptyFilters, type SearchFilters } from '$lib/search'
   import { Input } from './ui/input'
+  import { Switch } from './ui/switch'
 
   let {
     tasks = [],
@@ -71,12 +72,19 @@
       {#if authors.length}
         <div class="flex flex-col gap-0.5">
           {#each authors as author (author.login)}
-            <label class="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-secondary">
-              <input
-                type="checkbox"
-                class="accent-primary"
+            <button
+              type="button"
+              role="switch"
+              aria-checked={filters.authors.includes(author.login)}
+              onclick={() => toggleAuthor(author.login)}
+              class="flex w-full cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-secondary"
+            >
+              <Switch
+                size="sm"
                 checked={filters.authors.includes(author.login)}
-                onchange={() => toggleAuthor(author.login)}
+                tabindex={-1}
+                aria-hidden="true"
+                class="pointer-events-none"
               />
               {#if author.avatarUrl}
                 <img
@@ -87,7 +95,7 @@
                 />
               {/if}
               <span class="truncate text-sm text-foreground">{author.login}</span>
-            </label>
+            </button>
           {/each}
         </div>
       {:else}
@@ -100,15 +108,22 @@
       <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Status</h3>
       <div class="flex flex-col gap-0.5">
         {#each statusOptions as [status, label] (status)}
-          <label class="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-secondary">
-            <input
-              type="checkbox"
-              class="accent-primary"
+          <button
+            type="button"
+            role="switch"
+            aria-checked={filters.statuses.includes(status)}
+            onclick={() => toggleStatus(status)}
+            class="flex w-full cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-secondary"
+          >
+            <Switch
+              size="sm"
               checked={filters.statuses.includes(status)}
-              onchange={() => toggleStatus(status)}
+              tabindex={-1}
+              aria-hidden="true"
+              class="pointer-events-none"
             />
             <span class="text-sm text-foreground">{label}</span>
-          </label>
+          </button>
         {/each}
       </div>
     </section>
@@ -118,15 +133,22 @@
       <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Column</h3>
       <div class="flex flex-col gap-0.5">
         {#each COLUMNS as column (column.key)}
-          <label class="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-secondary">
-            <input
-              type="checkbox"
-              class="accent-primary"
+          <button
+            type="button"
+            role="switch"
+            aria-checked={filters.columns.includes(column.key)}
+            onclick={() => toggleColumn(column.key)}
+            class="flex w-full cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-secondary"
+          >
+            <Switch
+              size="sm"
               checked={filters.columns.includes(column.key)}
-              onchange={() => toggleColumn(column.key)}
+              tabindex={-1}
+              aria-hidden="true"
+              class="pointer-events-none"
             />
             <span class="text-sm text-foreground">{column.label}</span>
-          </label>
+          </button>
         {/each}
       </div>
     </section>

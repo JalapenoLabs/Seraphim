@@ -1406,14 +1406,22 @@
                 {/if}
                 <div class="flex flex-wrap gap-3">
                   {#each repos as repo (repo.id)}
-                    <label class="flex items-center gap-1.5 text-sm">
-                      <input
-                        type="checkbox"
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={edit.repoIds.includes(repo.id)}
+                      onclick={() => toggleBoardRepo(board.id, repo.id)}
+                      class="flex cursor-pointer items-center gap-1.5 text-sm"
+                    >
+                      <Switch
+                        size="sm"
                         checked={edit.repoIds.includes(repo.id)}
-                        onchange={() => toggleBoardRepo(board.id, repo.id)}
+                        tabindex={-1}
+                        aria-hidden="true"
+                        class="pointer-events-none"
                       />
                       {repo.full_name}
-                    </label>
+                    </button>
                   {/each}
                 </div>
               </div>
