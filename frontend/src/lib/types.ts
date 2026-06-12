@@ -204,6 +204,31 @@ export type EnvVar = {
   is_secret: boolean
 }
 
+// The Tailscale sidecar node's state, for the management UI.
+export type TailscaleStatus = {
+  container_running: boolean
+  backend_state: string
+  connected: boolean
+  online: boolean
+  needs_login: boolean
+  hostname: string
+  dns_name: string
+  // The HTTPS URL the UI is reachable at over the tailnet, when known.
+  url: string | null
+  tailnet: string
+  tailscale_ips: string[]
+  // A pending login URL the operator should visit to authenticate, when present.
+  auth_url: string | null
+  serve_active: boolean
+}
+
+// A Tailscale management action's result plus the refreshed status.
+export type TailscaleActionResponse = {
+  ok: boolean
+  message: string
+  status: TailscaleStatus
+}
+
 export type Repository = {
   id: string
   full_name: string

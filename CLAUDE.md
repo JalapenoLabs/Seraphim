@@ -83,6 +83,12 @@ scripts/    start.sh stop.sh restart.sh
 - `src/db/` — `models.rs` (enums + `FromRow` structs), `queries.rs` (runtime sqlx), `mod.rs` (pool + migrate). Migrations in `api/migrations/`.
 - `src/claude/` — `events.rs` (stream-json parser, unit-tested), `exec.rs` (the `docker exec` turn runner).
 - `src/docker/` — `Workspace`: exec, restart, recreate (bollard).
+- `src/tailscale/` — `Tailscale`: manages the `seraphim-tailscale` sidecar via the
+  host Docker socket (exec `tailscale status/up/down/login` as root, container
+  restart). Powers the Settings → Tailscale panel (`http/tailscale.rs`,
+  `/api/v1/tailscale/{status,up,down,reauth,restart}`): the tailnet URL, hosting
+  status, connect/disconnect, and a login URL when the node needs auth. Status
+  JSON parsing is pure + unit-tested. Container name from `TAILSCALE_CONTAINER`.
 - `src/sources/` — `Source` enum (GitHub; Jira is a future variant), `github.rs`, `types.rs`.
 - `src/git/` — PR detection, CI-green check, squash-merge (octocrab).
 - `src/orchestrator/` — `mod.rs` (the loops), `provision.rs` (workspace provisioning), `prompt.rs`.
