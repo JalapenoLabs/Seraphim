@@ -28,6 +28,9 @@
     type: string
     text: string
     at: number
+    // For CI events, the step status ('step_passed' | 'step_failed' | ...) so the
+    // glyph can be colored green/red rather than the type's single color.
+    status?: string
   }
   let feed = $state<FeedEntry[]>([])
   let feedSeq = 0
@@ -107,7 +110,20 @@
     assistant_text: { glyph: '▸', color: 'text-foreground' },
     tool_use: { glyph: '⚙', color: 'text-primary' },
     result: { glyph: '✓', color: 'text-success' },
-    rate_limit: { glyph: '◷', color: 'text-info' }
+    rate_limit: { glyph: '◷', color: 'text-info' },
+    ci: { glyph: '●', color: 'text-info' }
+  }
+
+  // CI glyph color follows the step status (green pass / red fail / info running),
+  // since one CI type covers all three outcomes.
+  function ciGlyphColor(status: string | undefined): string {
+    if (status === 'step_failed') {
+      return 'text-destructive'
+    }
+    if (status === 'step_passed' || status === 'job_passed') {
+      return 'text-success'
+    }
+    return 'text-info'
   }
 
   function firstLine(text: unknown, max = 120): string {
@@ -142,6 +158,8 @@
         return 'turn complete'
       case 'rate_limit':
         return 'rate-limit notice'
+      case 'ci':
+        return firstLine(payload?.text)
       default:
         return null
     }
@@ -150,7 +168,8 @@
   async function pushFeed(taskId: string, type: string, payload: Record<string, unknown>, at: number) {
     const text = summarize(type, payload)
     if (!text) return
-    const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at }
+    const status = type === 'ci' ? String(payload?.status ?? '') : undefined
+    const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at, status }
     feed = [...feed, entry].slice(-MAX_FEED)
     // Keep the newest line in view (terminal-style autoscroll).
     await tick()
@@ -363,6 +382,7 @@
         {/if}
         {#each feed as entry (entry.id)}
           {@const meta = GLYPHS[entry.type] ?? { glyph: '·', color: 'text-muted-foreground' }}
+          {@const glyphColor = entry.type === 'ci' ? ciGlyphColor(entry.status) : meta.color}
           {@const hue = taskHue(entry.taskId)}
           <div class="flex items-center gap-3 py-0.5" in:fly={{ y: 8, duration: 250, easing: cubicOut }}>
             <span class="w-[4.5rem] shrink-0 text-xs tabular-nums text-muted-foreground/60">
@@ -375,7 +395,7 @@
             >
               {taskLabel(entry.taskId)}
             </span>
-            <span class="w-[1ch] shrink-0 text-center {meta.color}">{meta.glyph}</span>
+            <span class="w-[1ch] shrink-0 text-center {glyphColor}">{meta.glyph}</span>
             <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
           </div>
         {/each}

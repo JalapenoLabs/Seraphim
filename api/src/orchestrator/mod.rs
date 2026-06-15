@@ -10,6 +10,7 @@
 //! completion before the next is considered, so turns never overlap.
 
 mod availability;
+mod ci_watch;
 mod network;
 mod prompt;
 mod provision;
@@ -129,6 +130,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(provision_on_startup(state.clone()));
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
+    tokio::spawn(ci_watch::ci_watch_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
     tokio::spawn(subscription::token_loop(state.clone()));
     tokio::spawn(agent_loop(state));

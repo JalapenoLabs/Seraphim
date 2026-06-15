@@ -1586,6 +1586,51 @@ pub async fn list_task_prs(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<Tas
     .await
 }
 
+/// Every open pull request across all tasks, for the CI-step watcher. Merged /
+/// closed PRs are settled, so the watcher ignores them.
+pub async fn list_open_task_prs(pool: &PgPool) -> sqlx::Result<Vec<TaskPullRequest>> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "SELECT * FROM task_pull_requests WHERE pr_state = 'open' ORDER BY task_id, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Prompt sentinel marking a synthetic turn that holds CI-step activity rather
+/// than a real Claude invocation. The watcher appends its events here so they
+/// flow through the same activity-log query as agent events, without a schema
+/// change. No `prompt` event is recorded for it, so it shows nothing of itself.
+const CI_TURN_PROMPT: &str = "[CI activity]";
+
+/// Finds the turn the CI watcher should append to, or creates one. Reuses the
+/// latest turn only when it is already a CI turn, so CI events that arrive after
+/// a fresh agent turn (e.g. a CI-fix turn) open a new CI turn and stay in
+/// chronological order in the activity log.
+pub async fn get_or_create_ci_turn(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Turn> {
+    let latest = sqlx::query_as::<_, Turn>(
+        "SELECT * FROM turns WHERE task_id = $1 ORDER BY idx DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(turn) = latest {
+        if turn.prompt == CI_TURN_PROMPT {
+            return Ok(turn);
+        }
+    }
+    let idx = next_turn_idx(pool, task_id).await?;
+    create_turn(pool, task_id, idx, CI_TURN_PROMPT, None).await
+}
+
+/// The next event sequence number within a turn (max + 1, or 0 for the first).
+pub async fn next_event_seq(pool: &PgPool, turn_id: Uuid) -> sqlx::Result<i32> {
+    let max: Option<i32> = sqlx::query_scalar("SELECT MAX(seq) FROM events WHERE turn_id = $1")
+        .bind(turn_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(max.map_or(0, |value| value + 1))
+}
+
 /// Records (or refreshes) a task's pull request, keyed by `(task, repo, number)`.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_task_pr(
