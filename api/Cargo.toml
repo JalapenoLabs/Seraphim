@@ -9,6 +9,13 @@ license = "MIT"
 name = "seraphim-api"
 path = "src/main.rs"
 
+# One-shot helper that applies the embedded migrations to $DATABASE_URL. Used by
+# CI to run them against a throwaway Postgres so a broken migration fails the PR
+# instead of only failing at API boot. Not shipped in the image.
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
 [dependencies]
 # Async runtime + web framework
 tokio = { version = "1", features = ["full"] }

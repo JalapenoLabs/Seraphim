@@ -25,6 +25,29 @@ jobs:
     defaults:
       run:
         working-directory: api
+
+    # Disposable Postgres for the migration check below. sqlx uses runtime
+    # queries, so a broken or duplicate migration (a repeated version number, a
+    # typo in an ALTER TABLE) compiles and tests green and only fails at API
+    # boot on a real deploy. Applying the embedded migrations to a real database
+    # here catches that in the PR. Mapped to host port 5433 (not the default
+    # 5432) so it never collides with a dev Postgres on the shared self-hosted
+    # runner. The container is torn down with the job, so every run is clean.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: seraphim
+          POSTGRES_PASSWORD: seraphim
+          POSTGRES_DB: seraphim_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U seraphim -d seraphim_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +72,15 @@ jobs:
       - name: Test
         if: ${{ !cancelled() }}
         run: cargo test --all-features
+
+      # Apply the embedded migrations to the throwaway Postgres above. Runs the
+      # same `sqlx::migrate!("./migrations")` set the API runs at boot, so a
+      # broken migration fails here instead of on a real deploy.
+      - name: Migrate (throwaway Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgres://seraphim:seraphim@localhost:5433/seraphim_test
+        run: cargo run --bin migrate
 
   frontend:
     name: Frontend (SvelteKit)
