@@ -260,6 +260,8 @@ mod tests {
             jira_deployment: crate::db::models::JiraDeployment::Cloud,
             jira_base_url: String::new(),
             jira_email: String::new(),
+            jira_assigned_to_me_only: true,
+            jira_account_id: String::new(),
             jira_token_set: false,
             github_webhook_secret_set: false,
             jira_webhook_secret_set: false,

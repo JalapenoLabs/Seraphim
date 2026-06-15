@@ -111,6 +111,8 @@ async fn bootstrap_settings(db: &sqlx::PgPool, config: &Config) -> Result<()> {
             None,
             None,
             None,
+            // jira_assigned_to_me_only: settings-only, keeps its DB default (on).
+            None,
             // close_issue_on_done: settings-only, keeps its DB default.
             None,
             // Notification sound toggles: settings-only, keep their DB defaults.

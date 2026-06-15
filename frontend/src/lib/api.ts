@@ -59,9 +59,22 @@ export function getTask(taskId: string) {
   return apiClient.get(`tasks/${taskId}`).json<TaskDetail>()
 }
 
-// Create an internal ticket (no GitHub/Jira backing). Returns the new task.
-export function createInternalTask(body: { title: string; body: string; state: 'open' | 'closed' }) {
+// Create an internal ticket (no GitHub/Jira backing). Returns the new task. An
+// optional repo_id targets the repo the agent branches in; without it the ticket
+// is tracking-only until a repo is assigned.
+export function createInternalTask(body: {
+  title: string
+  body: string
+  state: 'open' | 'closed'
+  repo_id?: string | null
+}) {
   return apiClient.post('tasks', { json: body }).json<Task>()
+}
+
+// Point an internal ticket at the repo the agent should branch in (or clear it
+// with null). Only valid for internal tickets. Returns the updated task.
+export function setTaskRepo(taskId: string, repoId: string | null) {
+  return apiClient.post(`tasks/${taskId}/repo`, { json: { repo_id: repoId } }).json<Task>()
 }
 
 // --- Live statistics ---------------------------------------------------------
@@ -256,6 +269,7 @@ export type UpdateSettingsRequest = {
   jira_deployment?: JiraDeployment
   jira_base_url?: string
   jira_email?: string
+  jira_assigned_to_me_only?: boolean
   attention_sound_enabled?: boolean
   completion_sound_enabled?: boolean
 }

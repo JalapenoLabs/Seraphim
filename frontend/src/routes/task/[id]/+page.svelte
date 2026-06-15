@@ -4,6 +4,7 @@
     AnswerSubmission,
     EnvSuggestion,
     Question,
+    Repository,
     Task,
     TaskPullRequest
   } from '$lib/types'
@@ -28,14 +29,17 @@
     answerQuestion,
     getTask,
     hardResetTask,
+    listRepos,
     setTaskBlocking,
     setTaskHold,
-    setTaskNotes
+    setTaskNotes,
+    setTaskRepo
   } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
   import { Badge } from '$lib/components/ui/badge'
+  import * as Select from '$lib/components/ui/select'
   import { Switch } from '$lib/components/ui/switch'
   import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
@@ -60,6 +64,26 @@
   let questions = $state<Question[]>([])
   let pullRequests = $state<TaskPullRequest[]>([])
   let eventSource: EventSource | null = null
+
+  // Target-repo picker, shown only for internal tickets (a GitHub task's repo is
+  // its issue's and never reassigned). The sentinel stands in for "no repo".
+  const NO_REPO = '__none__'
+  let repos = $state<Repository[]>([])
+  const taskRepoValue = $derived(task?.repo_id ?? NO_REPO)
+  const taskRepoLabel = $derived(
+    !task?.repo_id
+      ? 'No repo (tracking only)'
+      : (repos.find((repo) => repo.id === task?.repo_id)?.full_name ?? 'Unknown repo')
+  )
+
+  async function changeRepo(value: string) {
+    if (!task) {
+      return
+    }
+    const repoId = value === NO_REPO ? null : value
+    task = await setTaskRepo(task.id, repoId)
+    toast.success(repoId ? 'Target repo set' : 'Target repo cleared')
+  }
 
   // A one-word status for a PR row, combining its lifecycle and (while open) its
   // CI verdict, and the badge color that goes with it.
@@ -465,6 +489,7 @@
 
   onMount(() => {
     load()
+    listRepos().then((loaded) => (repos = loaded))
     timer = setInterval(() => (now = Date.now()), 1000)
     eventSource = new EventSource(`/api/v1/tasks/${taskId}/stream`)
     eventSource.addEventListener('task', (message) => {
@@ -491,6 +516,32 @@
 
   {#if task}
     <Stats taskId={taskId} />
+
+    {#if task.source_kind === 'internal'}
+      <!-- Internal tickets have no upstream repo, so the operator picks where the
+           agent works. Until a repo is set the ticket is tracking-only and is not
+           auto-pulled from To Do. -->
+      <section class="rounded-lg border border-border bg-card p-3">
+        <h2 class="text-sm font-semibold">Target repository</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground">
+          The repo the agent branches in and opens a PR against. Required before this ticket can be
+          worked from To Do.
+        </p>
+        <div class="mt-2">
+          <Select.Root type="single" value={taskRepoValue} onValueChange={changeRepo}>
+            <Select.Trigger class="w-full">{taskRepoLabel}</Select.Trigger>
+            <Select.Content>
+              <Select.Item value={NO_REPO} label="No repo (tracking only)">
+                No repo (tracking only)
+              </Select.Item>
+              {#each repos as repo (repo.id)}
+                <Select.Item value={repo.id} label={repo.full_name}>{repo.full_name}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+      </section>
+    {/if}
 
     {#if suggestions.length}
       <!-- Loud on the task too: the checkboxes here are what clear the board badge. -->

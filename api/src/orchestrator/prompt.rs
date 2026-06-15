@@ -5,7 +5,7 @@
 //! append a task-specific working agreement: a fresh-work protocol that ends in a
 //! PR, or a CI-fix protocol that re-engages on the PR's existing branch.
 
-use crate::db::models::{AnswerKind, Question, Repository, Settings, Task};
+use crate::db::models::{AnswerKind, Question, Repository, Settings, SourceKind, Task};
 use crate::git::IssueComment;
 
 use super::provision::repo_dir_name;
@@ -25,6 +25,13 @@ pub fn build(
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let mut prompt = context_header(settings, repo, task, comments);
 
+    // A GitHub task's PR should reference its issue (so it links/closes on merge);
+    // an internal task has no upstream issue, so the PR is opened without one.
+    let issue_reference = match task.source_kind {
+        SourceKind::Github => format!(", referencing issue #{}", task.external_id),
+        _ => String::new(),
+    };
+
     prompt.push_str(&format!(
         "# Working agreement\n\
          - Your cwd is `/workspace`. Every configured repo is cloned here as a sibling \
@@ -33,7 +40,7 @@ pub fn build(
          branch `{branch}` cut from `{default}`. `cd` there to do the primary work.\n\
          - Implement the change, then run the project's build/tests/linters and make them pass.\n\
          - Commit your work and push the branch.\n\
-         - Open a pull request against `{default}` with `gh pr create`, referencing issue #{number}.\n\
+         - Open a pull request against `{default}` with `gh pr create`{issue_reference}.\n\
          - If this issue needs changes in more than one repo, make them in each affected sibling \
          repo on a branch with the SAME name `{branch}`, and open a pull request in each. Seraphim \
          tracks every PR you open on `{branch}`: the task is not done until all of them pass CI and \
@@ -46,7 +53,7 @@ pub fn build(
         repo_path = repo_path,
         branch = branch,
         default = repo.default_branch,
-        number = task.external_id,
+        issue_reference = issue_reference,
     ));
 
     prompt.push_str(ASKING_FOR_HELP);
@@ -233,17 +240,25 @@ fn context_header(
     }
 
     prompt.push_str("# Your task\n");
-    prompt.push_str(&format!(
-        "Work issue #{number}: {title}\n\nIssue description:\n{body}\n\nIssue link: {url}\n\n",
-        number = task.external_id,
-        title = task.title,
-        body = if task.body_snapshot.trim().is_empty() {
-            "(no description provided)"
-        } else {
-            task.body_snapshot.trim()
-        },
-        url = task.url,
-    ));
+    let body = if task.body_snapshot.trim().is_empty() {
+        "(no description provided)"
+    } else {
+        task.body_snapshot.trim()
+    };
+    // A GitHub task carries an issue number and link; an internal task is just a
+    // brief in Seraphim, so it is described without a (meaningless) issue number.
+    match task.source_kind {
+        SourceKind::Github => prompt.push_str(&format!(
+            "Work issue #{number}: {title}\n\nIssue description:\n{body}\n\nIssue link: {url}\n\n",
+            number = task.external_id,
+            title = task.title,
+            url = task.url,
+        )),
+        _ => prompt.push_str(&format!(
+            "Work this task: {title}\n\nTask description:\n{body}\n\n",
+            title = task.title,
+        )),
+    }
 
     // The full discussion (when any), so the agent treats comments as part of the
     // brief rather than only the title and description.
@@ -349,12 +364,16 @@ const ASKING_FOR_HELP: &str = "\n\
 /// before delivering the answers.
 pub fn build_resume(repo: &Repository, task: &Task, branch: &str, answers: &[Question]) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
+    // GitHub tasks re-orient by their issue number; internal tasks by their title.
+    let reference = match task.source_kind {
+        SourceKind::Github => format!("issue #{} (\"{}\")", task.external_id, task.title),
+        _ => format!("task \"{}\"", task.title),
+    };
     let mut prompt = format!(
-        "You are resuming work on issue #{number} (\"{title}\") in `{repo}` at `{repo_path}`, \
+        "You are resuming work on {reference} in `{repo}` at `{repo_path}`, \
          on branch `{branch}`. The user has answered the question(s) you asked; continue from \
          where you left off using their guidance.\n\n",
-        number = task.external_id,
-        title = task.title,
+        reference = reference,
         repo = repo.full_name,
     );
 
@@ -462,6 +481,8 @@ mod tests {
             jira_deployment: JiraDeployment::Cloud,
             jira_base_url: String::new(),
             jira_email: String::new(),
+            jira_assigned_to_me_only: true,
+            jira_account_id: String::new(),
             jira_token_set: false,
             github_webhook_secret_set: false,
             jira_webhook_secret_set: false,
@@ -525,6 +546,45 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn internal_task_prompt_omits_the_issue_number_and_reference() {
+        let mut task = sample_task();
+        task.source_kind = SourceKind::Internal;
+        task.external_id = "3".to_string();
+        task.title = "Port over the PDF docs".to_string();
+        task.body_snapshot = "Move the docs from DebugAgent.".to_string();
+
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &task,
+            "seraphim/task-3",
+            &[],
+        );
+
+        // An internal ticket has no upstream issue, so the brief and the PR step
+        // must not reference a (meaningless, possibly colliding) issue number.
+        assert!(prompt.contains("Work this task: Port over the PDF docs"));
+        assert!(prompt.contains("Move the docs from DebugAgent."));
+        assert!(!prompt.contains("issue #3"));
+        assert!(!prompt.contains("referencing issue"));
+        // The PR step is still present, just without the issue reference.
+        assert!(prompt.contains("Open a pull request against `v3.0.0` with `gh pr create`."));
+    }
+
+    #[test]
+    fn github_task_prompt_keeps_the_issue_reference() {
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+        );
+        assert!(prompt.contains("Work issue #57"));
+        assert!(prompt.contains("referencing issue #57"));
     }
 
     #[test]

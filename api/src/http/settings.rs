@@ -62,6 +62,7 @@ pub struct UpdateSettingsRequest {
     pub jira_deployment: Option<JiraDeployment>,
     pub jira_base_url: Option<String>,
     pub jira_email: Option<String>,
+    pub jira_assigned_to_me_only: Option<bool>,
     pub attention_sound_enabled: Option<bool>,
     pub completion_sound_enabled: Option<bool>,
 }
@@ -94,6 +95,7 @@ pub async fn update(
         body.jira_deployment,
         body.jira_base_url,
         body.jira_email,
+        body.jira_assigned_to_me_only,
         body.close_issue_on_done,
         body.attention_sound_enabled,
         body.completion_sound_enabled,

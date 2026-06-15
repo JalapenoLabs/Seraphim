@@ -1,19 +1,38 @@
 <script lang="ts">
+  import type { Repository } from '$lib/types'
+
+  import { onMount } from 'svelte'
   import { goto } from '$app/navigation'
   import { toast } from 'svelte-sonner'
 
-  import { createInternalTask } from '$lib/api'
+  import { createInternalTask, listRepos } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
+  import * as Select from '$lib/components/ui/select'
   import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
   import { Switch } from '$lib/components/ui/switch'
 
+  // The sentinel value for "no repo": Select needs a non-empty string value.
+  const NO_REPO = '__none__'
+
   let title = $state('')
   let description = $state('')
   let open = $state(true)
   let saving = $state(false)
+  let repos = $state<Repository[]>([])
+  let repoId = $state(NO_REPO)
+
+  const repoLabel = $derived(
+    repoId === NO_REPO
+      ? 'No repo (tracking only)'
+      : (repos.find((repo) => repo.id === repoId)?.full_name ?? 'Select a repo')
+  )
+
+  onMount(async () => {
+    repos = await listRepos()
+  })
 
   async function submit() {
     if (!title.trim()) {
@@ -25,7 +44,8 @@
       const task = await createInternalTask({
         title: title.trim(),
         body: description.trim(),
-        state: open ? 'open' : 'closed'
+        state: open ? 'open' : 'closed',
+        repo_id: repoId === NO_REPO ? null : repoId
       })
       toast.success('Issue created')
       goto(`/task/${task.id}`)
@@ -62,6 +82,25 @@
           bind:value={description}
           class="resize-y"
         />
+      </div>
+
+      <div class="grid gap-2">
+        <Label for="repo">Target repository</Label>
+        <Select.Root type="single" value={repoId} onValueChange={(value) => (repoId = value)}>
+          <Select.Trigger id="repo" class="w-full">{repoLabel}</Select.Trigger>
+          <Select.Content>
+            <Select.Item value={NO_REPO} label="No repo (tracking only)">
+              No repo (tracking only)
+            </Select.Item>
+            {#each repos as repo (repo.id)}
+              <Select.Item value={repo.id} label={repo.full_name}>{repo.full_name}</Select.Item>
+            {/each}
+          </Select.Content>
+        </Select.Root>
+        <span class="text-xs text-muted-foreground">
+          Pick a repo and the agent will branch and open a PR there when the ticket reaches To Do.
+          Leave as tracking-only to assign a repo later.
+        </span>
       </div>
 
       <div class="flex items-center gap-2">

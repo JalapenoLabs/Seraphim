@@ -65,6 +65,9 @@ pub struct SettingsExport {
     pub jira_base_url: String,
     #[serde(default)]
     pub jira_email: String,
+    // Matches the database default (TRUE); older bundles import with the filter on.
+    #[serde(default = "default_true")]
+    pub jira_assigned_to_me_only: bool,
 }
 
 /// Matches the database default so an older bundle imports as plain UTC.
@@ -144,6 +147,7 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             jira_deployment: settings.jira_deployment,
             jira_base_url: settings.jira_base_url,
             jira_email: settings.jira_email,
+            jira_assigned_to_me_only: settings.jira_assigned_to_me_only,
         },
         repositories: repositories
             .into_iter()
@@ -195,6 +199,7 @@ pub async fn import(
         Some(settings.jira_deployment),
         Some(settings.jira_base_url),
         Some(settings.jira_email),
+        Some(settings.jira_assigned_to_me_only),
         Some(settings.close_issue_on_done),
         Some(settings.attention_sound_enabled),
         Some(settings.completion_sound_enabled),

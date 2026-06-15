@@ -180,6 +180,8 @@ export type Settings = {
   jira_deployment: JiraDeployment
   jira_base_url: string
   jira_email: string
+  // Only sync Jira tickets assigned to the connected account (on by default).
+  jira_assigned_to_me_only: boolean
   jira_token_set: boolean
   // Whether the realtime issue-webhook secrets are stored (booleans only; the
   // raw secrets are never sent back).

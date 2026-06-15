@@ -377,7 +377,8 @@
       jira_enabled: settings?.jira_enabled ?? false,
       jira_deployment: jiraDeployment,
       jira_base_url: jiraBaseUrl.trim(),
-      jira_email: jiraEmail.trim()
+      jira_email: jiraEmail.trim(),
+      jira_assigned_to_me_only: settings?.jira_assigned_to_me_only ?? true
     })
     if (jiraTokenInput.trim()) {
       settings = await setTokens({ jira_api_token: jiraTokenInput.trim() })
@@ -1580,6 +1581,17 @@
           {#if settings.jira_token_set}
             <span class="text-xs text-muted-foreground">A token is stored. Leave blank to keep it.</span>
           {/if}
+        </div>
+
+        <div class="flex items-start gap-2">
+          <Switch id="jira-assigned-to-me" bind:checked={settings.jira_assigned_to_me_only} />
+          <div class="grid gap-1">
+            <Label for="jira-assigned-to-me">Only sync tickets assigned to me</Label>
+            <span class="text-xs text-muted-foreground">
+              Pulls only the issues assigned to the connected account, instead of every ticket on the
+              board. Already-synced cards are not removed; this applies to new tickets going forward.
+            </span>
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">

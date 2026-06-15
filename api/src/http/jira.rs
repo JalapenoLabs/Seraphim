@@ -24,7 +24,14 @@ pub async fn test(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         ));
     };
     match client.verify().await {
-        Ok(identity) => Ok(Json(json!({ "ok": true, "user": identity.display_name }))),
+        Ok(identity) => {
+            // Capture the account id so the realtime webhook path can tell which
+            // tickets are the operator's (it cannot run JQL like the poll does).
+            if !identity.account_id.is_empty() {
+                queries::set_jira_account_id(&state.db, &identity.account_id).await?;
+            }
+            Ok(Json(json!({ "ok": true, "user": identity.display_name })))
+        }
         Err(error) => Ok(Json(json!({ "ok": false, "error": error.to_string() }))),
     }
 }

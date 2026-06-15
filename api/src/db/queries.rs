@@ -39,6 +39,7 @@ const SETTINGS_COLUMNS: &str =
      usage_limit_threshold, usage_paused_until, post_thoughts_enabled, \
      close_issue_on_done, \
      jira_enabled, jira_deployment, jira_base_url, jira_email, \
+     jira_assigned_to_me_only, jira_account_id, \
      (jira_api_token <> '') AS jira_token_set, \
      (github_webhook_secret <> '') AS github_webhook_secret_set, \
      (jira_webhook_secret <> '') AS jira_webhook_secret_set, \
@@ -83,6 +84,7 @@ pub async fn update_settings(
     jira_deployment: Option<JiraDeployment>,
     jira_base_url: Option<String>,
     jira_email: Option<String>,
+    jira_assigned_to_me_only: Option<bool>,
     close_issue_on_done: Option<bool>,
     attention_sound_enabled: Option<bool>,
     completion_sound_enabled: Option<bool>,
@@ -112,9 +114,10 @@ pub async fn update_settings(
          jira_deployment = COALESCE($19, jira_deployment), \
          jira_base_url = COALESCE($20, jira_base_url), \
          jira_email = COALESCE($21, jira_email), \
-         close_issue_on_done = COALESCE($22, close_issue_on_done), \
-         attention_sound_enabled = COALESCE($23, attention_sound_enabled), \
-         completion_sound_enabled = COALESCE($24, completion_sound_enabled), \
+         jira_assigned_to_me_only = COALESCE($22, jira_assigned_to_me_only), \
+         close_issue_on_done = COALESCE($23, close_issue_on_done), \
+         attention_sound_enabled = COALESCE($24, attention_sound_enabled), \
+         completion_sound_enabled = COALESCE($25, completion_sound_enabled), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -140,11 +143,23 @@ pub async fn update_settings(
     .bind(jira_deployment)
     .bind(jira_base_url)
     .bind(jira_email)
+    .bind(jira_assigned_to_me_only)
     .bind(close_issue_on_done)
     .bind(attention_sound_enabled)
     .bind(completion_sound_enabled)
     .fetch_one(pool)
     .await
+}
+
+/// Records the connected Jira account's identifier (Cloud `accountId` / Server
+/// username), captured after a successful connection test. Used to filter the
+/// realtime webhook path, which cannot run JQL like the poll sync does.
+pub async fn set_jira_account_id(pool: &PgPool, account_id: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET jira_account_id = $1, updated_at = now() WHERE id = 1")
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn set_paused(pool: &PgPool, paused: bool) -> sqlx::Result<()> {
@@ -1302,25 +1317,48 @@ pub async fn set_task_notes(pool: &PgPool, id: Uuid, notes: &str) -> sqlx::Resul
 // --- Internal tickets --------------------------------------------------------
 
 /// Creates an internal ticket (no external tracker). It lands in `Available` at
-/// the given position with a sequential, human-friendly external id.
+/// the given position with a sequential, human-friendly external id. An optional
+/// `repo_id` targets the repo the agent will branch in when the ticket is worked;
+/// leave it `None` to triage the repo later.
 pub async fn create_internal_task(
     pool: &PgPool,
     title: &str,
     body: &str,
     state: &str,
+    repo_id: Option<Uuid>,
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "INSERT INTO tasks \
-           (source_kind, external_id, title, body_snapshot, url, external_state, board_column, position) \
-         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, '', $3, 'available', $4) \
+           (source_kind, external_id, repo_id, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, $3, '', $4, 'available', $5) \
          RETURNING *",
     )
+    .bind(repo_id)
     .bind(title)
     .bind(body)
     .bind(state)
     .bind(initial_position)
     .fetch_one(pool)
+    .await
+}
+
+/// Points an internal ticket at the repo the agent should branch in, or clears it
+/// with `None`. Restricted to internal tasks: a GitHub task's repo is its issue's
+/// and must not be reassigned. Returns the updated task, or `None` if the id is
+/// not an internal task.
+pub async fn set_internal_task_repo(
+    pool: &PgPool,
+    id: Uuid,
+    repo_id: Option<Uuid>,
+) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET repo_id = $2, updated_at = now() \
+         WHERE id = $1 AND source_kind = 'internal' RETURNING *",
+    )
+    .bind(id)
+    .bind(repo_id)
+    .fetch_optional(pool)
     .await
 }
 
@@ -1386,9 +1424,15 @@ pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
 /// still sync in, map to columns, and transition on moves; they just are not
 /// auto-pulled to be coded.
 pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    // GitHub issues are always workable; internal tickets are too, but only once
+    // the operator has pointed them at a target repo (the agent needs somewhere to
+    // branch and open the PR). Jira tickets stay excluded (multi-repo execution is
+    // not built yet). An internal ticket with no repo is left for the operator to
+    // assign rather than pulled and immediately failed.
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'todo' AND hold = FALSE \
-         AND source_kind = 'github' \
+         AND (source_kind = 'github' \
+              OR (source_kind = 'internal' AND repo_id IS NOT NULL)) \
          ORDER BY position ASC LIMIT 1",
     )
     .fetch_optional(pool)

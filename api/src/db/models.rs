@@ -227,6 +227,14 @@ pub struct Settings {
     pub jira_base_url: String,
     /// Account email (the Basic-auth username on Cloud; unused on Server).
     pub jira_email: String,
+    /// Only sync Jira tickets assigned to the connected account (on by default).
+    /// The poll filters server-side with JQL; the webhook path compares the
+    /// payload's assignee against [`Self::jira_account_id`].
+    pub jira_assigned_to_me_only: bool,
+    /// The connected account's identifier, captured on a successful connection
+    /// test: the opaque `accountId` on Cloud, the username (`name`) on Server.
+    /// Empty until verified; used only to filter realtime webhook events.
+    pub jira_account_id: String,
     /// Whether a Jira API token / PAT is stored (the token itself is never sent).
     pub jira_token_set: bool,
     /// Whether a GitHub webhook secret is stored. With it set, inbound GitHub

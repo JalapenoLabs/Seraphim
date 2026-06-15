@@ -231,8 +231,25 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
     // of our columns. New tickets land in the mapped column; existing ones refresh
     // their cached fields and live status but keep the human-set column.
     if let Some(jira) = state.jira().await? {
+        let settings = queries::get_settings(&state.db).await?;
+        let assigned_to_me = settings.jira_assigned_to_me_only;
+
+        // The webhook path filters against the stored account id but cannot run JQL
+        // to learn it. If the filter is on and we have never captured the id (e.g.
+        // the operator enabled it without testing the connection), backfill it now
+        // from the same client the poll already holds.
+        if assigned_to_me && settings.jira_account_id.trim().is_empty() {
+            match jira.verify().await {
+                Ok(identity) if !identity.account_id.is_empty() => {
+                    queries::set_jira_account_id(&state.db, &identity.account_id).await?;
+                }
+                Ok(_) => {}
+                Err(error) => warn!(error = %error, "failed to capture Jira account id"),
+            }
+        }
+
         for board in queries::list_jira_boards_to_sync(&state.db).await? {
-            let issues = match jira.list_board_issues(board.board_id).await {
+            let issues = match jira.list_board_issues(board.board_id, assigned_to_me).await {
                 Ok(issues) => issues,
                 Err(error) => {
                     warn!(error = %error, board = %board.name, "failed to list Jira issues");

@@ -169,6 +169,11 @@ pub struct CreateTaskRequest {
     /// `"open"` (default) or `"closed"`.
     #[serde(default)]
     pub state: Option<String>,
+    /// Optional target repo the agent branches in when the ticket is worked. With
+    /// it set, the ticket is auto-pulled like a GitHub issue; without it the ticket
+    /// is tracking-only until a repo is assigned.
+    #[serde(default)]
+    pub repo_id: Option<Uuid>,
 }
 
 /// `POST /api/v1/tasks` - create an internal ticket (no external tracker). Lands
@@ -194,11 +199,44 @@ pub async fn create(
         .await?
         .unwrap_or(0.0)
         + 1.0;
-    let task =
-        queries::create_internal_task(&state.db, title, body.body.trim(), ticket_state, position)
-            .await?;
+    let task = queries::create_internal_task(
+        &state.db,
+        title,
+        body.body.trim(),
+        ticket_state,
+        body.repo_id,
+        position,
+    )
+    .await?;
     state.notify_board();
     Ok(Json(task).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetTaskRepoRequest {
+    /// The target repo, or `null` to clear it (back to tracking-only).
+    pub repo_id: Option<Uuid>,
+}
+
+/// `POST /api/v1/tasks/:id/repo` - point an internal ticket at the repo the agent
+/// should branch in (or clear it). Only valid for internal tickets; a GitHub
+/// task's repo is its issue's and is never reassigned.
+pub async fn set_repo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<SetTaskRepoRequest>,
+) -> ApiResult<Response> {
+    match queries::set_internal_task_repo(&state.db, id, payload.repo_id).await? {
+        Some(task) => {
+            state.notify_board();
+            Ok(Json(task).into_response())
+        }
+        None => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "not an internal ticket" })),
+        )
+            .into_response()),
+    }
 }
 
 /// `GET /api/v1/tasks/:id/issue` - the conversation view: a real GitHub issue

@@ -69,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id", get(tasks::get_task))
         .route("/tasks/:id/issue", get(tasks::get_issue))
         .route("/tasks/:id/issue/state", post(tasks::set_issue_state))
+        .route("/tasks/:id/repo", post(tasks::set_repo))
         .route("/tasks/:id/comment", post(tasks::add_comment))
         .route("/tasks/:id/stream", get(sse::task_stream))
         .route("/tasks/:id/move", post(board::move_task))
