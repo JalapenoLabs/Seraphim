@@ -800,12 +800,35 @@
                     ? editDiff(event.payload as Record<string, unknown>)
                     : null}
                 {#if diff}
-                  <!-- Write/Edit calls render as a red/green patch, not a bare summary line. -->
+                  <!-- Write/Edit calls render as a red/green patch. An all-additions
+                       write (no removals) is collapsed by default so a big new file
+                       doesn't flood the log; click the header to expand it. Edits that
+                       remove lines stay expanded so the change is always visible. -->
+                  {@const writeOnly = diff.removed === 0}
                   <div class="flex items-start gap-2 py-0.5">
                     <span class="w-[1ch] flex-none text-primary">●</span>
                     <div class="min-w-0 flex-1">
-                      <div class="truncate text-primary">{diff.verb}({diff.path})</div>
-                      <DiffView lines={diff.lines} added={diff.added} removed={diff.removed} />
+                      {#if writeOnly}
+                        <button
+                          type="button"
+                          onclick={() => toggle(index)}
+                          title={open ? 'Click to collapse' : 'Click to expand'}
+                          class="flex w-full items-center gap-1 text-left text-primary hover:opacity-80"
+                        >
+                          <ChevronDown
+                            class="size-3.5 flex-none transition-transform {open ? '' : '-rotate-90'}"
+                          />
+                          <span class="truncate">{diff.verb}({diff.path})</span>
+                        </button>
+                      {:else}
+                        <div class="truncate text-primary">{diff.verb}({diff.path})</div>
+                      {/if}
+                      <DiffView
+                        lines={diff.lines}
+                        added={diff.added}
+                        removed={diff.removed}
+                        collapsed={writeOnly && !open}
+                      />
                     </div>
                   </div>
                 {:else if event.type === 'prompt'}
