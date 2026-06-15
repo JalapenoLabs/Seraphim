@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Boot a throwaway local PostgreSQL 17 for DB validation in the workspace (#186).
+#
+# Creates (once) and starts a fresh PG17 cluster under a temp data dir, listening
+# on 127.0.0.1, then prints a ready-to-use connection URL on stdout. It matches
+# the Postgres 17 the API, CI, and production use, so migrations and integration
+# tests can be verified locally before pushing, with no Docker daemon and no
+# sibling-container networking to wrangle.
+#
+# Usage:
+#   pg-ephemeral [start]   start it if needed and print the DATABASE_URL (default)
+#   pg-ephemeral url       print the DATABASE_URL without touching the cluster
+#   pg-ephemeral stop      stop the cluster (keeps the data dir)
+#   pg-ephemeral reset     stop and delete the data dir for a clean slate
+#
+# Typical use:
+#   export DATABASE_URL="$(pg-ephemeral)"
+#   psql "$DATABASE_URL" -f migration.sql
+#
+# PostgreSQL refuses to run as root, so run this as the non-root workspace agent
+# user (codespace); everything lives under a writable temp dir it owns.
+set -euo pipefail
+
+# PGDG installs the server binaries (initdb, pg_ctl, ...) here rather than on the
+# default PATH, so address them explicitly.
+PG_BIN=/usr/lib/postgresql/17/bin
+
+PGDATA="${PG_EPHEMERAL_DATA:-/tmp/seraphim-pg17}"
+PGPORT="${PG_EPHEMERAL_PORT:-5432}"
+PGSUPERUSER=postgres
+PGSUPERPASS=postgres
+PGDATABASE="${PG_EPHEMERAL_DB:-app}"
+LOGFILE="${PGDATA}/postgres.log"
+URL="postgresql://${PGSUPERUSER}:${PGSUPERPASS}@127.0.0.1:${PGPORT}/${PGDATABASE}"
+
+die() {
+  echo "pg-ephemeral: $*" >&2
+  exit 1
+}
+
+[ "$(id -u)" -ne 0 ] || die "refusing to run as root; PostgreSQL must run as a non-root user (e.g. codespace)"
+[ -x "${PG_BIN}/pg_ctl" ] || die "PostgreSQL 17 is not installed at ${PG_BIN}"
+
+is_running() {
+  "${PG_BIN}/pg_ctl" -D "${PGDATA}" status >/dev/null 2>&1
+}
+
+start() {
+  if is_running; then
+    echo "${URL}"
+    return 0
+  fi
+
+  # First run: lay down a fresh cluster owned by the superuser with a known
+  # password (this is a disposable instance, so the password is not a secret).
+  if [ ! -s "${PGDATA}/PG_VERSION" ]; then
+    mkdir -p "${PGDATA}"
+    local pwfile
+    pwfile="$(mktemp)"
+    printf '%s' "${PGSUPERPASS}" > "${pwfile}"
+    "${PG_BIN}/initdb" -D "${PGDATA}" -U "${PGSUPERUSER}" \
+      -A scram-sha-256 --pwfile="${pwfile}" >/dev/null
+    rm -f "${pwfile}"
+  fi
+
+  # Listen only on loopback, and keep the unix socket in a writable temp dir
+  # rather than the default /var/run/postgresql, which the agent user cannot use.
+  "${PG_BIN}/pg_ctl" -D "${PGDATA}" -l "${LOGFILE}" -w \
+    -o "-p ${PGPORT} -c listen_addresses=127.0.0.1 -c unix_socket_directories=/tmp" \
+    start >/dev/null \
+    || { [ -f "${LOGFILE}" ] && cat "${LOGFILE}" >&2; die "failed to start PostgreSQL"; }
+
+  # Create the application database once; ignore the error if it already exists.
+  PGPASSWORD="${PGSUPERPASS}" "${PG_BIN}/createdb" \
+    -h 127.0.0.1 -p "${PGPORT}" -U "${PGSUPERUSER}" "${PGDATABASE}" 2>/dev/null || true
+
+  echo "pg-ephemeral: PostgreSQL 17 ready at ${URL}" >&2
+  echo "${URL}"
+}
+
+case "${1:-start}" in
+  start | "")
+    start
+    ;;
+  url)
+    echo "${URL}"
+    ;;
+  stop)
+    "${PG_BIN}/pg_ctl" -D "${PGDATA}" -m fast stop >/dev/null 2>&1 || true
+    ;;
+  reset)
+    "${PG_BIN}/pg_ctl" -D "${PGDATA}" -m immediate stop >/dev/null 2>&1 || true
+    rm -rf "${PGDATA}"
+    ;;
+  *)
+    die "usage: pg-ephemeral [start|url|stop|reset]"
+    ;;
+esac
