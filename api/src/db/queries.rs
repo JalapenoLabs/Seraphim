@@ -601,6 +601,158 @@ pub async fn railway_has_running_turn(pool: &PgPool, railway_id: Uuid) -> sqlx::
     .await
 }
 
+/// Whether a repo currently has a task being worked (`in_progress` +
+/// `working`/`preparing`). A repo move is blocked while this holds, so the agent
+/// is never yanked out from under the lane it is actively coding in. Mirrors
+/// [`railway_has_running_turn`] but scoped to a single repo's tasks.
+pub async fn repo_has_running_turn(pool: &PgPool, repo_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tasks \
+         WHERE repo_id = $1 AND board_column = 'in_progress' \
+         AND status IN ('working', 'preparing'))",
+    )
+    .bind(repo_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Creates a new railway, ranked after every existing one for swimlane order.
+///
+/// New railways start `stopped` (their container is created lazily on first
+/// work), not paused, and never `main` (the single `main` row is created by the
+/// migration and is undeletable). The position is one past the current maximum so
+/// a fresh lane lands at the end of the board.
+pub async fn create_railway(pool: &PgPool, name: &str, description: &str) -> sqlx::Result<Railway> {
+    sqlx::query_as::<_, Railway>(
+        "INSERT INTO railways (name, description, position) \
+         VALUES ($1, $2, COALESCE((SELECT MAX(position) + 1 FROM railways), 0)) \
+         RETURNING *",
+    )
+    .bind(name)
+    .bind(description)
+    .fetch_one(pool)
+    .await
+}
+
+/// Renames a railway and updates its description, returning the updated row (or
+/// `None` if no railway has that id). Leaves the lifecycle, pause, and session
+/// untouched; this is the plain "edit name/description" path.
+pub async fn update_railway(
+    pool: &PgPool,
+    id: Uuid,
+    name: &str,
+    description: &str,
+) -> sqlx::Result<Option<Railway>> {
+    sqlx::query_as::<_, Railway>(
+        "UPDATE railways SET name = $2, description = $3, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(description)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Toggles a railway's per-railway pause, returning the updated row (or `None` if
+/// it does not exist). This gates work alongside the global master pause on
+/// `settings` (issue #202); the two are independent switches.
+pub async fn set_railway_paused(
+    pool: &PgPool,
+    id: Uuid,
+    paused: bool,
+) -> sqlx::Result<Option<Railway>> {
+    sqlx::query_as::<_, Railway>(
+        "UPDATE railways SET paused = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(paused)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Hands a deleted railway's repos and tasks back to `main`, the prerequisite for
+/// removing it (the `railway_id` foreign keys are `ON DELETE RESTRICT`).
+///
+/// All of `from`'s repos move to `main`, and so do its tasks; a task's railway
+/// always follows its repo, so reassigning both keeps that invariant. Returns how
+/// many repos and tasks were moved, for the caller's summary. `main` itself is
+/// never a delete target, so this never reassigns onto the row it reads.
+pub async fn reassign_railway_to_main(pool: &PgPool, from: Uuid) -> sqlx::Result<(u64, u64)> {
+    let mut tx = pool.begin().await?;
+
+    let repos = sqlx::query(
+        "UPDATE repositories SET railway_id = (SELECT id FROM railways WHERE is_main), \
+           updated_at = now() \
+         WHERE railway_id = $1",
+    )
+    .bind(from)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    let tasks = sqlx::query(
+        "UPDATE tasks SET railway_id = (SELECT id FROM railways WHERE is_main), \
+           updated_at = now() \
+         WHERE railway_id = $1",
+    )
+    .bind(from)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok((repos, tasks))
+}
+
+/// Deletes a railway by id. The caller must first reassign its repos and tasks to
+/// `main` (see [`reassign_railway_to_main`]) and must never pass `main`; the
+/// `is_main` guard here is a final backstop so a `main` delete can never slip
+/// through. Returns whether a row was removed.
+pub async fn delete_railway(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let removed = sqlx::query("DELETE FROM railways WHERE id = $1 AND NOT is_main")
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(removed > 0)
+}
+
+/// Moves a repo, and every task that belongs to it, onto `target` railway.
+///
+/// The railway follows the repo: a repo belongs to exactly one railway, and its
+/// tasks always share that railway, so both are reassigned together in one
+/// transaction. Returns the moved repo (or `None` if the id does not exist).
+pub async fn move_repo_to_railway(
+    pool: &PgPool,
+    repo_id: Uuid,
+    target: Uuid,
+) -> sqlx::Result<Option<Repository>> {
+    let mut tx = pool.begin().await?;
+
+    let repo = sqlx::query_as::<_, Repository>(
+        "UPDATE repositories SET railway_id = $2, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(repo_id)
+    .bind(target)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Only touch the tasks if the repo actually existed, so a bad id is a clean
+    // no-op rather than an orphaned task update.
+    if repo.is_some() {
+        sqlx::query("UPDATE tasks SET railway_id = $2, updated_at = now() WHERE repo_id = $1")
+            .bind(repo_id)
+            .bind(target)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tx.commit().await?;
+    Ok(repo)
+}
+
 // --- Repositories ------------------------------------------------------------
 
 pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {

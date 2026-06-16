@@ -12,6 +12,7 @@ mod heart_attacks;
 mod jira;
 mod notepad;
 mod questions;
+mod railways;
 mod repos;
 mod settings;
 mod sse;
@@ -113,6 +114,20 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/:id/deletion-impact", get(repos::deletion_impact))
         .route("/repos/import-org", post(repos::import_org))
         .route("/sync", post(repos::sync))
+        // Railways: the parallel agent lanes (CRUD, repo assignment, per-railway
+        // pause, manual container start/stop). The global master pause stays on
+        // `/settings/pause`; these only gate one lane.
+        .route("/railways", get(railways::list).post(railways::create))
+        .route(
+            "/railways/:id",
+            get(railways::get)
+                .put(railways::update)
+                .delete(railways::delete),
+        )
+        .route("/railways/:id/pause", post(railways::set_pause))
+        .route("/railways/:id/repos", post(railways::assign_repo))
+        .route("/railways/:id/start", post(railways::start))
+        .route("/railways/:id/stop", post(railways::stop))
         // Inbound realtime issue webhooks (authenticated by their shared secret).
         .route("/webhooks/github", post(webhooks::github))
         .route("/webhooks/jira", post(webhooks::jira))

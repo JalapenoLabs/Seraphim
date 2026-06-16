@@ -302,4 +302,33 @@ impl Workspace {
             .await
             .wrap_err_with(|| format!("failed to stop container {container}"))
     }
+
+    /// Force-removes a container (and its writable layer), tearing it down for
+    /// good. Used when a railway is deleted: its lane no longer exists, so the
+    /// per-railway container is removed rather than merely idle-stopped.
+    ///
+    /// A missing container is treated as success, so a delete is idempotent even
+    /// if the container was never created (a railway that never ran any work).
+    pub async fn remove_container(&self, container: &str) -> Result<()> {
+        match self
+            .docker
+            .remove_container(
+                container,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            // Already gone: nothing to remove, treat as success for idempotency.
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
+            Err(error) => {
+                Err(error).wrap_err_with(|| format!("failed to remove container {container}"))
+            }
+        }
+    }
 }

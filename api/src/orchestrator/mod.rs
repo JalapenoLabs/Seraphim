@@ -629,6 +629,168 @@ pub async fn stop_active_turn(state: &AppState, task: &Task) -> Result<()> {
     Ok(())
 }
 
+/// Why a railway management action was rejected, when a guard prevents it.
+///
+/// The HTTP layer turns each variant into a `400` with this message, so the UI can
+/// explain to the operator exactly why the action did not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailwayActionError {
+    /// The undeletable `main` railway cannot be deleted.
+    MainUndeletable,
+    /// A live turn is running on the railway, so it cannot be deleted yet.
+    DeleteWhileWorking,
+    /// A live turn is working the repo, so it cannot change railways yet.
+    MoveRepoWhileWorking,
+    /// The named railway (or repo) was not found.
+    NotFound,
+}
+
+impl RailwayActionError {
+    /// A short, operator-facing explanation for the rejection.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::MainUndeletable => "The main railway cannot be deleted.",
+            Self::DeleteWhileWorking => {
+                "This railway has a task in progress. Wait for it to finish (or reset it) before deleting."
+            }
+            Self::MoveRepoWhileWorking => {
+                "The agent is working this repo on its current railway. Wait for it to finish before moving it."
+            }
+            Self::NotFound => "Not found.",
+        }
+    }
+}
+
+/// Deletes a non-`main` railway: reassign its repos and non-active tasks to
+/// `main`, tear down its container, clear its session, then remove the row.
+///
+/// `main` is undeletable (its lane and compose-managed container must always
+/// exist) and the delete is blocked while a live turn runs on the railway, so the
+/// agent is never killed mid-task. Once those guards pass, the repos and tasks are
+/// handed to `main` (a task's railway follows its repo), the per-railway container
+/// is stopped and removed, and the railway's session is dropped before the row is
+/// deleted. The container teardown is best-effort: a Docker hiccup is logged but
+/// does not block the logical delete, since the row and its data have already moved
+/// to `main`.
+///
+/// # Errors
+/// Returns a [`RailwayActionError`] for a rejected guard (main, not found, or a
+/// live turn), or propagates a database failure.
+pub async fn delete_railway(
+    state: &AppState,
+    railway_id: uuid::Uuid,
+) -> Result<std::result::Result<(), RailwayActionError>> {
+    let Some(railway) = queries::get_railway(&state.db, railway_id).await? else {
+        return Ok(Err(RailwayActionError::NotFound));
+    };
+    if railway.is_main {
+        return Ok(Err(RailwayActionError::MainUndeletable));
+    }
+    if queries::railway_has_running_turn(&state.db, railway_id).await? {
+        return Ok(Err(RailwayActionError::DeleteWhileWorking));
+    }
+
+    info!(railway_id = %railway.id, name = %railway.name, "deleting railway");
+
+    // Hand the railway's repos and tasks back to `main` first, so the foreign-key
+    // `ON DELETE RESTRICT` lets the row go and nothing is orphaned.
+    let (repos, tasks) = queries::reassign_railway_to_main(&state.db, railway_id).await?;
+    info!(railway_id = %railway.id, repos, tasks, "reassigned railway's repos and tasks to main");
+
+    // Tear down the per-railway container (stop, then force-remove). Best-effort:
+    // the lane is already logically gone, so a Docker error must not strand the
+    // delete. `main`'s compose container is never named here, so it is never touched.
+    let handle = railway::handle_for(state, railway_id).await?;
+    if let Err(error) = handle.stop(state).await {
+        warn!(error = %error, railway_id = %railway.id, "failed to stop railway container during delete");
+    }
+    if let Err(error) = state.workspace.remove_container(handle.container()).await {
+        warn!(error = %error, railway_id = %railway.id, "failed to remove railway container during delete");
+    }
+
+    // Clear the session, then delete the row.
+    railway::write_session(state, &handle, None).await?;
+    queries::delete_railway(&state.db, railway_id).await?;
+    state.notify_board();
+    Ok(Ok(()))
+}
+
+/// Moves a repo, and all of its tasks, onto `target` railway (the railway follows
+/// the repo).
+///
+/// Blocked while a live turn is working the repo on its current railway, so the
+/// agent is never pulled out from under the lane it is actively coding in; once
+/// idle, the repo and every task that belongs to it move to the target in one
+/// transaction. The target's container is brought up lazily by its own agent loop
+/// when it next has work, so no container action is needed here.
+///
+/// # Errors
+/// Returns a [`RailwayActionError`] for a rejected guard (repo or target not found,
+/// or a live turn), or propagates a database failure.
+pub async fn move_repo_to_railway(
+    state: &AppState,
+    repo_id: uuid::Uuid,
+    target_railway_id: uuid::Uuid,
+) -> Result<std::result::Result<Repository, RailwayActionError>> {
+    if queries::get_repository(&state.db, repo_id).await?.is_none()
+        || queries::get_railway(&state.db, target_railway_id)
+            .await?
+            .is_none()
+    {
+        return Ok(Err(RailwayActionError::NotFound));
+    }
+    if queries::repo_has_running_turn(&state.db, repo_id).await? {
+        return Ok(Err(RailwayActionError::MoveRepoWhileWorking));
+    }
+
+    let Some(repo) = queries::move_repo_to_railway(&state.db, repo_id, target_railway_id).await?
+    else {
+        return Ok(Err(RailwayActionError::NotFound));
+    };
+    info!(repo_id = %repo.id, full_name = %repo.full_name, railway_id = %target_railway_id, "moved repo to railway");
+    state.notify_board();
+    Ok(Ok(repo))
+}
+
+/// Manually starts a non-`main` railway's container, bringing it up and
+/// provisioning it (the same lazy path the agent loop uses), so the operator can
+/// pre-warm a lane. A no-op for `main`, whose compose-managed container is always
+/// on; the caller surfaces that as a clear message rather than an error.
+///
+/// # Errors
+/// Propagates a Docker or provisioning failure, or a missing-railway lookup.
+pub async fn start_railway(state: &AppState, railway_id: uuid::Uuid) -> Result<bool> {
+    let Some(railway) = queries::get_railway(&state.db, railway_id).await? else {
+        return Err(eyre!("railway {railway_id} not found"));
+    };
+    if railway.is_main {
+        // `main` is the always-on compose workspace; there is nothing to start.
+        return Ok(false);
+    }
+    let handle = RailwayHandle::new(state, &railway);
+    handle.ensure_running(state).await?;
+    Ok(true)
+}
+
+/// Manually idle-stops a non-`main` railway's container, preserving its clones and
+/// session for a fast restart (the same stop the idle reaper performs). `main`
+/// cannot be stopped (it is compose-managed and always on); the caller surfaces
+/// that as a clear message rather than an error.
+///
+/// # Errors
+/// Propagates a Docker stop failure, or a missing-railway lookup.
+pub async fn stop_railway(state: &AppState, railway_id: uuid::Uuid) -> Result<bool> {
+    let Some(railway) = queries::get_railway(&state.db, railway_id).await? else {
+        return Err(eyre!("railway {railway_id} not found"));
+    };
+    if railway.is_main {
+        return Ok(false);
+    }
+    let handle = RailwayHandle::new(state, &railway);
+    handle.stop(state).await?;
+    Ok(true)
+}
+
 /// Hard-resets a single stuck task to a clean slate (issue #72): if the agent is
 /// mid-turn on it, that turn is stopped; its pull request is closed, its branch
 /// deleted from the remote and the workspace, a closed source issue is reopened,
@@ -2346,6 +2508,26 @@ mod tests {
     fn slugify_is_branch_safe() {
         assert_eq!(slugify("Fix the Login Bug!"), "fix-the-login-bug");
         assert_eq!(slugify("   spaces   "), "spaces");
+    }
+
+    #[test]
+    fn railway_action_errors_explain_each_rejection() {
+        // Every guard rejection must carry a distinct, operator-facing reason so the
+        // UI can tell the user exactly why the action did not run.
+        let main = RailwayActionError::MainUndeletable.message();
+        let delete = RailwayActionError::DeleteWhileWorking.message();
+        let mv = RailwayActionError::MoveRepoWhileWorking.message();
+        let missing = RailwayActionError::NotFound.message();
+
+        assert!(main.contains("main railway"));
+        assert!(delete.contains("in progress"));
+        assert!(mv.contains("working"));
+        assert!(!missing.is_empty());
+
+        // The messages are distinct, so each rejection is unambiguous.
+        for (a, b) in [(main, delete), (main, mv), (delete, mv), (mv, missing)] {
+            assert_ne!(a, b);
+        }
     }
 
     #[test]
