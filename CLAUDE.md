@@ -1,3 +1,10 @@
+> **Source-of-truth policy.** The USER is the primary source of truth. This
+> `CLAUDE.md` is the SECOND source of truth. The codebase is **not** a source of
+> truth (it can drift). Whenever a design decision is made or changed, update
+> this file in the same change. Keep it routinely up to date.
+>
+> **Style:** No em dashes anywhere in user-facing text (docs, UI, commits, PRs).
+
 # Seraphim
 
 > Project memory for agents working **on** Seraphim itself. Read this first.
@@ -373,3 +380,42 @@ fail-fast) on every PR and on `main`/`develop`.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
 - **Rate-limit handling** — surface `rate_limit` events and auto-pause (planned).
+
+## Railways (planned)
+
+> Locked design from the scoping session. Tracked by the **Railways** GitHub
+> milestone. The Conductor (automated ops agent) is explicitly out of scope for now.
+
+A **railway** is a named parallel agent lane: its own workspace container, agent
+loop, Claude session, and a set of repos. A repo belongs to **exactly one** railway
+for work, so a task's railway always follows its repo. An undeletable **`main`**
+railway holds everything by default.
+
+- **Board:** swimlanes. One board, each railway a horizontal lane across the
+  columns. Moving a card to another railway is a repo-reassign action, not a drag.
+- **Loops:** one **agent loop per railway** (parallel); sync, review, and
+  defibrillator stay single global loops that are railway-aware.
+- **Container lifecycle:** lazy start on first work; auto idle-STOP (stopped, not
+  removed, so restart is fast and keeps the clones plus session).
+- **Repo reassignment:** railway follows repo; blocked only while a live turn runs
+  on that repo's current railway, otherwise the repo and all its tasks move.
+- **Per-railway:** session, pause, name, description, repo set, lifecycle state.
+  **Global:** model, setup scripts, config repo, instructions, tokens, one
+  schedule, branch template, review policy, plus a new global **notepad**
+  (operator scratchpad, never injected into an agent).
+- **Deletion:** `main` is undeletable; deleting another railway auto-reassigns its
+  repos (and their non-active tasks) to `main`, then tears down its container and
+  session. Blocked while a live turn runs on it.
+- **Stats:** the subscription usage gauge is global (one shared subscription) with
+  an aggregate cost/tokens/time rollup; context %, cost, tokens, and time are
+  per-railway, shown on each swimlane.
+- **Pause:** a global master pause plus a per-railway pause; both gate work.
+- **Schedule:** one global schedule for all railways.
+- **Migration:** the existing setup becomes the `main` railway;
+  `current_session_id` becomes main's session; all existing repos and tasks move
+  to `main`; new and imported repos default to `main`.
+- **Banners:** heart-attack and notification banners stay global, tagged with the
+  railway they belong to.
+- **Route planner (#181):** included in the milestone. The planner assigns each
+  drafted issue to a railway and orders them, then bulk-create routes them to the
+  right lane.
