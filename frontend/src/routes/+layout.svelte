@@ -22,6 +22,7 @@
     { href: '/compose', label: 'Compose' },
     { href: '/automation', label: 'Automation' },
     { href: '/repos', label: 'Repositories' },
+    { href: '/railways', label: 'Railways' },
     { href: '/settings', label: 'Settings' }
   ]
 

@@ -399,6 +399,11 @@ railway holds everything by default.
 
 - **Board:** swimlanes. One board, each railway a horizontal lane across the
   columns. Moving a card to another railway is a repo-reassign action, not a drag.
+- **Management UI:** a dedicated top-nav page (`/railways`), not a settings
+  subpage. It owns lane create/rename/describe, the per-railway pause + the global
+  master pause, start/stop, delete-with-confirm, the idle-stop timeout, and the
+  per-repo lane assignment. The board keeps the swimlanes; the global operator
+  notepad stays in settings.
 - **Loops:** one **agent loop per railway** (parallel); sync, review, and
   defibrillator stay single global loops that are railway-aware.
 - **Container lifecycle:** lazy start on first work; auto idle-STOP (stopped, not
