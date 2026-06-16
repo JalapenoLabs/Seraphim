@@ -15,7 +15,9 @@ pub mod compose;
 mod network;
 mod placement;
 mod prompt;
-mod provision;
+// `repo_dir_name` (the flat clone-dir convention) is reused by the activity-forest
+// seed endpoint (#216), so this module is crate-visible rather than orchestrator-private.
+pub(crate) mod provision;
 mod railway;
 mod review;
 mod subscription;
