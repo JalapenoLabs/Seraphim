@@ -33,6 +33,27 @@
   let statsFetchedAt = $state(Date.now())
   let statsPoll: ReturnType<typeof setInterval> | null = null
 
+  // A rolling 24h history of the cumulative cost/token totals, sampled every few
+  // minutes and persisted to localStorage so the burn-rate sparklines survive a
+  // kiosk reload. The sparklines plot the per-interval deltas (the burn), not the
+  // ever-climbing totals.
+  type StatSample = { at: number; cost: number; tokens: number }
+  const HISTORY_KEY = 'seraphim:watch:stat-history'
+  const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000
+  const HISTORY_SAMPLE_MS = 5 * 60 * 1000
+  let statHistory = $state<StatSample[]>([])
+
+  const costHistory = $derived(
+    statHistory.length >= 2
+      ? statHistory.slice(1).map((sample, index) => Math.max(0, sample.cost - statHistory[index].cost))
+      : []
+  )
+  const tokenHistory = $derived(
+    statHistory.length >= 2
+      ? statHistory.slice(1).map((sample, index) => Math.max(0, sample.tokens - statHistory[index].tokens))
+      : []
+  )
+
   // The rolling activity feed: one entry per meaningful agent action, newest last.
   type FeedEntry = {
     id: number
@@ -128,20 +149,25 @@
   // progress bar animate. Working is full-speed green; waiting/cooling is a
   // half-speed amber warning; paused, halted, or a heart attack is a frozen red
   // alert; nothing-to-do (idle/off-hours) is a still, grey "halted" look.
+  // `frame` drives the full-bleed state glow around the whole page (issue: TV
+  // glanceability): a calm breathing green when working, a steady amber when
+  // waiting/blocked, an urgent pulse for red alerts, and a faint wash when idle.
   type Spin = 'full' | 'half' | 'none'
-  const STATE_STYLES: Record<StateKey, { accent: string; spin: Spin }> = {
-    working: { accent: '#3fb950', spin: 'full' },
-    paused: { accent: '#f85149', spin: 'none' },
-    halted: { accent: '#f85149', spin: 'none' },
-    heart_attack: { accent: '#f85149', spin: 'none' },
-    cooldown: { accent: '#d29922', spin: 'half' },
-    waiting: { accent: '#d29922', spin: 'half' },
-    blocked: { accent: '#d29922', spin: 'half' },
-    offhours: { accent: '#8b97a6', spin: 'none' },
-    idle: { accent: '#8b97a6', spin: 'none' }
+  type Frame = 'breathe' | 'steady' | 'alert' | 'soft'
+  const STATE_STYLES: Record<StateKey, { accent: string; spin: Spin; frame: Frame }> = {
+    working: { accent: '#3fb950', spin: 'full', frame: 'breathe' },
+    paused: { accent: '#f85149', spin: 'none', frame: 'steady' },
+    halted: { accent: '#f85149', spin: 'none', frame: 'alert' },
+    heart_attack: { accent: '#f85149', spin: 'none', frame: 'alert' },
+    cooldown: { accent: '#d29922', spin: 'half', frame: 'steady' },
+    waiting: { accent: '#d29922', spin: 'half', frame: 'steady' },
+    blocked: { accent: '#d29922', spin: 'half', frame: 'steady' },
+    offhours: { accent: '#8b97a6', spin: 'none', frame: 'soft' },
+    idle: { accent: '#8b97a6', spin: 'none', frame: 'soft' }
   }
   const accent = $derived(STATE_STYLES[agentState.key].accent)
   const spin = $derived(STATE_STYLES[agentState.key].spin)
+  const frame = $derived(STATE_STYLES[agentState.key].frame)
   const isWorking = $derived(agentState.key === 'working')
 
   // Animation class for the rotating ring, scaled to the current liveliness.
@@ -394,8 +420,47 @@
     try {
       stats = await getGlobalStats()
       statsFetchedAt = Date.now()
+      recordSample(stats)
     } catch (error) {
       console.debug('failed to load watch stats', error)
+    }
+  }
+
+  function loadHistory() {
+    if (!browser) {
+      return
+    }
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY)
+      if (!raw) {
+        return
+      }
+      const parsed = JSON.parse(raw) as StatSample[]
+      const cutoff = Date.now() - HISTORY_WINDOW_MS
+      statHistory = parsed.filter((sample) => sample.at >= cutoff)
+    } catch (error) {
+      console.debug('failed to load stat history', error)
+    }
+  }
+
+  function recordSample(snapshot: Stats) {
+    if (!browser) {
+      return
+    }
+    const at = Date.now()
+    const last = statHistory[statHistory.length - 1]
+    // One sample per interval keeps the 24h buffer small and the sparkline legible.
+    if (last && at - last.at < HISTORY_SAMPLE_MS) {
+      return
+    }
+    const cutoff = at - HISTORY_WINDOW_MS
+    statHistory = [...statHistory, { at, cost: snapshot.cost_usd, tokens: snapshot.total_tokens }].filter(
+      (sample) => sample.at >= cutoff
+    )
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(statHistory))
+    } catch (error) {
+      console.debug('failed to persist stat history', error)
     }
   }
 
@@ -408,6 +473,7 @@
 
   onMount(() => {
     loadBoard()
+    loadHistory()
     loadStats()
     clock = setInterval(() => (now = Date.now()), 1000)
     // A slow baseline poll reconciles with the persisted totals; the live ticking
@@ -488,6 +554,9 @@
   <div class="aura aura-1" aria-hidden="true"></div>
   <div class="aura aura-2" aria-hidden="true"></div>
   <div class="grid-overlay pointer-events-none absolute inset-0" aria-hidden="true"></div>
+  <!-- State frame: a full-bleed inner glow tinted by the agent state, so the page
+       reads as healthy / waiting / alert from across the room. -->
+  <div class="state-frame state-frame-{frame}" aria-hidden="true"></div>
 
   <div class="relative z-10 flex h-full flex-col gap-5 p-6 xl:p-8">
     <!-- Title + live agent-state pill -->
@@ -603,7 +672,7 @@
           <div class="mt-1 text-xs text-muted-foreground">shipped to done</div>
         </div>
         {#if stats}
-          <LifetimeTotals {stats} {workedMs} class="justify-start" />
+          <LifetimeTotals {stats} {workedMs} {costHistory} {tokenHistory} class="justify-start" />
         {/if}
       </div>
     </section>
@@ -628,10 +697,6 @@
     <section class="flex min-h-0 flex-1 gap-5">
       <!-- Live activity log -->
       <div class="flex w-1/3 min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-black/30 backdrop-blur">
-        <div class="flex items-center gap-2 border-b border-border/60 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-          <span class="size-2 rounded-full bg-primary {feed.length ? 'animate-pulse' : ''}"></span>
-          Live activity
-        </div>
         <div bind:this={feedEl} class="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-3 font-mono text-xs">
           {#if feed.length === 0}
             <p class="text-muted-foreground">Waiting for the agent to act…</p>
@@ -663,9 +728,6 @@
            agents touch, lit up per PR while its CI runs. -->
       <div class="relative w-2/3 min-w-0 overflow-hidden rounded-xl border border-border/60 bg-black/30 backdrop-blur">
         <div bind:this={forestEl} class="absolute inset-0"></div>
-        <div class="pointer-events-none absolute left-4 top-2 z-10 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground/80">
-          Activity forest
-        </div>
         {#if !forestReady}
           <div class="pointer-events-none absolute inset-0 grid place-items-center text-xs text-muted-foreground">
             Spinning up the activity forest…
@@ -715,6 +777,49 @@
       linear-gradient(90deg, var(--foreground) 1px, transparent 1px);
     background-size: 44px 44px;
     mask-image: radial-gradient(ellipse at center, black 30%, transparent 85%);
+  }
+
+  /* The whole-page state glow. Color comes from --accent; each variant differs in
+     intensity and motion. The breathe/alert variants carry a static base glow so
+     reduced-motion users still get the full-strength tint. */
+  .state-frame {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 5;
+    transition: box-shadow 600ms ease;
+  }
+  .state-frame-soft {
+    box-shadow: inset 0 0 100px 4px color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .state-frame-steady {
+    box-shadow: inset 0 0 130px 8px color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+  .state-frame-breathe {
+    box-shadow: inset 0 0 130px 8px color-mix(in srgb, var(--accent) 22%, transparent);
+    animation: frame-breathe 4s ease-in-out infinite;
+  }
+  .state-frame-alert {
+    box-shadow: inset 0 0 150px 10px color-mix(in srgb, var(--accent) 40%, transparent);
+    animation: frame-alert 1.6s ease-in-out infinite;
+  }
+  @keyframes frame-breathe {
+    0%,
+    100% {
+      box-shadow: inset 0 0 110px 6px color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+    50% {
+      box-shadow: inset 0 0 150px 12px color-mix(in srgb, var(--accent) 32%, transparent);
+    }
+  }
+  @keyframes frame-alert {
+    0%,
+    100% {
+      box-shadow: inset 0 0 120px 6px color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    50% {
+      box-shadow: inset 0 0 190px 20px color-mix(in srgb, var(--accent) 55%, transparent);
+    }
   }
 
   :global(.watch) .animate-spin-slow {
@@ -792,6 +897,8 @@
 
   @media (prefers-reduced-motion: reduce) {
     .aura,
+    .state-frame-breathe,
+    .state-frame-alert,
     :global(.watch) .animate-spin-slow,
     :global(.watch) .animate-spin-half,
     :global(.watch) .bar-flow,
