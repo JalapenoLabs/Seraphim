@@ -4,8 +4,10 @@
   // worked, and a big completed count in the middle; and a combined live activity
   // feed across every task along the bottom. Built to be left running on a TV.
   import type { BoardResponse, Task, TaskStatus } from '$lib/types'
+  import type { RunewoodController, RunewoodHighlight, Hsl } from 'runewood'
 
   import { onMount, onDestroy, tick } from 'svelte'
+  import { browser } from '$app/environment'
   import { Tween } from 'svelte/motion'
   import { cubicOut } from 'svelte/easing'
   import { fly } from 'svelte/transition'
@@ -14,6 +16,7 @@
   import { STATUS_LABELS } from '$lib/types'
   import { isWithinSchedule } from '$lib/schedule'
   import { describeRateLimit } from '$lib/rateLimit'
+  import { mapActivityEvent, DEFAULT_EXCLUDES } from '$lib/runewood/mapEvent'
   import Stats from '$lib/components/Stats.svelte'
 
   let board = $state<BoardResponse | null>(null)
@@ -253,6 +256,90 @@
     return new Date(at).toLocaleTimeString([], { hour12: false })
   }
 
+  // --- Activity forest (runewood, issue #180) ---------------------------------
+
+  // The Gource-style live forest. Created on mount (WebGL is browser-only) and
+  // fed the same `activity` stream through the pure mapper. `runewood` is imported
+  // dynamically so the WebGL bundle never loads during SSR/build.
+  let forestEl = $state<HTMLDivElement>()
+  let forest: RunewoodController | null = null
+  let forestReady = $state(false)
+  // Tooltip for the hovered node (driven by runewood's nodeHover event).
+  let hoverTip = $state<{ path: string; x: number; y: number } | null>(null)
+
+  // CI highlight, driven off the board's per-task status (issue #180): light up
+  // the files a PR touched while its CI runs, and clear them when it settles.
+  // Touched files accumulate per task from the live stream; the color tracks the
+  // task's status (amber under review/CI, green about to merge, red failing).
+  const touchedFiles = new Map<string, Set<string>>()
+  const highlightHandles = new Map<string, { handle: RunewoodHighlight; colorKey: string }>()
+  const CI_COLORS = {
+    running: { h: 38, s: 0.9, l: 0.55 }, // amber
+    passing: { h: 140, s: 0.6, l: 0.5 }, // green
+    failing: { h: 0, s: 0.75, l: 0.55 } // red
+  } as const satisfies Record<string, Hsl>
+
+  // The highlight color for a task's PR, or null when it should not be lit. Only
+  // In Review tasks (which have an open PR) are highlighted.
+  function ciColor(task: Task): Hsl | null {
+    if (task.board_column !== 'in_review') {
+      return null
+    }
+    if (task.status === 'ci_failing' || task.status === 'ci_blocked') {
+      return CI_COLORS.failing
+    }
+    if (task.status === 'merging') {
+      return CI_COLORS.passing
+    }
+    return CI_COLORS.running
+  }
+
+  // Reconcile the live highlights with the current board: create/grow/recolor a
+  // group per highlightable task, and clear groups whose task has settled.
+  function reconcileHighlights() {
+    if (!forest) {
+      return
+    }
+    const active = new Set<string>()
+    for (const task of tasks) {
+      const color = ciColor(task)
+      if (!color) {
+        continue
+      }
+      const files = [...(touchedFiles.get(task.id) ?? [])]
+      if (files.length === 0) {
+        continue
+      }
+      active.add(task.id)
+      const colorKey = `${color.h},${color.s},${color.l}`
+      const existing = highlightHandles.get(task.id)
+      if (!existing) {
+        const handle = forest.highlight(files, { id: task.id, color })
+        highlightHandles.set(task.id, { handle, colorKey })
+      } else {
+        existing.handle.update(files)
+        // Re-highlighting the same id replaces the group, which is how a color
+        // change (e.g. amber -> red) is encoded.
+        if (existing.colorKey !== colorKey) {
+          const handle = forest.highlight(files, { id: task.id, color })
+          highlightHandles.set(task.id, { handle, colorKey })
+        }
+      }
+    }
+    for (const [taskId, entry] of highlightHandles) {
+      if (!active.has(taskId)) {
+        entry.handle.clear()
+        highlightHandles.delete(taskId)
+      }
+    }
+  }
+
+  // Re-reconcile whenever the board changes (status transitions, settled PRs).
+  $effect(() => {
+    tasks
+    reconcileHighlights()
+  })
+
   async function loadBoard() {
     try {
       board = await getBoard()
@@ -277,16 +364,58 @@
         }
         const at = data.event.created_at ? new Date(data.event.created_at).getTime() : Date.now()
         void pushFeed(data.task_id, data.event.type, data.event.payload ?? {}, at)
+
+        // Feed the forest through the pure mapper. A file-touch event also grows
+        // its task's CI highlight set.
+        const mapped = mapActivityEvent(data, titleById.get(data.task_id))
+        if (mapped) {
+          forest?.ingest(mapped)
+          if (mapped.path) {
+            const files = touchedFiles.get(data.task_id) ?? new Set<string>()
+            files.add(mapped.path)
+            touchedFiles.set(data.task_id, files)
+            reconcileHighlights()
+          }
+        }
       } catch {
         // Ignore malformed frames.
       }
     })
+
+    // Create the forest once the DOM node exists. Browser-only; the dynamic import
+    // keeps the WebGL bundle out of SSR/build evaluation.
+    if (browser && forestEl) {
+      import('runewood')
+        .then(({ createRunewood }) => {
+          if (!forestEl) {
+            return
+          }
+          forest = createRunewood(forestEl, {
+            theme: 'void',
+            bloom: 'off',
+            cameraMode: 'follow',
+            rootLabel: 'workspace',
+            exclude: DEFAULT_EXCLUDES,
+            // Keep a contributor lingering on its last file across edit gaps so a
+            // live agent feed reads as continuous activity, not flicker.
+            actorLingerMs: 60 * 60 * 1000
+          })
+          forest.on('nodeHover', (hit) => {
+            hoverTip = hit ? { path: hit.path, x: hit.screen.x, y: hit.screen.y } : null
+          })
+          forestReady = true
+          // Any PRs already In Review get lit as soon as their files stream in.
+          reconcileHighlights()
+        })
+        .catch((error) => console.debug('runewood failed to load', error))
+    }
   })
 
   onDestroy(() => {
     if (clock) clearInterval(clock)
     boardStream?.close()
     activityStream?.close()
+    forest?.destroy()
   })
 </script>
 
@@ -421,35 +550,60 @@
       </span>
     </div>
 
-    <!-- Live activity across every task -->
-    <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/60 bg-black/30 backdrop-blur">
-      <div class="flex items-center gap-2 border-b border-border/60 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-        <span class="size-2 rounded-full bg-primary {feed.length ? 'animate-pulse' : ''}"></span>
-        Live activity
+    <!-- Bottom: live activity log (1/3) beside the live activity forest (2/3). -->
+    <section class="flex min-h-0 flex-1 gap-5">
+      <!-- Live activity log -->
+      <div class="flex w-1/3 min-w-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-black/30 backdrop-blur">
+        <div class="flex items-center gap-2 border-b border-border/60 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+          <span class="size-2 rounded-full bg-primary {feed.length ? 'animate-pulse' : ''}"></span>
+          Live activity
+        </div>
+        <div bind:this={feedEl} class="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-3 font-mono text-xs">
+          {#if feed.length === 0}
+            <p class="text-muted-foreground">Waiting for the agent to act…</p>
+          {/if}
+          {#each feed as entry (entry.id)}
+            {@const meta = GLYPHS[entry.type] ?? { glyph: '·', color: 'text-muted-foreground' }}
+            {@const glyphColor = entry.type === 'ci' ? ciGlyphColor(entry.status) : meta.color}
+            {@const hue = taskHue(entry.taskId)}
+            <div class="flex items-center gap-2 py-0.5" in:fly={{ y: 8, duration: 250, easing: cubicOut }}>
+              <span class="w-[3.5rem] shrink-0 tabular-nums text-muted-foreground/60">
+                {clockLabel(entry.at)}
+              </span>
+              <span
+                class="w-28 shrink-0 truncate rounded px-1.5 py-0.5 font-medium"
+                style="color: hsl({hue} 75% 72%); background: hsl({hue} 75% 55% / 0.12)"
+                title={titleById.get(entry.taskId) ?? entry.taskId}
+              >
+                {taskLabel(entry.taskId)}
+              </span>
+              <span class="w-[1ch] shrink-0 text-center {glyphColor}">{meta.glyph}</span>
+              <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
+            </div>
+          {/each}
+        </div>
       </div>
-      <div bind:this={feedEl} class="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-4 py-3 font-mono text-sm">
-        {#if feed.length === 0}
-          <p class="text-muted-foreground">Waiting for the agent to act…</p>
-        {/if}
-        {#each feed as entry (entry.id)}
-          {@const meta = GLYPHS[entry.type] ?? { glyph: '·', color: 'text-muted-foreground' }}
-          {@const glyphColor = entry.type === 'ci' ? ciGlyphColor(entry.status) : meta.color}
-          {@const hue = taskHue(entry.taskId)}
-          <div class="flex items-center gap-3 py-0.5" in:fly={{ y: 8, duration: 250, easing: cubicOut }}>
-            <span class="w-[4.5rem] shrink-0 text-xs tabular-nums text-muted-foreground/60">
-              {clockLabel(entry.at)}
-            </span>
-            <span
-              class="w-44 shrink-0 truncate rounded px-1.5 py-0.5 text-xs font-medium"
-              style="color: hsl({hue} 75% 72%); background: hsl({hue} 75% 55% / 0.12)"
-              title={titleById.get(entry.taskId) ?? entry.taskId}
-            >
-              {taskLabel(entry.taskId)}
-            </span>
-            <span class="w-[1ch] shrink-0 text-center {glyphColor}">{meta.glyph}</span>
-            <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
+
+      <!-- Live activity forest (runewood): a Gource-style view of every file the
+           agents touch, lit up per PR while its CI runs. -->
+      <div class="relative w-2/3 min-w-0 overflow-hidden rounded-xl border border-border/60 bg-black/30 backdrop-blur">
+        <div bind:this={forestEl} class="absolute inset-0"></div>
+        <div class="pointer-events-none absolute left-4 top-2 z-10 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground/80">
+          Activity forest
+        </div>
+        {#if !forestReady}
+          <div class="pointer-events-none absolute inset-0 grid place-items-center text-xs text-muted-foreground">
+            Spinning up the activity forest…
           </div>
-        {/each}
+        {/if}
+        {#if hoverTip}
+          <div
+            class="pointer-events-none absolute z-20 max-w-xs -translate-y-full truncate rounded bg-black/80 px-2 py-1 font-mono text-xs text-foreground shadow"
+            style="left: {hoverTip.x}px; top: {hoverTip.y}px"
+          >
+            {hoverTip.path}
+          </div>
+        {/if}
       </div>
     </section>
   </div>
