@@ -2291,6 +2291,7 @@ mod tests {
     fn sample_task() -> Task {
         Task {
             id: uuid::Uuid::nil(),
+            railway_id: uuid::Uuid::nil(),
             source_kind: crate::db::models::SourceKind::Github,
             external_id: String::new(),
             repo_id: None,

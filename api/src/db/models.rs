@@ -78,6 +78,21 @@ pub enum JiraDeployment {
     Server,
 }
 
+/// The lifecycle of a railway's workspace container.
+///
+/// Containers start lazily on first work and idle-STOP (stopped, not removed) so
+/// a restart is fast and keeps the clones plus session. `Starting` and `Stopping`
+/// are the in-flight transitions between the two resting states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "railway_state", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum RailwayState {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+}
+
 /// The kanban lane a card sits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "task_column", rename_all = "snake_case")]
@@ -311,10 +326,35 @@ pub struct EnvVarWrite {
     pub is_secret: bool,
 }
 
+/// A named parallel agent lane: its own workspace container, agent loop, Claude
+/// session, and set of repos. A repo belongs to exactly one railway for work, so
+/// a task's railway always follows its repo. The undeletable `main` railway (the
+/// single `is_main` row) holds everything by default.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Railway {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    /// The id of this railway's long-lived Claude conversation; empty until its
+    /// first run. For `main` this mirrors `settings.current_session_id`.
+    pub session_id: String,
+    /// Per-railway pause; gates work alongside the global master pause.
+    pub paused: bool,
+    pub lifecycle_state: RailwayState,
+    /// The undeletable `main` railway. Exactly one row has this set.
+    pub is_main: bool,
+    /// Fractional rank for swimlane ordering; midpoint insertion avoids reindexing.
+    pub position: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A repository the agent is allowed to clone and work in.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Repository {
     pub id: Uuid,
+    /// The railway this repo belongs to for work; always set (defaults to `main`).
+    pub railway_id: Uuid,
     pub full_name: String,
     pub clone_url: String,
     pub default_branch: String,
@@ -425,6 +465,8 @@ pub struct AutomationRule {
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Task {
     pub id: Uuid,
+    /// The railway working this card; always set and follows the task's repo.
+    pub railway_id: Uuid,
     pub source_kind: SourceKind,
     pub external_id: String,
     pub repo_id: Option<Uuid>,

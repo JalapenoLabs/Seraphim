@@ -529,6 +529,7 @@ mod tests {
     fn sample_repo() -> Repository {
         Repository {
             id: uuid::Uuid::nil(),
+            railway_id: uuid::Uuid::nil(),
             full_name: "navarrotech/seraphim".to_string(),
             clone_url: String::new(),
             default_branch: "v3.0.0".to_string(),
@@ -547,6 +548,7 @@ mod tests {
     fn sample_task() -> Task {
         Task {
             id: uuid::Uuid::nil(),
+            railway_id: uuid::Uuid::nil(),
             source_kind: SourceKind::Github,
             external_id: "57".to_string(),
             repo_id: None,

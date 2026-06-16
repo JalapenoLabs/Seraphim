@@ -14,9 +14,9 @@ use uuid::Uuid;
 use super::models::{
     AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
     EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
-    PendingQuestion, Question, QuestionOption, QuestionStatus, RepoDeletionImpact, Repository,
-    ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest,
-    TaskStatus, Turn,
+    PendingQuestion, Question, QuestionOption, QuestionStatus, Railway, RepoDeletionImpact,
+    Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskColumn,
+    TaskPullRequest, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -496,6 +496,51 @@ pub async fn replace_environment_variables(
     list_environment_variables(pool).await
 }
 
+// --- Railways ----------------------------------------------------------------
+//
+// The data layer for railways lands ahead of the loops and HTTP routes that will
+// consume it (issues #202/#203), so these read helpers are not yet called. The
+// `expect(dead_code)` markers will fire (and prompt removal) once they are wired.
+
+/// The undeletable `main` railway, which owns everything by default.
+///
+/// Exactly one row has `is_main` set (a partial unique index enforces it), so the
+/// fetch is unambiguous; it is always present after the `0036_railways` migration.
+#[expect(
+    dead_code,
+    reason = "wired up by the railway loops/routes in #202/#203"
+)]
+pub async fn get_main_railway(pool: &PgPool) -> sqlx::Result<Railway> {
+    sqlx::query_as::<_, Railway>("SELECT * FROM railways WHERE is_main")
+        .fetch_one(pool)
+        .await
+}
+
+/// Every railway, ordered for swimlane display (`main` first, then by rank).
+#[expect(
+    dead_code,
+    reason = "wired up by the railway loops/routes in #202/#203"
+)]
+pub async fn list_railways(pool: &PgPool) -> sqlx::Result<Vec<Railway>> {
+    sqlx::query_as::<_, Railway>(
+        "SELECT * FROM railways ORDER BY is_main DESC, position, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// One railway by id, or `None` if it does not exist.
+#[expect(
+    dead_code,
+    reason = "wired up by the railway loops/routes in #202/#203"
+)]
+pub async fn get_railway(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Railway>> {
+    sqlx::query_as::<_, Railway>("SELECT * FROM railways WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
 // --- Repositories ------------------------------------------------------------
 
 pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
@@ -546,10 +591,13 @@ pub async fn upsert_repository(
     issue_labels: &[String],
 ) -> sqlx::Result<Repository> {
     sqlx::query_as::<_, Repository>(
+        // New repos default to the `main` railway (issue #201). Set via subquery
+        // so the existing bound-parameter numbering is untouched.
         "INSERT INTO repositories \
-         (full_name, clone_url, default_branch, branch_template, setup_script, instructions, \
-          review_policy, enabled, sync_issues, issue_labels) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+         (railway_id, full_name, clone_url, default_branch, branch_template, setup_script, \
+          instructions, review_policy, enabled, sync_issues, issue_labels) \
+         VALUES ((SELECT id FROM railways WHERE is_main), \
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (full_name) DO UPDATE SET \
          clone_url = EXCLUDED.clone_url, \
          default_branch = EXCLUDED.default_branch, \
@@ -737,8 +785,10 @@ pub async fn upsert_issue_task(
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
-        "INSERT INTO tasks (source_kind, external_id, repo_id, title, body_snapshot, url, external_state, author_login, author_avatar_url, board_column, position) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'available', $10) \
+        // A task's railway follows its repo, falling back to `main` (issue #201).
+        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, title, body_snapshot, url, external_state, author_login, author_avatar_url, board_column, position) \
+         VALUES (COALESCE((SELECT railway_id FROM repositories WHERE id = $3), (SELECT id FROM railways WHERE is_main)), \
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, 'available', $10) \
          ON CONFLICT (repo_id, source_kind, external_id) DO UPDATE SET \
          title = EXCLUDED.title, \
          body_snapshot = EXCLUDED.body_snapshot, \
@@ -781,8 +831,10 @@ pub async fn upsert_jira_task(
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
-        "INSERT INTO tasks (source_kind, external_id, repo_id, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
-         VALUES ('jira', $1, $2, $3, $4, $5, $6, $7, $8, $9) \
+        // A task's railway follows its repo, falling back to `main` (issue #201).
+        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES (COALESCE((SELECT railway_id FROM repositories WHERE id = $2), (SELECT id FROM railways WHERE is_main)), \
+          'jira', $1, $2, $3, $4, $5, $6, $7, $8, $9) \
          ON CONFLICT (external_id) WHERE source_kind = 'jira' DO UPDATE SET \
          repo_id = EXCLUDED.repo_id, \
          jira_board_id = EXCLUDED.jira_board_id, \
@@ -1330,9 +1382,11 @@ pub async fn create_internal_task(
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
+        // A task's railway follows its primary repo, falling back to `main` (#201).
         "INSERT INTO tasks \
-           (source_kind, external_id, repo_id, target_repo_ids, title, body_snapshot, url, external_state, board_column, position) \
-         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, $3, $4, '', $5, 'available', $6) \
+           (railway_id, source_kind, external_id, repo_id, target_repo_ids, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES (COALESCE((SELECT railway_id FROM repositories WHERE id = $1), (SELECT id FROM railways WHERE is_main)), \
+           'internal', nextval('internal_ticket_seq')::text, $1, $2, $3, $4, '', $5, 'available', $6) \
          RETURNING *",
     )
     .bind(repo_ids.first().copied())
