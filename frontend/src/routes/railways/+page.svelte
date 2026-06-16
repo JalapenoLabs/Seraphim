@@ -7,9 +7,11 @@
   // lane independently of the global master pause, starts or stops a lane's
   // container, deletes a lane, and assigns repos between lanes.
   import type { Railway, RailwayState, Repository, Settings } from '$lib/types'
+  import type { DndEvent } from 'svelte-dnd-action'
 
   import { onMount } from 'svelte'
   import { toast } from 'svelte-sonner'
+  import { dndzone } from 'svelte-dnd-action'
 
   import {
     assignRepoToRailway,
@@ -27,7 +29,6 @@
     updateSettings
   } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
-  import * as Select from '$lib/components/ui/select'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -38,6 +39,13 @@
   let settings = $state<Settings | null>(null)
   let repos = $state<Repository[]>([])
   let railways = $state<Railway[]>([])
+
+  // Repos grouped into one drag-and-drop bucket per railway, so a repo can be
+  // dragged from one lane onto another to reassign it (issue #208). Rebuilt from
+  // `repos` imperatively (never reactively) so it never fights svelte-dnd-action
+  // mid-drag; a settled drag reconciles back to this from the server's truth.
+  let reposByRailway = $state<Record<string, Repository[]>>({})
+  const FLIP_MS = 150
 
   // The create-lane form.
   let newRailwayName = $state('')
@@ -105,6 +113,7 @@
       newRailwayName = ''
       newRailwayDescription = ''
       await refreshRailways()
+      groupRepos()
       toast.success(`Created the ${name} railway.`)
     } catch (error) {
       toast.error(await extractApiError(error, 'Could not create the railway.'))
@@ -175,6 +184,7 @@
       await refreshRailways()
       // Repos fall back to main, so refresh their lane assignments too.
       repos = await listRepos()
+      groupRepos()
       toast.success(`Deleted the ${railway.name} railway.`)
     } catch (error) {
       toast.error(await extractApiError(error, 'Could not delete the railway.'))
@@ -183,20 +193,57 @@
     }
   }
 
-  // Move a repo (and all its tasks) onto a lane. The backend blocks this while a
-  // live turn is working the repo on its current lane and returns the reason,
-  // which we surface in a toast.
-  async function assignRepo(repo: Repository, railwayId: string) {
-    if (repo.railway_id === railwayId) {
+  function railwayName(railwayId: string): string {
+    return railways.find((railway) => railway.id === railwayId)?.name ?? 'the railway'
+  }
+
+  // Rebuilds the per-railway repo buckets from `repos`. Every railway gets a
+  // bucket (so empty lanes are still drop targets); a repo whose lane no longer
+  // exists falls back to main. Called after loads and after a settled drag, never
+  // during one.
+  function groupRepos() {
+    const grouped: Record<string, Repository[]> = {}
+    for (const railway of railways) {
+      grouped[railway.id] = []
+    }
+    const mainId = railways.find((railway) => railway.is_main)?.id
+    for (const repo of repos) {
+      const laneId = grouped[repo.railway_id] ? repo.railway_id : mainId
+      if (laneId && grouped[laneId]) {
+        grouped[laneId].push(repo)
+      }
+    }
+    reposByRailway = grouped
+  }
+
+  // svelte-dnd-action mutates the dragged-over bucket live; mirror it into state.
+  function handleRepoConsider(railwayId: string, event: CustomEvent<DndEvent<Repository>>) {
+    reposByRailway[railwayId] = event.detail.items
+  }
+
+  // A repo dropped onto a lane: reassign it (and its tasks) to that railway. The
+  // backend blocks the move while a live turn is working the repo on its current
+  // lane and returns the reason, which we surface in a toast. Either way we
+  // reconcile the buckets from the server's truth, so a rejected drop snaps back.
+  async function handleRepoFinalize(railwayId: string, event: CustomEvent<DndEvent<Repository>>) {
+    reposByRailway[railwayId] = event.detail.items
+    const movedId = event.detail.info.id
+    const moved = event.detail.items.find((repo) => repo.id === movedId)
+    // Finalize fires on both the source and destination zones; only the
+    // destination holds the dragged repo. A same-lane drop is just a reorder
+    // (repos have no order within a lane), so there is nothing to persist.
+    if (!moved || moved.railway_id === railwayId) {
+      groupRepos()
       return
     }
     try {
-      const updated = await assignRepoToRailway(railwayId, repo.id)
+      const updated = await assignRepoToRailway(railwayId, moved.id)
       repos = repos.map((existing) => (existing.id === updated.id ? updated : existing))
-      const laneName = railways.find((railway) => railway.id === railwayId)?.name ?? 'the railway'
-      toast.success(`Moved ${repo.full_name} to ${laneName}.`)
+      toast.success(`Moved ${moved.full_name} to ${railwayName(railwayId)}.`)
     } catch (error) {
       toast.error(await extractApiError(error, 'Could not move the repo to that railway.'))
+    } finally {
+      groupRepos()
     }
   }
 
@@ -217,6 +264,7 @@
     settings = await getSettings()
     repos = await listRepos()
     setRailways(await listRailways())
+    groupRepos()
   }
 
   onMount(load)
@@ -379,40 +427,63 @@
         </div>
       {/each}
 
-      <!-- Repository to railway assignment. Each repo lists its current lane and a
-           picker to move it (and its tasks) to another. -->
+      <!-- Repository to railway assignment. One drop zone per lane holds that
+           lane's repos; drag a repo card to another lane to move it (and its
+           tasks). The move calls the assign API and respects its block-while-
+           working guard, surfacing the reason on rejection (issue #208). -->
       <div class="space-y-3 border-t border-border pt-5">
         <div>
           <h3 class="text-sm font-semibold">Repository assignments</h3>
           <p class="mt-1 text-sm text-muted-foreground">
-            Each repository works on exactly one railway. Moving a repo moves all of its tasks too.
-            A move is blocked while the agent is mid-turn on that repo's current lane.
+            Each repository works on exactly one railway. Drag a repo from one lane to another to
+            move it (and all of its tasks). A move is blocked while the agent is mid-turn on that
+            repo's current lane.
           </p>
         </div>
         {#if repos.length === 0}
           <p class="text-sm text-muted-foreground">No repositories configured yet.</p>
         {:else}
-          <div class="space-y-2">
-            {#each repos as repo (repo.id)}
-              {@const currentLane =
-                railways.find((railway) => railway.id === repo.railway_id)?.name ?? 'main'}
-              <div class="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-2.5">
-                <div class="min-w-0">
-                  <div class="truncate text-sm font-medium">{repo.full_name}</div>
-                  <div class="text-xs text-muted-foreground">On <strong>{currentLane}</strong></div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            {#each railways as railway (railway.id)}
+              {@const laneRepos = reposByRailway[railway.id] ?? []}
+              <div class="rounded-lg border border-border">
+                <div class="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+                  <span class="truncate text-sm font-medium">
+                    {railway.name}
+                    {#if railway.is_main}
+                      <span class="text-xs font-normal text-muted-foreground">(default)</span>
+                    {/if}
+                  </span>
+                  <span class="text-xs tabular-nums text-muted-foreground">{laneRepos.length}</span>
                 </div>
-                <Select.Root
-                  type="single"
-                  value={repo.railway_id}
-                  onValueChange={(value) => assignRepo(repo, value)}
-                >
-                  <Select.Trigger class="w-44">{currentLane}</Select.Trigger>
-                  <Select.Content>
-                    {#each railways as railway}
-                      <Select.Item value={railway.id} label={railway.name}>{railway.name}</Select.Item>
+                <div class="relative">
+                  <div
+                    class="flex min-h-[3.5rem] flex-col gap-2 p-2"
+                    use:dndzone={{
+                      items: laneRepos,
+                      type: 'railway-repo',
+                      flipDurationMs: FLIP_MS,
+                      dropTargetStyle: {},
+                      dropTargetClasses: ['ring-2', 'ring-primary/50', 'rounded-lg']
+                    }}
+                    onconsider={(event) => handleRepoConsider(railway.id, event)}
+                    onfinalize={(event) => handleRepoFinalize(railway.id, event)}
+                  >
+                    {#each laneRepos as repo (repo.id)}
+                      <div
+                        class="cursor-grab truncate rounded-md border border-border bg-card px-2.5 py-1.5 text-sm shadow-sm active:cursor-grabbing"
+                        title={repo.full_name}
+                      >
+                        {repo.full_name}
+                      </div>
                     {/each}
-                  </Select.Content>
-                </Select.Root>
+                  </div>
+                  {#if laneRepos.length === 0}
+                    <p class="pointer-events-none absolute inset-0 grid place-items-center text-xs text-muted-foreground">
+                      Drop a repo here
+                    </p>
+                  {/if}
+                </div>
               </div>
             {/each}
           </div>
