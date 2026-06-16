@@ -2,7 +2,9 @@
   // A compact, single-row stats strip for one railway swimlane: context fill,
   // cost, total tokens, and time worked. Polls the railway stats endpoint as a
   // baseline and refetches on the throttled board `usage` SSE tick so the numbers
-  // tick up live during a turn. The shared subscription usage gauge is NOT shown
+  // tick up live during a turn. The board `usage` nudge comes from the single,
+  // shared board-stream subscription (so a board with many lanes holds one
+  // connection, not one per lane). The shared subscription usage gauge is NOT shown
   // here (it is global, rendered once in the board's top bar); this strip is only
   // the per-railway figures.
   import type { Stats } from '$lib/types'
@@ -10,6 +12,7 @@
   import { onMount, onDestroy } from 'svelte'
 
   import { getRailwayStats } from '$lib/api'
+  import { subscribeBoardStream } from '$lib/boardStream'
 
   let { railwayId }: { railwayId: string } = $props()
 
@@ -17,7 +20,7 @@
   let now = $state(Date.now())
   let poll: ReturnType<typeof setInterval> | null = null
   let ticker: ReturnType<typeof setInterval> | null = null
-  let usageStream: EventSource | null = null
+  let unsubscribe: (() => void) | null = null
 
   async function refresh() {
     try {
@@ -32,15 +35,15 @@
     poll = setInterval(refresh, 5000)
     ticker = setInterval(() => (now = Date.now()), 1000)
     // The board stream nudges `usage` on the throttled mid-turn tick; refetch so
-    // the active lane's counters move while the agent generates.
-    usageStream = new EventSource('/api/v1/board/stream')
-    usageStream.addEventListener('usage', () => refresh())
+    // the active lane's counters move while the agent generates. One shared
+    // connection fans this out to every lane.
+    unsubscribe = subscribeBoardStream({ usage: refresh })
   })
 
   onDestroy(() => {
     if (poll) clearInterval(poll)
     if (ticker) clearInterval(ticker)
-    usageStream?.close()
+    unsubscribe?.()
   })
 
   // Worked time counts up live: the persisted total plus any in-progress turn.

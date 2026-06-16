@@ -10,6 +10,7 @@
   import { ChevronDown, ArrowUp, ArrowDown } from '@lucide/svelte'
 
   import { getComposeStats, getGlobalStats, getTaskStats } from '$lib/api'
+  import { subscribeBoardStream } from '$lib/boardStream'
 
   // Scope: a task's stats (`taskId`), the compose assistant's (`compose`), or the
   // global board totals (neither set).
@@ -20,7 +21,11 @@
   let now = $state(Date.now())
   let poll: ReturnType<typeof setInterval> | null = null
   let ticker: ReturnType<typeof setInterval> | null = null
+  // The task and compose scopes each open their own dedicated stream (those are
+  // per-scope endpoints, not the board stream); the board scope instead shares the
+  // single board-stream subscription so the board page holds one connection total.
   let usageStream: EventSource | null = null
+  let unsubscribe: (() => void) | null = null
 
   async function refresh() {
     try {
@@ -43,22 +48,25 @@
     poll = setInterval(refresh, 5000)
     ticker = setInterval(() => (now = Date.now()), 1000)
 
-    // Each scope refetches off its own stream: the compose stream nudges on
-    // `compose_changed`, a task/board stream on the throttled `usage` tick.
-    const streamUrl = compose
-      ? '/api/v1/compose/stream'
-      : taskId
-        ? `/api/v1/tasks/${taskId}/stream`
-        : '/api/v1/board/stream'
-    usageStream = new EventSource(streamUrl)
-    usageStream.addEventListener('usage', () => refresh())
-    usageStream.addEventListener('compose_changed', () => refresh())
+    // Each scope refetches off the right stream: the compose stream nudges on
+    // `compose_changed`, the task stream on its `usage` tick, and the global board
+    // scope on the shared board-stream `usage` tick (one connection for the page).
+    if (compose) {
+      usageStream = new EventSource('/api/v1/compose/stream')
+      usageStream.addEventListener('compose_changed', () => refresh())
+    } else if (taskId) {
+      usageStream = new EventSource(`/api/v1/tasks/${taskId}/stream`)
+      usageStream.addEventListener('usage', () => refresh())
+    } else {
+      unsubscribe = subscribeBoardStream({ usage: refresh })
+    }
   })
 
   onDestroy(() => {
     if (poll) clearInterval(poll)
     if (ticker) clearInterval(ticker)
     usageStream?.close()
+    unsubscribe?.()
   })
 
   // Worked time counts up live: the persisted total plus the elapsed time of any

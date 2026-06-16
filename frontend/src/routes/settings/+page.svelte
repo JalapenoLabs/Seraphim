@@ -295,6 +295,19 @@
   // buttons can disable without freezing the whole panel.
   let railwayBusyId = $state<string | null>(null)
   let railwayToDelete = $state<Railway | null>(null)
+  let railwayIdleSavedAt = $state<string | null>(null)
+
+  // Persists the lane idle-stop timeout (minutes a non-main railway may sit idle
+  // before its container is stopped). 0 or less disables idle-stopping.
+  async function saveRailwayIdleTimeout() {
+    if (!settings) {
+      return
+    }
+    settings = await updateSettings({
+      railway_idle_timeout_minutes: settings.railway_idle_timeout_minutes
+    })
+    railwayIdleSavedAt = new Date().toLocaleTimeString()
+  }
 
   const RAILWAY_STATE_LABELS = {
     stopped: 'Stopped',
@@ -1177,6 +1190,37 @@
               The global pause from the board. While on, no railway pulls new work. Each railway also
               has its own pause below; either one stops that lane.
             </span>
+          </div>
+        </div>
+
+        <!-- Idle-stop timeout: how long a non-main lane may sit with no work
+             before its container is stopped to free memory. Applies to every
+             non-main lane; main is the always-on compose workspace. -->
+        <div class="space-y-3 rounded-md border border-border p-3">
+          <div class="space-y-1.5">
+            <Label for="railway-idle-timeout">Idle-stop timeout</Label>
+            <div class="flex items-center gap-2">
+              <Input
+                id="railway-idle-timeout"
+                type="number"
+                min="0"
+                class="w-24"
+                bind:value={settings.railway_idle_timeout_minutes}
+              />
+              <span class="text-sm text-muted-foreground">minutes of no work</span>
+            </div>
+            <p class="text-xs leading-relaxed text-muted-foreground">
+              After this many minutes with no work, a non-main lane's container is stopped (its clones
+              and Claude session are kept, so a restart is fast). Set to <strong>0</strong> to never
+              idle-stop and leave lanes running until stopped by hand. The <strong>main</strong> lane
+              is never idle-stopped.
+            </p>
+          </div>
+          <div class="flex items-center gap-3">
+            <Button size="sm" onclick={saveRailwayIdleTimeout}>Save idle timeout</Button>
+            {#if railwayIdleSavedAt}
+              <span class="text-sm text-muted-foreground">Saved at {railwayIdleSavedAt}</span>
+            {/if}
           </div>
         </div>
 

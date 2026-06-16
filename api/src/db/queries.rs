@@ -36,8 +36,8 @@ const SETTINGS_COLUMNS: &str =
      availability_enabled, availability_timezone, availability_windows, \
      availability_skip_dates, network_access_level, network_access_domains, \
      network_access_include_defaults, usage_limit_pause_enabled, \
-     usage_limit_threshold, usage_paused_until, post_thoughts_enabled, \
-     close_issue_on_done, \
+     usage_limit_threshold, usage_paused_until, railway_idle_timeout_minutes, \
+     post_thoughts_enabled, close_issue_on_done, \
      jira_enabled, jira_deployment, jira_base_url, jira_email, \
      jira_assigned_to_me_only, jira_account_id, \
      (jira_api_token <> '') AS jira_token_set, \
@@ -79,6 +79,7 @@ pub async fn update_settings(
     network_access_include_defaults: Option<bool>,
     usage_limit_pause_enabled: Option<bool>,
     usage_limit_threshold: Option<i32>,
+    railway_idle_timeout_minutes: Option<i32>,
     post_thoughts_enabled: Option<bool>,
     jira_enabled: Option<bool>,
     jira_deployment: Option<JiraDeployment>,
@@ -109,15 +110,17 @@ pub async fn update_settings(
          usage_limit_pause_enabled = \
              COALESCE($15, usage_limit_pause_enabled), \
          usage_limit_threshold = COALESCE($16, usage_limit_threshold), \
-         post_thoughts_enabled = COALESCE($17, post_thoughts_enabled), \
-         jira_enabled = COALESCE($18, jira_enabled), \
-         jira_deployment = COALESCE($19, jira_deployment), \
-         jira_base_url = COALESCE($20, jira_base_url), \
-         jira_email = COALESCE($21, jira_email), \
-         jira_assigned_to_me_only = COALESCE($22, jira_assigned_to_me_only), \
-         close_issue_on_done = COALESCE($23, close_issue_on_done), \
-         attention_sound_enabled = COALESCE($24, attention_sound_enabled), \
-         completion_sound_enabled = COALESCE($25, completion_sound_enabled), \
+         railway_idle_timeout_minutes = \
+             COALESCE($17, railway_idle_timeout_minutes), \
+         post_thoughts_enabled = COALESCE($18, post_thoughts_enabled), \
+         jira_enabled = COALESCE($19, jira_enabled), \
+         jira_deployment = COALESCE($20, jira_deployment), \
+         jira_base_url = COALESCE($21, jira_base_url), \
+         jira_email = COALESCE($22, jira_email), \
+         jira_assigned_to_me_only = COALESCE($23, jira_assigned_to_me_only), \
+         close_issue_on_done = COALESCE($24, close_issue_on_done), \
+         attention_sound_enabled = COALESCE($25, attention_sound_enabled), \
+         completion_sound_enabled = COALESCE($26, completion_sound_enabled), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -138,6 +141,7 @@ pub async fn update_settings(
     .bind(network_access_include_defaults)
     .bind(usage_limit_pause_enabled)
     .bind(usage_limit_threshold)
+    .bind(railway_idle_timeout_minutes)
     .bind(post_thoughts_enabled)
     .bind(jira_enabled)
     .bind(jira_deployment)

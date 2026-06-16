@@ -104,6 +104,8 @@ async fn bootstrap_settings(db: &sqlx::PgPool, config: &Config) -> Result<()> {
             None,
             None,
             None,
+            // railway_idle_timeout_minutes: settings-only, keeps its DB default (30).
+            None,
             None,
             // Jira connection (enabled, deployment, base URL, email): configured
             // only via the settings UI, never seeded from env.

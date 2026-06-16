@@ -200,6 +200,9 @@ export type Settings = {
   usage_limit_threshold: number
   // While set and in the future, the agent is auto-paused for usage (ISO string).
   usage_paused_until: string | null
+  // Minutes a non-main railway may sit idle before its container is stopped.
+  // 0 or less disables idle-stopping; the default is 30.
+  railway_idle_timeout_minutes: number
   // Post a per-turn summary of the agent's reasoning back to the source issue.
   post_thoughts_enabled: boolean
   // Close the linked GitHub issue (state_reason "completed") when a task

@@ -43,6 +43,10 @@ pub struct SettingsExport {
     pub usage_limit_pause_enabled: bool,
     #[serde(default = "default_usage_threshold")]
     pub usage_limit_threshold: i32,
+    // Default so bundles exported before the railway idle-timeout setting still
+    // import; matches the database default (30 minutes).
+    #[serde(default = "default_railway_idle_timeout")]
+    pub railway_idle_timeout_minutes: i32,
     #[serde(default)]
     pub post_thoughts_enabled: bool,
     // Matches the database default (TRUE) so older bundles keep closing issues.
@@ -87,6 +91,11 @@ fn default_true() -> bool {
 /// Matches the database default usage-limit threshold (80%).
 fn default_usage_threshold() -> i32 {
     80
+}
+
+/// Matches the database default railway idle-stop timeout (30 minutes).
+fn default_railway_idle_timeout() -> i32 {
+    30
 }
 
 /// Matches the database default (`cloud`) so older bundles import sensibly.
@@ -139,6 +148,7 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
             network_access_include_defaults: settings.network_access_include_defaults,
             usage_limit_pause_enabled: settings.usage_limit_pause_enabled,
             usage_limit_threshold: settings.usage_limit_threshold,
+            railway_idle_timeout_minutes: settings.railway_idle_timeout_minutes,
             post_thoughts_enabled: settings.post_thoughts_enabled,
             close_issue_on_done: settings.close_issue_on_done,
             attention_sound_enabled: settings.attention_sound_enabled,
@@ -194,6 +204,7 @@ pub async fn import(
         Some(settings.network_access_include_defaults),
         Some(settings.usage_limit_pause_enabled),
         Some(settings.usage_limit_threshold),
+        Some(settings.railway_idle_timeout_minutes),
         Some(settings.post_thoughts_enabled),
         Some(settings.jira_enabled),
         Some(settings.jira_deployment),

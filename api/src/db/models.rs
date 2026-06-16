@@ -232,6 +232,10 @@ pub struct Settings {
     /// Runtime state: while set and in the future, the agent is auto-paused for
     /// usage and pulls no new work; cleared once the limit window resets.
     pub usage_paused_until: Option<DateTime<Utc>>,
+    /// Minutes a non-`main` railway may sit idle before the reaper stops its
+    /// container. `<= 0` disables idle-stopping (lanes stay running until stopped
+    /// by hand); the default of 30 preserves the historical behavior.
+    pub railway_idle_timeout_minutes: i32,
     /// Post a per-turn summary of the agent's reasoning back to the source issue.
     pub post_thoughts_enabled: bool,
     /// Close the linked GitHub issue (`state_reason: "completed"`) when a task

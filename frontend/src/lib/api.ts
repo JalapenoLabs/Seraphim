@@ -377,6 +377,7 @@ export type UpdateSettingsRequest = {
   network_access_include_defaults?: boolean
   usage_limit_pause_enabled?: boolean
   usage_limit_threshold?: number
+  railway_idle_timeout_minutes?: number
   post_thoughts_enabled?: boolean
   close_issue_on_done?: boolean
   jira_enabled?: boolean

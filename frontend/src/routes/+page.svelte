@@ -40,6 +40,7 @@
     syncNow
   } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
+  import { subscribeBoardStream } from '$lib/boardStream'
   import { type SortKey, sortTasks, loadSort, saveSort } from '$lib/columnSort'
   import BulkActionBar from '$lib/components/BulkActionBar.svelte'
   import Card from '$lib/components/Card.svelte'
@@ -86,7 +87,9 @@
     return columnsByRailway[railwayId] ?? emptyColumns()
   }
 
-  let eventSource: EventSource | null = null
+  // Unsubscribe from the shared board stream (the single EventSource the page, its
+  // stats banner, and every lane stats strip all fan out from).
+  let unsubscribeBoard: (() => void) | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
   let repoNames = $state<Record<string, string>>({})
 
@@ -512,13 +515,13 @@
     getNotepad()
       .then((result) => (notepad = result.content))
       .catch((error) => console.debug('failed to load notepad', error))
-    // Live board: the API ticks this stream whenever anything changes.
-    eventSource = new EventSource('/api/v1/board/stream')
-    eventSource.addEventListener('board', () => load())
+    // Live board: the API ticks this stream whenever anything changes. The same
+    // single shared connection feeds the stats banner and lane stats strips.
+    unsubscribeBoard = subscribeBoardStream({ board: () => load() })
   })
 
   onDestroy(() => {
-    eventSource?.close()
+    unsubscribeBoard?.()
     // Flush a pending notepad edit so leaving the page doesn't drop it.
     if (notepadTimer) {
       void saveNotepad()

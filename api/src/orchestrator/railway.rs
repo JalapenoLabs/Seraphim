@@ -53,15 +53,28 @@ use crate::state::AppState;
 /// working within a few seconds, without polling so tightly it churns the DB.
 const SUPERVISE_POLL: Duration = Duration::from_secs(5);
 
-/// How long a non-`main` railway may sit with no work before the reaper idle-STOPS
-/// its container.
+/// Default idle window before the reaper idle-STOPS a non-`main` railway's
+/// container, used when the operator has not set `railway_idle_timeout_minutes`
+/// (the column default is also 30, so this is the value a fresh DB carries).
 ///
 /// Long enough that a lane working a batch of related issues is not torn down
 /// between tasks (provisioning a fresh start, even with the clones cached, costs a
 /// config-repo pull and setup re-run), short enough that an idle lane frees its
 /// container's memory within the hour. The stop preserves the `/workspace` volume,
 /// so the restart only re-runs setup, never re-clones. `main` is never reaped.
-const RAILWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_RAILWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Resolves the configured `railway_idle_timeout_minutes` into an idle window.
+///
+/// `None` means "never idle-stop": a `minutes <= 0` setting disables the reaper
+/// for every lane, leaving them running until stopped by hand. A positive value is
+/// taken verbatim. Pure, so the fallback semantics are unit-testable without a DB.
+fn idle_timeout(minutes: i32) -> Option<Duration> {
+    if minutes <= 0 {
+        return None;
+    }
+    Some(Duration::from_secs(minutes as u64 * 60))
+}
 
 /// How often the reaper scans for idle non-`main` railways to stop. Coarse: the
 /// idle timeout is in tens of minutes, so a minute of latency on the stop is fine.
@@ -340,25 +353,32 @@ fn reconcile<F>(
 /// Whether a non-`main` railway's container should be idle-stopped now.
 ///
 /// A railway is reapable when its container is up, no turn is running on it, and
-/// its most recent task activity is older than [`RAILWAY_IDLE_TIMEOUT`] (or it has
-/// no activity at all, e.g. a lane that was started but never worked anything).
-/// `main` and a railway that is not `running` are never reaped. Pure, taking the
-/// elapsed idle time as a `Duration`, so the decision is unit-testable without a
-/// clock or a database.
+/// its most recent task activity is older than the configured idle window (or it
+/// has no activity at all, e.g. a lane that was started but never worked anything).
+/// `main` and a railway that is not `running` are never reaped, and a `timeout` of
+/// `None` (the operator disabled idle-stopping) spares every lane. Pure, taking the
+/// elapsed idle time and the resolved window as `Duration`s, so the decision is
+/// unit-testable without a clock or a database.
 fn should_reap(
     is_main: bool,
     lifecycle_state: RailwayState,
     has_running_turn: bool,
     idle_for: Duration,
+    timeout: Option<Duration>,
 ) -> bool {
     if is_main || lifecycle_state != RailwayState::Running || has_running_turn {
         return false;
     }
-    idle_for >= RAILWAY_IDLE_TIMEOUT
+    match timeout {
+        Some(timeout) => idle_for >= timeout,
+        None => false,
+    }
 }
 
 /// The idle-stop reaper: a single global loop that stops the container of any
-/// non-`main` railway that has had no work for [`RAILWAY_IDLE_TIMEOUT`].
+/// non-`main` railway that has had no work for the configured idle window
+/// (`settings.railway_idle_timeout_minutes`, defaulting to
+/// [`DEFAULT_RAILWAY_IDLE_TIMEOUT`]; set to 0 to disable idle-stopping).
 ///
 /// Stopping (not removing) keeps the railway's `/workspace` volume, so the next
 /// [`RailwayHandle::ensure_running`] only re-runs setup, never re-clones. `main` is
@@ -375,6 +395,19 @@ pub async fn reaper(state: AppState) {
 
 /// One reaper pass: idle-stop every eligible non-`main` railway.
 async fn reap_idle_railways(state: &AppState) -> eyre::Result<()> {
+    // The idle window is operator-tunable; read it once per pass so a change in the
+    // settings UI takes effect on the next scan. `None` means idle-stopping is off.
+    let timeout = idle_timeout(
+        queries::get_settings(&state.db)
+            .await?
+            .railway_idle_timeout_minutes,
+    );
+    // Nothing to do this pass if idle-stopping is disabled; skip the per-railway
+    // queries entirely.
+    let Some(timeout) = timeout else {
+        return Ok(());
+    };
+
     let now = chrono::Utc::now();
     for railway in queries::list_railways(&state.db).await? {
         if railway.is_main {
@@ -385,13 +418,14 @@ async fn reap_idle_railways(state: &AppState) -> eyre::Result<()> {
         // never worked is reaped once it crosses the timeout from when we noticed.
         let idle_for = match queries::railway_last_activity(&state.db, railway.id).await? {
             Some(last) => (now - last).to_std().unwrap_or(Duration::ZERO),
-            None => RAILWAY_IDLE_TIMEOUT,
+            None => timeout,
         };
         if should_reap(
             railway.is_main,
             railway.lifecycle_state,
             has_running_turn,
             idle_for,
+            Some(timeout),
         ) {
             let handle = RailwayHandle::new(state, &railway);
             if let Err(error) = handle.stop(state).await {
@@ -537,7 +571,8 @@ mod tests {
             true,
             RailwayState::Running,
             false,
-            RAILWAY_IDLE_TIMEOUT * 10,
+            DEFAULT_RAILWAY_IDLE_TIMEOUT * 10,
+            Some(DEFAULT_RAILWAY_IDLE_TIMEOUT),
         ));
     }
 
@@ -548,13 +583,15 @@ mod tests {
             false,
             RailwayState::Running,
             false,
-            RAILWAY_IDLE_TIMEOUT,
+            DEFAULT_RAILWAY_IDLE_TIMEOUT,
+            Some(DEFAULT_RAILWAY_IDLE_TIMEOUT),
         ));
         assert!(should_reap(
             false,
             RailwayState::Running,
             false,
-            RAILWAY_IDLE_TIMEOUT * 2,
+            DEFAULT_RAILWAY_IDLE_TIMEOUT * 2,
+            Some(DEFAULT_RAILWAY_IDLE_TIMEOUT),
         ));
     }
 
@@ -565,14 +602,16 @@ mod tests {
             false,
             RailwayState::Running,
             true,
-            RAILWAY_IDLE_TIMEOUT * 5,
+            DEFAULT_RAILWAY_IDLE_TIMEOUT * 5,
+            Some(DEFAULT_RAILWAY_IDLE_TIMEOUT),
         ));
         // Not yet idle long enough: leave it up.
         assert!(!should_reap(
             false,
             RailwayState::Running,
             false,
-            RAILWAY_IDLE_TIMEOUT / 2,
+            DEFAULT_RAILWAY_IDLE_TIMEOUT / 2,
+            Some(DEFAULT_RAILWAY_IDLE_TIMEOUT),
         ));
         // Already stopped / mid-transition: nothing to reap.
         for state in [
@@ -580,7 +619,36 @@ mod tests {
             RailwayState::Starting,
             RailwayState::Stopping,
         ] {
-            assert!(!should_reap(false, state, false, RAILWAY_IDLE_TIMEOUT * 5));
+            assert!(!should_reap(
+                false,
+                state,
+                false,
+                DEFAULT_RAILWAY_IDLE_TIMEOUT * 5,
+                Some(DEFAULT_RAILWAY_IDLE_TIMEOUT),
+            ));
         }
+    }
+
+    #[test]
+    fn idle_timeout_resolves_minutes_and_disable() {
+        // A positive minutes value becomes that many minutes verbatim.
+        assert_eq!(idle_timeout(30), Some(Duration::from_secs(30 * 60)));
+        assert_eq!(idle_timeout(1), Some(Duration::from_secs(60)));
+        // Zero or negative disables idle-stopping entirely.
+        assert_eq!(idle_timeout(0), None);
+        assert_eq!(idle_timeout(-5), None);
+    }
+
+    #[test]
+    fn reaper_disabled_spares_every_lane() {
+        // With idle-stopping disabled (`None`), even a long-idle, running, turn-free
+        // non-`main` railway is left up: the operator opted out of reaping.
+        assert!(!should_reap(
+            false,
+            RailwayState::Running,
+            false,
+            DEFAULT_RAILWAY_IDLE_TIMEOUT * 100,
+            None,
+        ));
     }
 }
