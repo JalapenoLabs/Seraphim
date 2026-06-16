@@ -10,6 +10,7 @@
 //! completion before the next is considered, so turns never overlap.
 
 mod availability;
+mod ci_watch;
 mod network;
 mod prompt;
 mod provision;
@@ -129,6 +130,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(provision_on_startup(state.clone()));
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
+    tokio::spawn(ci_watch::ci_watch_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
     tokio::spawn(subscription::token_loop(state.clone()));
     tokio::spawn(agent_loop(state));
@@ -552,6 +554,35 @@ pub struct ResetSummary {
     pub issue_reopened: bool,
 }
 
+/// Whether a card is the one the agent is *actively* running a turn on right now.
+///
+/// The agent loop is single-threaded, so at most one task is ever in `InProgress`
+/// with a live (`working`/`preparing`) status, and that task is necessarily the
+/// turn currently streaming. A task parked awaiting input, sitting in review, or
+/// queued is therefore never matched. Pure, so callers deciding whether to
+/// interrupt the agent can be unit-tested.
+pub fn is_active_turn(column: TaskColumn, status: TaskStatus) -> bool {
+    column == TaskColumn::InProgress
+        && matches!(status, TaskStatus::Working | TaskStatus::Preparing)
+}
+
+/// Stops the agent's in-flight turn immediately, abandoning whatever it was doing.
+///
+/// Used both by a per-task reset and when the operator pulls the worked card out
+/// from under the agent (issue #172). It bumps the reset epoch so the dying turn
+/// yields its post-turn handling (it won't move the card or persist its session),
+/// kills the orphaned `claude -p` process, and clears the shared session and live
+/// usage, since a turn killed mid-stream can leave the resumable conversation
+/// inconsistent for the next task. The caller decides *when* to interrupt; the
+/// single-threaded loop guarantees the live turn is unique (see [`is_active_turn`]).
+pub async fn stop_active_turn(state: &AppState) -> Result<()> {
+    state.bump_reset_epoch();
+    kill_agent_process(state).await;
+    queries::set_current_session_id(&state.db, None).await?;
+    state.set_live_usage(None);
+    Ok(())
+}
+
 /// Hard-resets a single stuck task to a clean slate (issue #72): if the agent is
 /// mid-turn on it, that turn is stopped; its pull request is closed, its branch
 /// deleted from the remote and the workspace, a closed source issue is reopened,
@@ -571,17 +602,8 @@ pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSu
     // Stop the agent only if it is *actively* running a turn on THIS task. The
     // loop is single-threaded, so the live turn is unique; a task merely parked
     // awaiting input, or sitting in review, is not it and must not be disturbed.
-    // Interrupting the live turn bumps the reset epoch (so the turn abandons its
-    // post-turn handling rather than re-moving the card), kills the Claude
-    // process, and clears the shared session, since a turn killed mid-stream can
-    // leave the resumable conversation inconsistent for the next task.
-    let actively_working = task.board_column == TaskColumn::InProgress
-        && matches!(task.status, TaskStatus::Working | TaskStatus::Preparing);
-    if actively_working {
-        state.bump_reset_epoch();
-        kill_agent_process(state).await;
-        queries::set_current_session_id(&state.db, None).await?;
-        state.set_live_usage(None);
+    if is_active_turn(task.board_column, task.status) {
+        stop_active_turn(state).await?;
         summary.interrupted_agent = true;
         info!(task_id = %task.id, "stopped the agent's in-flight turn for the reset");
     }
@@ -803,6 +825,24 @@ async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
     }
 }
 
+/// Resolves a ticket's target repos (priority order, the first being the primary)
+/// into `Repository` rows for the prompt, skipping any that have since been
+/// deleted. Best-effort: a lookup error is logged and dropped rather than failing
+/// the turn, since the focus repo is always passed to the prompt separately.
+async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
+    let mut repos = Vec::new();
+    for repo_id in &task.target_repo_ids.0 {
+        match queries::get_repository(&state.db, *repo_id).await {
+            Ok(Some(repo)) => repos.push(repo),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, repo_id = %repo_id, "failed to load a target repo for the prompt");
+            }
+        }
+    }
+    repos
+}
+
 /// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR.
 async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
     info!(task_id = %task.id, title = %task.title, resume, "working task");
@@ -860,7 +900,8 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         prompt
     } else {
         let comments = fetch_issue_comments(state, &repo, &task).await;
-        prompt::build(&settings, &repo, &task, &branch, &comments)
+        let target_repos = load_target_repos(state, &task).await;
+        prompt::build(&settings, &repo, &task, &branch, &comments, &target_repos)
     };
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
@@ -1409,10 +1450,17 @@ async fn stream_turn(
         let mut payload = event.raw.clone();
         scrubber.scrub_value(&mut payload);
         queries::append_event(&state.db, turn.id, seq, label, payload.clone()).await?;
-        state.notify_task(
-            task.id,
-            serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
-        );
+        // Rate-limit notices are a stats-only signal: they feed the usage gauge's
+        // fallback via `latest_rate_limit`, but they carry no actionable detail, so
+        // they are deliberately kept out of the live activity stream (and out of
+        // `list_events_for_task`) rather than cluttering the activity log and the
+        // watch feed (issue #182). They are still persisted for the gauge.
+        if label != "rate_limit" {
+            state.notify_task(
+                task.id,
+                serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
+            );
+        }
         queries::set_task_status(&state.db, task.id, TaskStatus::Working)
             .await
             .ok();
@@ -2230,6 +2278,7 @@ mod tests {
             source_kind: crate::db::models::SourceKind::Github,
             external_id: String::new(),
             repo_id: None,
+            target_repo_ids: sqlx::types::Json(Vec::new()),
             jira_board_id: None,
             title: String::new(),
             body_snapshot: String::new(),

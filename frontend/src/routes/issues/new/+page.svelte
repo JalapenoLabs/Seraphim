@@ -7,31 +7,46 @@
 
   import { createInternalTask, listRepos } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
-  import * as Select from '$lib/components/ui/select'
   import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
   import { Switch } from '$lib/components/ui/switch'
+  import RepoMultiSelect from '$lib/components/RepoMultiSelect.svelte'
 
-  // The sentinel value for "no repo": Select needs a non-empty string value.
-  const NO_REPO = '__none__'
+  // Remember the last repo selection so creating many tickets back to back does
+  // not mean re-picking the same repos every time (issue #189). Restored on mount.
+  const REPO_SELECTION_STORAGE_KEY = 'seraphim:new-issue:repo-ids'
 
   let title = $state('')
   let description = $state('')
   let open = $state(true)
   let saving = $state(false)
   let repos = $state<Repository[]>([])
-  let repoId = $state(NO_REPO)
-
-  const repoLabel = $derived(
-    repoId === NO_REPO
-      ? 'No repo (tracking only)'
-      : (repos.find((repo) => repo.id === repoId)?.full_name ?? 'Select a repo')
-  )
+  let selectedRepoIds = $state<string[]>([])
 
   onMount(async () => {
     repos = await listRepos()
+    // Restore the saved selection, dropping any repos that no longer exist.
+    try {
+      const saved = localStorage.getItem(REPO_SELECTION_STORAGE_KEY)
+      if (saved) {
+        const savedIds = JSON.parse(saved) as string[]
+        const known = new Set(repos.map((repo) => repo.id))
+        selectedRepoIds = savedIds.filter((id) => known.has(id))
+      }
+    } catch (error) {
+      console.debug('failed to restore saved repo selection', error)
+    }
+  })
+
+  // Persist the selection on every change so it survives navigation and reloads.
+  $effect(() => {
+    try {
+      localStorage.setItem(REPO_SELECTION_STORAGE_KEY, JSON.stringify(selectedRepoIds))
+    } catch (error) {
+      console.debug('failed to save repo selection', error)
+    }
   })
 
   async function submit() {
@@ -45,7 +60,7 @@
         title: title.trim(),
         body: description.trim(),
         state: open ? 'open' : 'closed',
-        repo_id: repoId === NO_REPO ? null : repoId
+        repo_ids: selectedRepoIds
       })
       toast.success('Issue created')
       goto(`/task/${task.id}`)
@@ -85,21 +100,24 @@
       </div>
 
       <div class="grid gap-2">
-        <Label for="repo">Target repository</Label>
-        <Select.Root type="single" value={repoId} onValueChange={(value) => (repoId = value)}>
-          <Select.Trigger id="repo" class="w-full">{repoLabel}</Select.Trigger>
-          <Select.Content>
-            <Select.Item value={NO_REPO} label="No repo (tracking only)">
-              No repo (tracking only)
-            </Select.Item>
-            {#each repos as repo (repo.id)}
-              <Select.Item value={repo.id} label={repo.full_name}>{repo.full_name}</Select.Item>
-            {/each}
-          </Select.Content>
-        </Select.Root>
+        <div class="flex items-center justify-between">
+          <Label for="repo">Target repositories</Label>
+          {#if selectedRepoIds.length}
+            <button
+              type="button"
+              class="text-xs text-muted-foreground hover:text-foreground"
+              onclick={() => (selectedRepoIds = [])}
+            >
+              Clear ({selectedRepoIds.length})
+            </button>
+          {/if}
+        </div>
+        <RepoMultiSelect id="repo" {repos} bind:selected={selectedRepoIds} />
         <span class="text-xs text-muted-foreground">
-          Pick a repo and the agent will branch and open a PR there when the ticket reaches To Do.
-          Leave as tracking-only to assign a repo later.
+          Pick one or more repos this ticket affects. The first is the primary one the agent
+          branches in; it gets the full list as context and opens a PR in each repo it changes.
+          Leave empty to keep the ticket tracking-only and assign repos later. Your selection is
+          remembered for the next ticket.
         </span>
       </div>
 

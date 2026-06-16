@@ -1317,24 +1317,26 @@ pub async fn set_task_notes(pool: &PgPool, id: Uuid, notes: &str) -> sqlx::Resul
 // --- Internal tickets --------------------------------------------------------
 
 /// Creates an internal ticket (no external tracker). It lands in `Available` at
-/// the given position with a sequential, human-friendly external id. An optional
-/// `repo_id` targets the repo the agent will branch in when the ticket is worked;
-/// leave it `None` to triage the repo later.
+/// the given position with a sequential, human-friendly external id. `repo_ids`
+/// are the repos the ticket targets, in priority order; the first becomes the
+/// primary `repo_id` the agent branches in. Pass an empty slice to triage the
+/// repos later (a tracking-only ticket that is not auto-pulled).
 pub async fn create_internal_task(
     pool: &PgPool,
     title: &str,
     body: &str,
     state: &str,
-    repo_id: Option<Uuid>,
+    repo_ids: &[Uuid],
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "INSERT INTO tasks \
-           (source_kind, external_id, repo_id, title, body_snapshot, url, external_state, board_column, position) \
-         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, $3, '', $4, 'available', $5) \
+           (source_kind, external_id, repo_id, target_repo_ids, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, $3, $4, '', $5, 'available', $6) \
          RETURNING *",
     )
-    .bind(repo_id)
+    .bind(repo_ids.first().copied())
+    .bind(Json(repo_ids.to_vec()))
     .bind(title)
     .bind(body)
     .bind(state)
@@ -1343,21 +1345,22 @@ pub async fn create_internal_task(
     .await
 }
 
-/// Points an internal ticket at the repo the agent should branch in, or clears it
-/// with `None`. Restricted to internal tasks: a GitHub task's repo is its issue's
-/// and must not be reassigned. Returns the updated task, or `None` if the id is
-/// not an internal task.
-pub async fn set_internal_task_repo(
+/// Sets the repos an internal ticket targets (priority order; the first becomes
+/// the primary `repo_id`), or clears them with an empty slice. Restricted to
+/// internal tasks: a GitHub task's repo is its issue's and must not be
+/// reassigned. Returns the updated task, or `None` if the id is not internal.
+pub async fn set_internal_task_repos(
     pool: &PgPool,
     id: Uuid,
-    repo_id: Option<Uuid>,
+    repo_ids: &[Uuid],
 ) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
-        "UPDATE tasks SET repo_id = $2, updated_at = now() \
+        "UPDATE tasks SET repo_id = $2, target_repo_ids = $3, updated_at = now() \
          WHERE id = $1 AND source_kind = 'internal' RETURNING *",
     )
     .bind(id)
-    .bind(repo_id)
+    .bind(repo_ids.first().copied())
+    .bind(Json(repo_ids.to_vec()))
     .fetch_optional(pool)
     .await
 }
@@ -1584,6 +1587,51 @@ pub async fn list_task_prs(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<Tas
     .bind(task_id)
     .fetch_all(pool)
     .await
+}
+
+/// Every open pull request across all tasks, for the CI-step watcher. Merged /
+/// closed PRs are settled, so the watcher ignores them.
+pub async fn list_open_task_prs(pool: &PgPool) -> sqlx::Result<Vec<TaskPullRequest>> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "SELECT * FROM task_pull_requests WHERE pr_state = 'open' ORDER BY task_id, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Prompt sentinel marking a synthetic turn that holds CI-step activity rather
+/// than a real Claude invocation. The watcher appends its events here so they
+/// flow through the same activity-log query as agent events, without a schema
+/// change. No `prompt` event is recorded for it, so it shows nothing of itself.
+const CI_TURN_PROMPT: &str = "[CI activity]";
+
+/// Finds the turn the CI watcher should append to, or creates one. Reuses the
+/// latest turn only when it is already a CI turn, so CI events that arrive after
+/// a fresh agent turn (e.g. a CI-fix turn) open a new CI turn and stay in
+/// chronological order in the activity log.
+pub async fn get_or_create_ci_turn(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Turn> {
+    let latest = sqlx::query_as::<_, Turn>(
+        "SELECT * FROM turns WHERE task_id = $1 ORDER BY idx DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(turn) = latest {
+        if turn.prompt == CI_TURN_PROMPT {
+            return Ok(turn);
+        }
+    }
+    let idx = next_turn_idx(pool, task_id).await?;
+    create_turn(pool, task_id, idx, CI_TURN_PROMPT, None).await
+}
+
+/// The next event sequence number within a turn (max + 1, or 0 for the first).
+pub async fn next_event_seq(pool: &PgPool, turn_id: Uuid) -> sqlx::Result<i32> {
+    let max: Option<i32> = sqlx::query_scalar("SELECT MAX(seq) FROM events WHERE turn_id = $1")
+        .bind(turn_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(max.map_or(0, |value| value + 1))
 }
 
 /// Records (or refreshes) a task's pull request, keyed by `(task, repo, number)`.
@@ -1859,9 +1907,12 @@ pub async fn list_events_for_task(
     pool: &PgPool,
     task_id: Uuid,
 ) -> sqlx::Result<Vec<super::models::Event>> {
+    // `rate_limit` events are persisted only to feed the usage gauge's fallback
+    // (`latest_rate_limit`); they are not activity, so they are omitted from the
+    // activity log the task view renders (issue #182).
     sqlx::query_as::<_, super::models::Event>(
         "SELECT e.* FROM events e JOIN turns t ON e.turn_id = t.id \
-         WHERE t.task_id = $1 ORDER BY t.idx, e.seq",
+         WHERE t.task_id = $1 AND e.type <> 'rate_limit' ORDER BY t.idx, e.seq",
     )
     .bind(task_id)
     .fetch_all(pool)
