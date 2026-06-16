@@ -47,6 +47,11 @@ pub enum ServerEvent {
     },
     /// A task finished (auto-merged to Done); drives the completion sound.
     TaskFinished { task_id: Uuid, task_title: String },
+    /// A streamed event from the compose assistant's turn (issue #181); the
+    /// /compose page appends it to the chat transcript.
+    Compose { payload: serde_json::Value },
+    /// The compose assistant's drafts or stats changed; the page refetches them.
+    ComposeChanged,
     /// A throttled tick that the in-progress turn's token usage advanced, so the
     /// stats gauges refetch and the counter ticks live mid-turn. Carries no
     /// numbers; the live values live on [`AppState::live_usage`] and are read by
@@ -323,5 +328,15 @@ impl AppState {
             task_id,
             task_title,
         });
+    }
+
+    /// Pushes a compose-assistant event onto its live chat stream (issue #181).
+    pub fn notify_compose(&self, payload: serde_json::Value) {
+        let _ = self.events.send(ServerEvent::Compose { payload });
+    }
+
+    /// Signals that the compose drafts or stats changed; clients refetch them.
+    pub fn notify_compose_changed(&self) {
+        let _ = self.events.send(ServerEvent::ComposeChanged);
     }
 }

@@ -2180,3 +2180,213 @@ pub async fn acknowledge_answers(pool: &PgPool, task_id: Uuid) -> sqlx::Result<(
     .await?;
     Ok(())
 }
+
+// --- Compose assistant (issue #181) ------------------------------------------
+//
+// A second, on-demand Claude session with its own conversation and statistics,
+// stored in dedicated tables so nothing here touches the board, the agent loop,
+// or the main shared session.
+
+/// The session id of the most recent compose turn, to resume the conversation.
+/// `None` when there is no history yet (a fresh conversation), e.g. after a reset.
+pub async fn latest_compose_session_id(pool: &PgPool) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT session_id FROM compose_turns WHERE session_id IS NOT NULL \
+         ORDER BY idx DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+}
+
+/// Whether a compose turn is currently running (so a second is rejected).
+pub async fn compose_turn_running(pool: &PgPool) -> sqlx::Result<bool> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM compose_turns WHERE status = 'running'")
+            .fetch_one(pool)
+            .await?;
+    Ok(count > 0)
+}
+
+/// Opens a new compose turn (the next index), returning its id.
+pub async fn create_compose_turn(
+    pool: &PgPool,
+    prompt: &str,
+    session_id: Option<&str>,
+) -> sqlx::Result<Uuid> {
+    let next_idx: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(idx) + 1, 0) FROM compose_turns")
+        .fetch_one(pool)
+        .await?;
+    sqlx::query_scalar(
+        "INSERT INTO compose_turns (idx, prompt, session_id) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(next_idx)
+    .bind(prompt)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Finalizes a compose turn with its outcome (mirrors [`finish_turn`]).
+pub async fn finish_compose_turn(
+    pool: &PgPool,
+    id: Uuid,
+    status: &str,
+    result_text: Option<&str>,
+    total_cost_usd: Option<f64>,
+    token_usage: Option<Value>,
+    session_id: Option<&str>,
+) -> sqlx::Result<()> {
+    let result_text = result_text.map(|text| text.replace('\0', ""));
+    sqlx::query(
+        "UPDATE compose_turns SET status = $2, result_text = $3, total_cost_usd = $4, \
+         token_usage = COALESCE($5, token_usage), \
+         session_id = COALESCE($6, session_id), finished_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(result_text.as_deref())
+    .bind(total_cost_usd)
+    .bind(token_usage.map(Json))
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Appends one parsed event to a compose turn's transcript.
+pub async fn append_compose_event(
+    pool: &PgPool,
+    turn_id: Uuid,
+    seq: i32,
+    event_type: &str,
+    mut payload: Value,
+) -> sqlx::Result<()> {
+    strip_nul(&mut payload);
+    sqlx::query("INSERT INTO compose_events (turn_id, seq, type, payload) VALUES ($1, $2, $3, $4)")
+        .bind(turn_id)
+        .bind(seq)
+        .bind(event_type)
+        .bind(Json(payload))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The whole compose transcript in order, for the chat history on reload.
+pub async fn list_compose_events(pool: &PgPool) -> sqlx::Result<Vec<super::models::Event>> {
+    sqlx::query_as::<_, super::models::Event>(
+        "SELECT e.* FROM compose_events e JOIN compose_turns t ON e.turn_id = t.id \
+         WHERE e.type <> 'rate_limit' ORDER BY t.idx, e.seq",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Aggregated usage for the compose assistant (mirrors [`global_stats`]).
+pub async fn compose_stats(pool: &PgPool) -> sqlx::Result<StatsAggregate> {
+    sqlx::query_as::<_, StatsAggregate>(&format!("SELECT {STATS_SELECT} FROM compose_turns"))
+        .fetch_one(pool)
+        .await
+}
+
+/// When the running compose turn started, for the live time ticker.
+pub async fn compose_running_since(pool: &PgPool) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        "SELECT started_at FROM compose_turns WHERE status = 'running' \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The latest compose turn's token usage, approximating its context fill.
+pub async fn compose_latest_usage(pool: &PgPool) -> sqlx::Result<Option<Value>> {
+    let row: Option<Json<Value>> = sqlx::query_scalar(
+        "SELECT token_usage FROM compose_turns WHERE token_usage IS NOT NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|json| json.0))
+}
+
+/// Wipes the compose conversation (turns + events cascade). Used by reset.
+pub async fn clear_compose_history(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM compose_turns")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Every draft issue, in display order.
+pub async fn list_drafts(pool: &PgPool) -> sqlx::Result<Vec<super::models::IssueDraft>> {
+    sqlx::query_as::<_, super::models::IssueDraft>(
+        "SELECT * FROM issue_drafts ORDER BY position, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Replaces the entire draft set with `drafts` (`title`, `body`, optional
+/// `repo_id`), positioned in the given order. The compose agent always sends the
+/// full desired list, so a replace keeps the agent's view and ours in sync.
+pub async fn replace_drafts(
+    pool: &PgPool,
+    drafts: &[(String, String, Option<Uuid>)],
+) -> sqlx::Result<Vec<super::models::IssueDraft>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM issue_drafts")
+        .execute(&mut *tx)
+        .await?;
+    for (index, (title, body, repo_id)) in drafts.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO issue_drafts (title, body, repo_id, position) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(title)
+        .bind(body)
+        .bind(repo_id)
+        .bind(index as f64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    list_drafts(pool).await
+}
+
+/// Edits one draft's title, body, and target repo. Returns `None` if it's gone.
+pub async fn update_draft(
+    pool: &PgPool,
+    id: Uuid,
+    title: &str,
+    body: &str,
+    repo_id: Option<Uuid>,
+) -> sqlx::Result<Option<super::models::IssueDraft>> {
+    sqlx::query_as::<_, super::models::IssueDraft>(
+        "UPDATE issue_drafts SET title = $2, body = $3, repo_id = $4, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(title)
+    .bind(body)
+    .bind(repo_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Deletes one draft.
+pub async fn delete_draft(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM issue_drafts WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Deletes every draft (used by reset and after a successful bulk-create).
+pub async fn clear_drafts(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM issue_drafts")
+        .execute(pool)
+        .await?;
+    Ok(())
+}

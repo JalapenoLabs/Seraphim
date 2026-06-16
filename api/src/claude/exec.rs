@@ -41,6 +41,10 @@ pub struct TurnArgs {
     pub task_id: String,
     /// URL the workspace uses to reach the API (exported as `SERAPHIM_API_URL`).
     pub internal_api_url: String,
+    /// Path inside the container where this turn records its `claude` PID, so a
+    /// reset can kill exactly this agent's process and never the other agent's
+    /// (the main agent and the compose assistant share one workspace; issue #181).
+    pub pid_file: String,
     /// User-defined environment variables (`key`, `value`) for this exec.
     pub env: Vec<(String, String)>,
 }
@@ -66,7 +70,7 @@ fn build_env(args: &TurnArgs) -> Vec<String> {
 }
 
 /// Builds the `claude` argv for a headless, fully-autonomous turn.
-fn build_command(args: &TurnArgs) -> Vec<String> {
+fn build_claude_argv(args: &TurnArgs) -> Vec<String> {
     let mut command = vec![
         "claude".to_string(),
         "-p".to_string(),
@@ -90,6 +94,33 @@ fn build_command(args: &TurnArgs) -> Vec<String> {
         command.push(session_id.clone());
     }
 
+    command
+}
+
+/// Wraps the `claude` invocation in a tiny shell that records the process's PID to
+/// `args.pid_file` before waiting on it. This lets a reset kill exactly this
+/// agent's `claude` (by the recorded PID) and never the other agent's, since the
+/// main agent and the compose assistant run in the same workspace (issue #181).
+///
+/// The claude args are passed as positional parameters (not interpolated into the
+/// script) so an arbitrary prompt can never break the shell quoting. `claude` runs
+/// in the background inheriting the exec's stdout/stderr, so streaming is
+/// unaffected; the script's exit status is claude's, via `wait`.
+fn build_command(args: &TurnArgs) -> Vec<String> {
+    // $1 is the pid file; the rest ($@ after the shift) is the claude argv.
+    let script =
+        "pidfile=\"$1\"; shift; \"$@\" & cmd_pid=$!; printf '%s' \"$cmd_pid\" > \"$pidfile\"; \
+         wait \"$cmd_pid\""
+            .to_string();
+    let mut command = vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        script,
+        // $0 (a label) then $1 (the pid file); claude argv follows as $2..
+        "seraphim-turn".to_string(),
+        args.pid_file.clone(),
+    ];
+    command.extend(build_claude_argv(args));
     command
 }
 
@@ -174,6 +205,7 @@ mod tests {
             github_token: "gh".to_string(),
             task_id: "task-1".to_string(),
             internal_api_url: "http://api:27182".to_string(),
+            pid_file: "/tmp/seraphim-agent.pid".to_string(),
             env: vec![],
         };
         let command = build_command(&args);
@@ -197,6 +229,7 @@ mod tests {
             github_token: "gh".to_string(),
             task_id: "task-1".to_string(),
             internal_api_url: "http://api:27182".to_string(),
+            pid_file: "/tmp/seraphim-agent.pid".to_string(),
             env: vec![],
         };
         let command = build_command(&args);

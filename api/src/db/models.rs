@@ -357,6 +357,20 @@ pub struct StatsAggregate {
     pub turns: i64,
 }
 
+/// A draft issue scoped by the compose assistant but not yet created (issue #181).
+/// `repo_id` is the optional target repo (where a GitHub issue is filed, or an
+/// internal ticket's repo). Drafts are bulk-created on demand to the chosen tracker.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct IssueDraft {
+    pub id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub repo_id: Option<Uuid>,
+    pub position: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// One comment on an internal ticket. `author` is `"user"` (the operator) or
 /// `"agent"` (Seraphim).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
