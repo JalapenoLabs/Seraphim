@@ -33,6 +33,17 @@ if [ -n "${GH_TOKEN:-}" ]; then
   runuser -u "${AGENT_USER}" -- gh auth setup-git >/dev/null 2>&1 || true
 fi
 
+# --- Git identity so every cloned repo can commit (issue #214) ----------------
+# Without this the agent's `git commit` fails with "Author identity unknown" in any
+# repo that lacks a local user.*; only the per-repo case was ever set before. Write
+# it SYSTEM-wide (/etc/gitconfig) so it covers every user and every `docker exec`,
+# across all the flat clones under /workspace, with no per-repo setup. The values
+# are deployment-specific (config, not code): supplied via `.env` (GIT_USER_NAME /
+# GIT_USER_EMAIL), with a safe fallback so a commit never hard-fails when unset. A
+# repo-local `user.*` still overrides this when a task needs a different identity.
+git config --system user.name "${GIT_USER_NAME:-Seraphim}"
+git config --system user.email "${GIT_USER_EMAIL:-seraphim@users.noreply.github.com}"
+
 # --- Docker: let the non-root agent use the mounted host socket --------------
 # docker-compose bind-mounts the host's /var/run/docker.sock so the agent can run
 # docker (and Earthly) for the repos it works on, e.g. `docker run postgres:17`.

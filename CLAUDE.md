@@ -203,6 +203,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `current_session_id`; Claude auto-compacts.
 - **Auth:** `CLAUDE_CODE_OAUTH_TOKEN` (subscription) for Claude; mounted host
   `~/.ssh` for `git@` clones; `GH_TOKEN` for HTTPS + octocrab.
+- **Git identity (issue #214):** the entrypoint writes a SYSTEM-wide
+  `git config --system user.name/email` from `GIT_USER_NAME` / `GIT_USER_EMAIL`
+  (`.env`, with a safe `Seraphim` fallback), so the agent can commit in every flat
+  clone under `/workspace` without per-repo setup. A repo-local `user.*` still
+  overrides it.
 - **Local DB validation:** PostgreSQL 17 (client + server) is baked into the
   workspace image, and `pg-ephemeral` boots a throwaway PG17 on `127.0.0.1` and
   prints a `DATABASE_URL` (`export DATABASE_URL="$(pg-ephemeral)"`), so the agent
@@ -304,8 +309,9 @@ docker compose logs api --tail 50
 docker compose down           # stop, keep volumes (scripts/stop.sh)
 ```
 
-`.env` (gitignored) holds the Postgres creds (bootstrap), ports, `SSH_HOME`, and
-`TS_AUTHKEY`. The **Claude OAuth + GitHub tokens are NOT in `.env`** — set them in
+`.env` (gitignored) holds the Postgres creds (bootstrap), ports, `SSH_HOME`,
+`TS_AUTHKEY`, and the agent's git identity (`GIT_USER_NAME` / `GIT_USER_EMAIL`).
+The **Claude OAuth + GitHub tokens are NOT in `.env`** — set them in
 the Settings UI (stored in the DB; a worm scanning `.env` files can't harvest
 them). The Postgres password stays in `.env` because the API needs it to connect
 before it can read anything; for at-rest protection use host disk encryption

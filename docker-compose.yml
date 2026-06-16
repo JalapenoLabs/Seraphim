@@ -100,6 +100,11 @@ services:
       # Tokens are injected per-exec by the API from the database, not baked in.
       # Writable, persistent config dir for the agent's Claude session/config.
       CLAUDE_CONFIG_DIR: /workspace/.claude
+      # Git identity for the agent's commits in every cloned repo (issue #214).
+      # The entrypoint writes these system-wide; the fallback keeps a commit from
+      # ever failing with "Author identity unknown" when .env omits them.
+      GIT_USER_NAME: ${GIT_USER_NAME:-Seraphim}
+      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-seraphim@users.noreply.github.com}
     volumes:
       # Persistent agent home: cloned repos + the single Claude conversation.
       - workspace-data:/workspace
