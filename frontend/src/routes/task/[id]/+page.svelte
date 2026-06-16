@@ -52,6 +52,7 @@
   import Markdown from '$lib/components/Markdown.svelte'
   import JsonHighlight from '$lib/components/JsonHighlight.svelte'
   import DiffView from '$lib/components/DiffView.svelte'
+  import AnsiLog from '$lib/components/AnsiLog.svelte'
   import { editDiff } from '$lib/diff'
 
   const taskId = $page.params.id ?? ''
@@ -484,7 +485,24 @@
     if (event.type === 'rate_limit') {
       return describeRateLimit(payload)
     }
+    if (event.type === 'ci') {
+      return String(payload?.text ?? '')
+    }
     return JSON.stringify(event.payload)
+  }
+
+  // CI events carry their own pass/fail/running status, so their dot color is
+  // driven by that rather than the generic per-type table.
+  function ciColor(payload: Record<string, unknown>): string {
+    switch (payload?.status) {
+      case 'step_failed':
+        return 'text-destructive'
+      case 'step_passed':
+      case 'job_passed':
+        return 'text-success'
+      default:
+        return 'text-info'
+    }
   }
 
   onMount(() => {
@@ -827,6 +845,25 @@
                       >{describe(event)}</span>
                     </span>
                   </button>
+                {:else if event.type === 'ci'}
+                  <!-- A GitHub Actions step: a colored dot (green pass / red
+                       fail / info running) + the step line, with a failed
+                       step's log tail rendered below honoring ANSI color. -->
+                  {@const ciPayload = event.payload as Record<string, unknown>}
+                  <div class="py-0.5">
+                    <div class="flex items-start gap-2">
+                      <span class="w-[1ch] flex-none {ciColor(ciPayload)}">●</span>
+                      <span class="min-w-0 flex-1 whitespace-pre-wrap break-words {ciColor(ciPayload)}"
+                        >{describe(event)}</span
+                      >
+                    </div>
+                    {#if typeof ciPayload.log === 'string' && ciPayload.log}
+                      <div class="flex gap-2 pl-[1ch]">
+                        <span class="w-[1ch] flex-none text-muted-foreground">⎿</span>
+                        <div class="min-w-0 flex-1"><AnsiLog text={ciPayload.log} isError /></div>
+                      </div>
+                    {/if}
+                  </div>
                 {:else if collapsible}
                   <button
                     type="button"

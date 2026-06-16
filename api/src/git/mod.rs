@@ -310,14 +310,162 @@ struct WorkflowRunsPage {
     workflow_runs: Vec<WorkflowRun>,
 }
 
-#[derive(Debug, Deserialize)]
-struct WorkflowRun {
-    id: u64,
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowRun {
+    pub id: u64,
     /// The workflow's display name, reported as the failing check when it fails.
-    name: String,
-    status: String,
-    conclusion: Option<String>,
-    run_attempt: u32,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub run_attempt: u32,
+}
+
+/// Lists the workflow runs at a commit, for step-level CI watching. Same source
+/// as [`ci_status`] (the Actions API), but returns the raw runs so a caller can
+/// drill into each run's jobs and steps rather than just the aggregate verdict.
+///
+/// # Errors
+/// If listing the commit's workflow runs fails.
+pub async fn list_runs_for_sha(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> Result<Vec<WorkflowRun>> {
+    let runs: WorkflowRunsPage = octo
+        .get(
+            format!("/repos/{owner}/{repo}/actions/runs?head_sha={sha}&per_page={PER_PAGE}"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to list workflow runs")?;
+    Ok(runs.workflow_runs)
+}
+
+/// A single job within a workflow run, with its ordered steps. A job is one
+/// runner's worth of work (e.g. "API (Rust)"); its steps are the named actions
+/// inside it (e.g. "Format", "Clippy", "Test").
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowJob {
+    pub id: u64,
+    pub name: String,
+    /// `queued` | `in_progress` | `completed`.
+    pub status: String,
+    /// `success` | `failure` | `skipped` | `cancelled` | ... (only once completed).
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<WorkflowStep>,
+}
+
+/// One step inside a [`WorkflowJob`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowStep {
+    pub name: String,
+    /// `queued` | `in_progress` | `completed`.
+    pub status: String,
+    /// `success` | `failure` | `skipped` | ... (only once completed).
+    pub conclusion: Option<String>,
+    /// 1-based position of the step within its job.
+    pub number: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobsPage {
+    jobs: Vec<WorkflowJob>,
+}
+
+/// Lists a workflow run's jobs (each with its steps), for the latest attempt.
+///
+/// # Errors
+/// If the jobs request fails.
+pub async fn list_run_jobs(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+) -> Result<Vec<WorkflowJob>> {
+    let page: JobsPage = octo
+        .get(
+            format!("/repos/{owner}/{repo}/actions/runs/{run_id}/jobs?per_page=100"),
+            None::<&()>,
+        )
+        .await
+        .wrap_err("failed to list workflow run jobs")?;
+    Ok(page.jobs)
+}
+
+/// Fetches a failed job's log and returns its last `max_lines` lines, with the
+/// per-line ISO timestamp GitHub prepends stripped so the snippet reads like a
+/// raw terminal. Any ANSI color the log carries is left intact for the UI to
+/// honor. Returns `None` when the log can't be fetched (e.g. not yet available).
+///
+/// Uses `reqwest` directly rather than octocrab because the logs endpoint 302s
+/// to a pre-signed blob URL and serves plain text, not JSON.
+///
+/// # Errors
+/// Never returns `Err` for an unavailable log (logs as a warning and yields
+/// `None`); only a malformed client build would error, which can't happen here.
+pub async fn fetch_job_log_tail(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    job_id: u64,
+    max_lines: usize,
+) -> Option<String> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
+    let request = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "seraphim");
+    let response = match request.send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            tracing::debug!(status = %response.status(), job_id, "job log not available yet");
+            return None;
+        }
+        Err(error) => {
+            tracing::debug!(%error, job_id, "failed to fetch job log");
+            return None;
+        }
+    };
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::debug!(%error, job_id, "failed to read job log body");
+            return None;
+        }
+    };
+
+    let lines: Vec<&str> = body.lines().collect();
+    let tail = lines
+        .iter()
+        .rev()
+        .take(max_lines)
+        .rev()
+        .map(|line| strip_log_timestamp(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if tail.trim().is_empty() {
+        None
+    } else {
+        Some(tail)
+    }
+}
+
+/// Strips the leading `2026-06-15T21:00:00.1234567Z ` timestamp GitHub prepends
+/// to each raw log line. Leaves a line without that prefix untouched.
+fn strip_log_timestamp(line: &str) -> &str {
+    // The prefix is an RFC3339 timestamp followed by a single space. Detect it
+    // cheaply: a 'T' at index 10 and a 'Z' before the first space.
+    if let Some(space) = line.find(' ') {
+        let stamp = &line[..space];
+        if stamp.len() >= 20 && stamp.as_bytes().get(10) == Some(&b'T') && stamp.ends_with('Z') {
+            return &line[space + 1..];
+        }
+    }
+    line
 }
 
 /// Re-runs the failed jobs of any first-attempt workflow run at `head_sha`.
@@ -633,4 +781,38 @@ pub async fn add_issue_comment(
         .await
         .wrap_err("failed to post issue comment")?;
     Ok(comment)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_log_timestamp;
+
+    #[test]
+    fn strips_the_leading_iso_timestamp() {
+        assert_eq!(
+            strip_log_timestamp("2026-06-15T21:00:00.1234567Z Running typecheck"),
+            "Running typecheck"
+        );
+    }
+
+    #[test]
+    fn leaves_a_line_without_a_timestamp_untouched() {
+        assert_eq!(
+            strip_log_timestamp("Reading package lists..."),
+            "Reading package lists..."
+        );
+        // A leading word with a space but no timestamp shape is left alone.
+        assert_eq!(
+            strip_log_timestamp("error: build failed"),
+            "error: build failed"
+        );
+    }
+
+    #[test]
+    fn keeps_the_rest_of_the_line_intact_including_extra_spaces() {
+        assert_eq!(
+            strip_log_timestamp("2026-06-15T21:00:00Z Fetched 31.1 MB in 3s (12.3 MB/s)"),
+            "Fetched 31.1 MB in 3s (12.3 MB/s)"
+        );
+    }
 }
