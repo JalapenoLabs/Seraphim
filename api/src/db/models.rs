@@ -194,6 +194,9 @@ pub struct Settings {
     pub default_branch_template: String,
     /// Config-repo setup error, if any (NULL = healthy / no config repo).
     pub config_repo_error: Option<String>,
+    /// Retired: the live agent session now lives on each `railways.session_id` row
+    /// (main included), not here. Kept only so the settings row's shape is stable;
+    /// no longer read or written as the live session. A later migration drops it.
     pub current_session_id: Option<String>,
     pub updated_at: DateTime<Utc>,
     /// Whether a Claude OAuth token is stored (the token itself is never sent).
@@ -336,7 +339,8 @@ pub struct Railway {
     pub name: String,
     pub description: String,
     /// The id of this railway's long-lived Claude conversation; empty until its
-    /// first run. For `main` this mirrors `settings.current_session_id`.
+    /// first run. This is the source of truth for every railway, `main` included
+    /// (the legacy `settings.current_session_id` is no longer the live value).
     pub session_id: String,
     /// Per-railway pause; gates work alongside the global master pause.
     pub paused: bool,

@@ -200,13 +200,12 @@ pub async fn set_usage_paused_until(
     Ok(())
 }
 
-pub async fn set_current_session_id(pool: &PgPool, session_id: Option<&str>) -> sqlx::Result<()> {
-    sqlx::query("UPDATE settings SET current_session_id = $1, updated_at = now() WHERE id = 1")
-        .bind(session_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
+// NOTE: `settings.current_session_id` is no longer the live agent session. Each
+// railway (main included) now owns its session on its own `railways.session_id`
+// row (read/written via `orchestrator::railway::{read_session, write_session}`),
+// so there is no longer a writer for the settings column. The column is left in
+// place for a later migration to drop; `get_settings` still reads it into
+// `Settings` only to keep the row's shape and the settings payload stable.
 
 /// Records (or clears with `None`) the config-repo setup error.
 pub async fn set_config_repo_error(pool: &PgPool, error: Option<&str>) -> sqlx::Result<()> {
@@ -529,9 +528,8 @@ pub async fn get_railway(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Railway
 
 /// Persists the railway's long-lived Claude session id (empty string clears it).
 ///
-/// A non-`main` railway keeps its session only here; for `main` this mirrors
-/// `settings.current_session_id`, which stays the source of truth so the existing
-/// reset / persist paths are unchanged (issue #202).
+/// Every railway, `main` included, owns its session on its own row; this row is the
+/// single source of truth the orchestrator reads and writes (issue #202).
 pub async fn set_railway_session_id(
     pool: &PgPool,
     railway_id: Uuid,
@@ -546,8 +544,8 @@ pub async fn set_railway_session_id(
 }
 
 /// Clears every railway's session id, so a global hard reset starts every lane's
-/// conversation blank. `main`'s `settings.current_session_id` is cleared
-/// separately by the reset; this keeps the railway rows consistent with it.
+/// conversation blank. Every railway (including `main`) owns its session here, so
+/// this is the single place the reset wipes live sessions.
 pub async fn clear_all_railway_sessions(pool: &PgPool) -> sqlx::Result<()> {
     sqlx::query("UPDATE railways SET session_id = '', updated_at = now() WHERE session_id <> ''")
         .execute(pool)

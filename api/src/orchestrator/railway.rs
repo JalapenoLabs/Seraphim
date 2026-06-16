@@ -29,9 +29,12 @@
 //! (stopped/starting/running/stopping) is maintained on the railway row as the
 //! container transitions.
 //!
-//! For the session, `main` keeps `settings.current_session_id` as the source of
-//! truth (so the existing reset and persist paths are untouched) and mirrors it
-//! onto its railway row; a non-`main` railway keeps its session only on the row.
+//! For the session, every railway owns its own `railways.session_id`, `main`
+//! included; that row is the single source of truth read and written through
+//! [`read_session`] / [`write_session`]. The legacy `settings.current_session_id`
+//! is no longer the live value (the railways migration seeded main's row from it,
+//! so main's conversation continuity is preserved); the column is left in place for
+//! a later migration to drop.
 
 use std::collections::HashMap;
 
@@ -239,37 +242,32 @@ pub async fn handle_for(state: &AppState, railway_id: Uuid) -> eyre::Result<Rail
 
 /// Reads this railway's current Claude session id (empty string means none yet).
 ///
-/// `main` reads `settings.current_session_id` so it stays the source of truth and
-/// the existing reset / persist logic is unchanged; another railway reads its own
-/// row. Returns the session as `Option`, mapping the empty string to `None` the
-/// way the turn runner expects (`None` starts a fresh conversation).
+/// Every railway, `main` included, owns its session on its own `railways` row, so
+/// this reads that row uniformly. (The `main` railway's row was seeded from the
+/// legacy `settings.current_session_id` by the railways migration, so main's
+/// conversation continuity is preserved.) Returns the session as `Option`, mapping
+/// the empty string to `None` the way the turn runner expects (`None` starts a
+/// fresh conversation).
 pub async fn read_session(
     state: &AppState,
     handle: &RailwayHandle,
 ) -> eyre::Result<Option<String>> {
-    let session = if handle.is_main {
-        queries::get_settings(&state.db).await?.current_session_id
-    } else {
-        queries::get_railway(&state.db, handle.id)
-            .await?
-            .map(|railway| railway.session_id)
-    };
+    let session = queries::get_railway(&state.db, handle.id)
+        .await?
+        .map(|railway| railway.session_id);
     Ok(session.filter(|id| !id.trim().is_empty()))
 }
 
-/// Persists this railway's Claude session id.
+/// Persists this railway's Claude session id on its `railways` row (`None` clears
+/// it).
 ///
-/// For `main` it writes `settings.current_session_id` (the source of truth) and
-/// mirrors the value onto main's railway row; for another railway it writes only
-/// the row. `None` clears the session.
+/// The railway row is the single source of truth for every railway, `main`
+/// included; the legacy `settings.current_session_id` mirror is no longer written.
 pub async fn write_session(
     state: &AppState,
     handle: &RailwayHandle,
     session_id: Option<&str>,
 ) -> eyre::Result<()> {
-    if handle.is_main {
-        queries::set_current_session_id(&state.db, session_id).await?;
-    }
     queries::set_railway_session_id(&state.db, handle.id, session_id.unwrap_or_default()).await?;
     Ok(())
 }

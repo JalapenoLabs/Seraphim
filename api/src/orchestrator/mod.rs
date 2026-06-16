@@ -533,7 +533,8 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
     state.bump_reset_epoch();
 
     // Stop the running Claude process and wipe its on-disk session (and memories,
-    // when asked). Best-effort: workspace cleanup must not abort the reset.
+    // when asked) in *every* railway's container, not just main's, so all lanes
+    // restart blank. Best-effort: workspace cleanup must not abort the reset.
     let mut script = String::from(
         ": \"${CLAUDE_CONFIG_DIR:=/workspace/.claude}\"\n\
          pkill -9 -f '[c]laude -p' || true\n\
@@ -545,24 +546,14 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
              find \"$CLAUDE_CONFIG_DIR/projects\" -type f -name 'MEMORY.md' -delete 2>/dev/null || true\n",
         );
     }
-    if let Err(error) = state
-        .workspace
-        .exec_capture(
-            "/workspace",
-            vec!["bash".to_string(), "-lc".to_string(), script],
-            vec![],
-        )
-        .await
-    {
-        warn!(error = %error, "hard reset: workspace cleanup failed (continuing)");
-    }
+    hard_reset_cleanup_all_railways(state, &script).await;
 
-    // Clear the shared session so the next turn starts blank, purge the recorded
-    // history (which also zeroes the turn-derived stats), and requeue the task the
-    // agent was mid-work on so a fresh session can redo it cleanly. The session is
-    // cleared on settings (main's source of truth) and on every railway row so all
-    // lanes restart blank and stay consistent (issue #202).
-    queries::set_current_session_id(&state.db, None).await?;
+    // Clear the persisted session on every railway row (each railway, main
+    // included, owns its session there), purge the recorded history (which also
+    // zeroes the turn-derived stats), and requeue the task the agent was mid-work
+    // on so a fresh session can redo it cleanly. The legacy
+    // `settings.current_session_id` is no longer the live value, so it is not
+    // touched here (issue #202).
     queries::clear_all_railway_sessions(&state.db).await?;
     let turns_purged = queries::purge_history(&state.db).await?;
     let tasks_requeued = queries::reclaim_orphaned_tasks(&state.db).await?;
@@ -574,6 +565,77 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
     state.notify_board();
     info!(turns_purged, tasks_requeued, "agent hard reset complete");
     Ok(())
+}
+
+/// Runs the hard-reset cleanup `script` (kill the agent process, wipe sessions /
+/// memories) in every railway's container, not just `main`'s.
+///
+/// `main`'s compose-managed container is always on, so it is always reached. A
+/// non-`main` railway is reached only when its container is currently running: an
+/// idle-stopped (or never-created) lane has no live process and its stale on-disk
+/// session is already orphaned by the DB clear that follows, so there is nothing to
+/// kill there and exec-ing into a down container would only fail. Every step is
+/// best-effort: a per-railway hiccup is logged and never aborts the reset. With
+/// only `main` present this resolves to exactly the single workspace container, so
+/// the cleanup is identical to before.
+async fn hard_reset_cleanup_all_railways(state: &AppState, script: &str) {
+    let railways = match queries::list_railways(&state.db).await {
+        Ok(railways) => railways,
+        Err(error) => {
+            warn!(error = %error, "hard reset: could not list railways for cleanup (continuing)");
+            return;
+        }
+    };
+
+    for railway in railways {
+        let handle = RailwayHandle::new(state, &railway);
+        // `main` is always-on, so it is cleaned without an inspect; a non-`main`
+        // railway is inspected and cleaned only when its container is currently up.
+        let observed = if railway.is_main {
+            None
+        } else {
+            match state.workspace.container_state(handle.container()).await {
+                Ok(observed) => Some(observed),
+                Err(error) => {
+                    warn!(error = %error, railway_id = %railway.id, "hard reset: could not inspect a railway container (skipping)");
+                    continue;
+                }
+            }
+        };
+        if !should_clean_railway_container(railway.is_main, observed) {
+            continue;
+        }
+        if let Err(error) = state
+            .workspace
+            .exec_capture_in(
+                handle.container(),
+                "/workspace",
+                vec!["bash".to_string(), "-lc".to_string(), script.to_string()],
+                vec![],
+            )
+            .await
+        {
+            warn!(error = %error, railway_id = %railway.id, "hard reset: workspace cleanup failed for a railway (continuing)");
+        }
+    }
+}
+
+/// Whether a hard reset should run its cleanup in a railway's container.
+///
+/// `main`'s compose-managed container is always on, so it is always cleaned
+/// (`observed` is irrelevant and passed `None`). A non-`main` railway is cleaned
+/// only when its container is currently `Running`: an idle-stopped or never-created
+/// lane has no live process to kill, and its stale on-disk session is already
+/// orphaned by the DB session clear that follows, so exec-ing into a down container
+/// would only fail. Pure, so the decision is unit-testable.
+fn should_clean_railway_container(
+    is_main: bool,
+    observed: Option<crate::docker::ContainerState>,
+) -> bool {
+    if is_main {
+        return true;
+    }
+    observed == Some(crate::docker::ContainerState::Running)
 }
 
 // --- Per-task hard reset -----------------------------------------------------
@@ -623,7 +685,7 @@ pub async fn stop_active_turn(state: &AppState, task: &Task) -> Result<()> {
     state.bump_reset_epoch();
     let handle = railway::handle_for(state, task.railway_id).await?;
     kill_agent_process(state, &handle).await;
-    // Clear this railway's session (for `main`, also settings.current_session_id).
+    // Clear this railway's session (every railway owns its own session row).
     railway::write_session(state, &handle, None).await?;
     state.set_live_usage(None);
     Ok(())
@@ -817,10 +879,14 @@ pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSu
     }
 
     // Best-effort external cleanup for a GitHub-sourced task with a known repo.
+    // The local-branch delete runs in the task's *own* railway container, so resolve
+    // that handle once here (falling back to `main` if the railway was deleted, the
+    // way `handle_for` behaves).
     if task.source_kind == SourceKind::Github {
         if let Some(repo_id) = task.repo_id {
             if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
-                reset_github_side(state, &task, &repo, &mut summary).await;
+                let handle = railway::handle_for(state, task.railway_id).await?;
+                reset_github_side(state, &handle, &task, &repo, &mut summary).await;
             }
         }
     }
@@ -844,6 +910,7 @@ pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSu
 /// best-effort and updates `summary` with what succeeded.
 async fn reset_github_side(
     state: &AppState,
+    handle: &RailwayHandle,
     task: &Task,
     repo: &Repository,
     summary: &mut ResetSummary,
@@ -891,7 +958,7 @@ async fn reset_github_side(
                 warn!(error = %error, task_id = %task.id, "reset: failed to delete the remote branch (already gone?)");
             }
         }
-        delete_local_branch(state, repo, branch).await;
+        delete_local_branch(state, handle, repo, branch).await;
     }
 
     // Reopen the source issue if Seraphim has it recorded as closed.
@@ -911,7 +978,16 @@ async fn reset_github_side(
 /// Deletes the task's branch from the workspace clone, switching off it first
 /// (a checked-out branch can't be deleted). Best-effort: a missing repo dir or
 /// branch is fine, since the authoritative copy was already deleted on the remote.
-async fn delete_local_branch(state: &AppState, repo: &Repository, branch: &str) {
+///
+/// Runs in the task's *own* railway container (via `handle`), since the clone the
+/// branch lives in belongs to that railway's `/workspace`. For a `main`-only
+/// deployment the handle is the compose workspace, so this is unchanged.
+async fn delete_local_branch(
+    state: &AppState,
+    handle: &RailwayHandle,
+    repo: &Repository,
+    branch: &str,
+) {
     let dir = format!("/workspace/{}", provision::repo_dir_name(&repo.full_name));
     let script = format!(
         "cd \"{dir}\" 2>/dev/null || exit 0\n\
@@ -921,7 +997,8 @@ async fn delete_local_branch(state: &AppState, repo: &Repository, branch: &str) 
     );
     if let Err(error) = state
         .workspace
-        .exec_capture(
+        .exec_capture_in(
+            handle.container(),
             "/workspace",
             vec!["bash".to_string(), "-lc".to_string(), script],
             vec![],
@@ -1110,8 +1187,8 @@ async fn work_fresh(
     };
 
     let settings = queries::get_settings(&state.db).await?;
-    // This railway's session is the conversation each turn resumes (for `main`,
-    // this mirrors settings.current_session_id).
+    // This railway's session is the conversation each turn resumes (read from the
+    // railway's own row).
     let session_id = railway::read_session(state, handle).await?;
 
     // The per-repo branch template is an optional override of the global default.
@@ -1399,8 +1476,8 @@ async fn work_pr_fix(
 
 /// Persists a turn's session id onto its railway when it differs from the stored
 /// one. Skipped if a hard reset happened during the turn, so the just-cleared
-/// session isn't revived. For `main` this also keeps `settings.current_session_id`
-/// in sync (see [`railway::write_session`]).
+/// session isn't revived. The railway's own row is the source of truth, `main`
+/// included (see [`railway::write_session`]).
 async fn persist_session(
     state: &AppState,
     handle: &RailwayHandle,
@@ -1514,8 +1591,7 @@ async fn stream_turn(
     // Claude runs at the workspace root so it can work across all cloned repos.
     let working_dir = "/workspace".to_string();
 
-    // The session this turn resumes is the railway's (for `main`, that mirrors
-    // settings.current_session_id).
+    // The session this turn resumes is the railway's own (read from its row).
     let resume_session_id = railway::read_session(state, handle).await?;
 
     let idx = queries::next_turn_idx(&state.db, task.id).await?;
@@ -2569,6 +2645,37 @@ mod tests {
         assert!(!is_transient_rate_limit(
             "the agent finished without opening a pull request"
         ));
+    }
+
+    #[test]
+    fn hard_reset_always_cleans_main_and_only_running_others() {
+        use crate::docker::ContainerState;
+
+        // `main` is the always-on compose workspace: it is always cleaned, whatever
+        // (or no) observed state is passed. This is what keeps a main-only hard
+        // reset identical to before (it always cleans the one workspace container).
+        assert!(should_clean_railway_container(true, None));
+        assert!(should_clean_railway_container(
+            true,
+            Some(ContainerState::Stopped)
+        ));
+
+        // A non-`main` railway is cleaned only when its container is up: a stopped or
+        // absent lane has no live process and its stale session is dropped by the DB
+        // clear, so we never exec into a down container.
+        assert!(should_clean_railway_container(
+            false,
+            Some(ContainerState::Running)
+        ));
+        assert!(!should_clean_railway_container(
+            false,
+            Some(ContainerState::Stopped)
+        ));
+        assert!(!should_clean_railway_container(
+            false,
+            Some(ContainerState::Absent)
+        ));
+        assert!(!should_clean_railway_container(false, None));
     }
 
     #[test]

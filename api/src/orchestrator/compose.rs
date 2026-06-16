@@ -2,8 +2,8 @@
 //! helps the operator draft many issues at once through a chat.
 //!
 //! It runs in the same workspace as the main agent but is fully isolated from it:
-//! its own resumable session (tracked via `compose_turns.session_id`, never the
-//! shared `settings.current_session_id`), its own conversation tables, and a
+//! its own resumable session (tracked via `compose_turns.session_id`, never any
+//! railway's agent session), its own conversation tables, and a
 //! PID-targeted process (see [`COMPOSE_PID_FILE`]) so a compose reset or a main
 //! agent reset never kills the other's turn. It is on-demand: a turn runs only
 //! when the operator sends a message, and nothing keeps it alive between turns.
