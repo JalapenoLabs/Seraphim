@@ -218,6 +218,16 @@ async fn provision_on_startup(state: AppState) {
             error!(error = %error, "workspace provision failed");
         }
     }
+
+    // main's container is the always-on compose workspace, so reflect that in its
+    // lifecycle. Migration 0036 seeds every railway (main included) as `stopped`;
+    // without this, the main lane would render as stopped despite always running.
+    let _ = queries::set_railway_lifecycle_state(
+        &state.db,
+        main.id,
+        crate::db::models::RailwayState::Running,
+    )
+    .await;
 }
 
 // --- Sync loop ---------------------------------------------------------------
