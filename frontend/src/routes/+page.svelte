@@ -15,7 +15,9 @@
     Eye,
     EyeOff,
     X,
-    ListChecks
+    ListChecks,
+    Filter,
+    Check
   } from '@lucide/svelte'
   import { PaneGroup } from 'paneforge'
 
@@ -41,6 +43,8 @@
   import ColumnSort from '$lib/components/ColumnSort.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import { Button } from '$lib/components/ui/button'
+  import { Input } from '$lib/components/ui/input'
+  import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
   import * as Resizable from '$lib/components/ui/resizable'
@@ -65,6 +69,56 @@
   let eventSource: EventSource | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
   let repoNames = $state<Record<string, string>>({})
+
+  // --- Board filters (repo + created-date range) -----------------------------
+  // A view-only filter over the whole board: non-matching cards are hidden (kept
+  // in the dnd lists, like the Done collapse, so drag-and-drop never desyncs).
+  // Lives only in the browser; it never changes what the agent picks up.
+  let filtersOpen = $state(false)
+  let filterRepoIds = new SvelteSet<string>()
+  let filterCreatedAfter = $state('') // inclusive YYYY-MM-DD, or '' for unset
+  let filterCreatedBefore = $state('') // inclusive YYYY-MM-DD, or '' for unset
+
+  // Repo choices for the drawer, sorted by name.
+  const repoOptions = $derived(
+    Object.entries(repoNames)
+      .map(([id, full_name]) => ({ id, full_name }))
+      .sort((left, right) => left.full_name.localeCompare(right.full_name))
+  )
+
+  const activeFilterCount = $derived(
+    filterRepoIds.size + (filterCreatedAfter ? 1 : 0) + (filterCreatedBefore ? 1 : 0)
+  )
+  const filterActive = $derived(activeFilterCount > 0)
+
+  // Whether a task passes the active filters. Repo filter is an OR over the
+  // selected repos; the date bounds are inclusive of the chosen calendar days.
+  function matchesFilter(task: Task): boolean {
+    if (filterRepoIds.size > 0 && !(task.repo_id && filterRepoIds.has(task.repo_id))) {
+      return false
+    }
+    if (filterCreatedAfter && new Date(task.created_at) < new Date(`${filterCreatedAfter}T00:00:00`)) {
+      return false
+    }
+    if (filterCreatedBefore && new Date(task.created_at) > new Date(`${filterCreatedBefore}T23:59:59.999`)) {
+      return false
+    }
+    return true
+  }
+
+  function toggleRepoFilter(id: string) {
+    if (filterRepoIds.has(id)) {
+      filterRepoIds.delete(id)
+    } else {
+      filterRepoIds.add(id)
+    }
+  }
+
+  function clearFilters() {
+    filterRepoIds.clear()
+    filterCreatedAfter = ''
+    filterCreatedBefore = ''
+  }
 
   // --- Multi-select (bulk edit) ----------------------------------------------
   // In bulk mode a click selects a card instead of opening it; the floating
@@ -130,6 +184,10 @@
   }
 
   function onWindowKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && filtersOpen) {
+      filtersOpen = false
+      return
+    }
     if (event.key === 'Escape' && bulkMode && !bulkDialogOpen) {
       exitBulkMode()
     }
@@ -169,9 +227,12 @@
   }
 
   // Recomputed on every board reload (the SSE stream keeps that frequent enough
-  // that the "today" boundary stays fresh while the page is open).
-  const doneTodayCount = $derived(columns.done.filter(isDoneToday).length)
-  const hasHiddenDone = $derived(columns.done.length > doneTodayCount)
+  // that the "today" boundary stays fresh while the page is open). Counts honor
+  // the active board filter so the Done header + reveal toggle reflect what's
+  // actually shown.
+  const matchingDone = $derived(columns.done.filter(matchesFilter))
+  const doneTodayCount = $derived(matchingDone.filter(isDoneToday).length)
+  const hasHiddenDone = $derived(matchingDone.length > doneTodayCount)
 
   // --- Global notepad --------------------------------------------------------
   // A scratchpad in a resizable pane beside the board. Default collapsed; the
@@ -463,6 +524,18 @@
         <RefreshCw class="size-4 {checking ? 'animate-spin' : ''}" />
         {checking ? 'Checking…' : 'Check issues'}
       </Button>
+      <Button
+        variant={filterActive ? 'default' : 'outline'}
+        size="sm"
+        title="Filter tasks"
+        aria-label="Filter tasks"
+        onclick={() => (filtersOpen = true)}
+      >
+        <Filter class="size-4" />
+        Filters{#if filterActive}
+          <span class="ml-0.5">({activeFilterCount})</span>
+        {/if}
+      </Button>
       {#if settings}
         <Button
           variant={settings.agent_paused ? 'default' : 'outline'}
@@ -546,7 +619,7 @@
               onchange={(next) => changeSort(column.key, next)}
               label={column.label}
             />
-            <span>{collapsed ? doneTodayCount : columns[column.key].length}</span>
+            <span>{collapsed ? doneTodayCount : columns[column.key].filter(matchesFilter).length}</span>
           </div>
         </header>
         <div
@@ -564,7 +637,7 @@
           onfinalize={(event) => handleFinalize(column.key, event)}
         >
           {#each columns[column.key] as task (task.id)}
-            <div class:hidden={collapsed && !isDoneToday(task)}>
+            <div class:hidden={(collapsed && !isDoneToday(task)) || !matchesFilter(task)}>
               <Card
                 {task}
                 onchange={load}
@@ -654,5 +727,89 @@
       onChangeStatus={applyBulkStatus}
       onDelete={applyBulkDelete}
     />
+  {/if}
+
+  {#if filtersOpen}
+    <!-- Filters drawer: a right-side modal over a dimmed backdrop. View-only;
+         it hides non-matching cards rather than changing the board itself. -->
+    <div
+      class="fixed inset-0 z-40 bg-black/40"
+      role="presentation"
+      onclick={() => (filtersOpen = false)}
+    ></div>
+    <aside
+      class="fixed right-0 top-0 z-50 flex h-full w-80 max-w-[90vw] flex-col border-l border-border bg-card shadow-xl"
+      aria-label="Board filters"
+    >
+      <header class="flex flex-none items-center justify-between border-b border-border px-4 py-3">
+        <strong class="text-sm">Filters</strong>
+        <Button variant="ghost" size="icon" title="Close filters" aria-label="Close filters" onclick={() => (filtersOpen = false)}>
+          <X class="size-4" />
+        </Button>
+      </header>
+
+      <div class="flex-1 space-y-5 overflow-y-auto p-4">
+        <Button
+          variant="outline"
+          size="sm"
+          class="w-full"
+          disabled={!filterActive}
+          onclick={clearFilters}
+        >
+          Clear filters
+        </Button>
+
+        <div>
+          <Label class="text-xs uppercase tracking-wide text-muted-foreground">Repositories</Label>
+          <div class="mt-2 space-y-1">
+            {#each repoOptions as repo (repo.id)}
+              {@const checked = filterRepoIds.has(repo.id)}
+              <button
+                type="button"
+                onclick={() => toggleRepoFilter(repo.id)}
+                aria-pressed={checked}
+                class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-secondary"
+              >
+                <span
+                  class="flex size-4 flex-none items-center justify-center rounded border {checked
+                    ? 'border-primary bg-primary text-primary-foreground'
+                    : 'border-input'}"
+                >
+                  {#if checked}<Check class="size-3" />{/if}
+                </span>
+                <span class="truncate">{repo.full_name}</span>
+              </button>
+            {/each}
+            {#if repoOptions.length === 0}
+              <p class="text-sm text-muted-foreground">No repositories.</p>
+            {/if}
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="filter-created-after" class="text-xs uppercase tracking-wide text-muted-foreground">
+            Created after
+          </Label>
+          <Input
+            id="filter-created-after"
+            type="date"
+            bind:value={filterCreatedAfter}
+            max={filterCreatedBefore || undefined}
+          />
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="filter-created-before" class="text-xs uppercase tracking-wide text-muted-foreground">
+            Created before
+          </Label>
+          <Input
+            id="filter-created-before"
+            type="date"
+            bind:value={filterCreatedBefore}
+            min={filterCreatedAfter || undefined}
+          />
+        </div>
+      </div>
+    </aside>
   {/if}
 </div>
