@@ -1411,10 +1411,17 @@ async fn stream_turn(
         let mut payload = event.raw.clone();
         scrubber.scrub_value(&mut payload);
         queries::append_event(&state.db, turn.id, seq, label, payload.clone()).await?;
-        state.notify_task(
-            task.id,
-            serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
-        );
+        // Rate-limit notices are a stats-only signal: they feed the usage gauge's
+        // fallback via `latest_rate_limit`, but they carry no actionable detail, so
+        // they are deliberately kept out of the live activity stream (and out of
+        // `list_events_for_task`) rather than cluttering the activity log and the
+        // watch feed (issue #182). They are still persisted for the gauge.
+        if label != "rate_limit" {
+            state.notify_task(
+                task.id,
+                serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
+            );
+        }
         queries::set_task_status(&state.db, task.id, TaskStatus::Working)
             .await
             .ok();

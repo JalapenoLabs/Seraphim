@@ -1904,9 +1904,12 @@ pub async fn list_events_for_task(
     pool: &PgPool,
     task_id: Uuid,
 ) -> sqlx::Result<Vec<super::models::Event>> {
+    // `rate_limit` events are persisted only to feed the usage gauge's fallback
+    // (`latest_rate_limit`); they are not activity, so they are omitted from the
+    // activity log the task view renders (issue #182).
     sqlx::query_as::<_, super::models::Event>(
         "SELECT e.* FROM events e JOIN turns t ON e.turn_id = t.id \
-         WHERE t.task_id = $1 ORDER BY t.idx, e.seq",
+         WHERE t.task_id = $1 AND e.type <> 'rate_limit' ORDER BY t.idx, e.seq",
     )
     .bind(task_id)
     .fetch_all(pool)
