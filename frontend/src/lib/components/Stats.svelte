@@ -112,6 +112,23 @@
     return `${seconds}s`
   }
 
+  // Like `duration`, but always carries down to whole seconds so the headline
+  // Time stat visibly ticks up second-by-second while the agent works, instead
+  // of freezing at "3h 12m" for a minute at a time (issue #173).
+  function durationPrecise(ms: number): string {
+    const total = Math.max(0, Math.floor(ms / 1000))
+    const days = Math.floor(total / 86400)
+    const hours = Math.floor((total % 86400) / 3600)
+    const minutes = Math.floor((total % 3600) / 60)
+    const seconds = total % 60
+    const parts: string[] = []
+    if (days > 0) parts.push(`${days}d`)
+    if (days > 0 || hours > 0) parts.push(`${hours}h`)
+    if (days > 0 || hours > 0 || minutes > 0) parts.push(`${minutes}m`)
+    parts.push(`${seconds}s`)
+    return parts.join(' ')
+  }
+
   function resetsLabel(unix: number | null): string {
     if (!unix) return ''
     const date = new Date(unix * 1000)
@@ -211,7 +228,7 @@
 
       <!-- Time -->
       <div class="flex flex-col items-center">
-        <span class="text-xl font-semibold tabular-nums">{duration(workedMs)}</span>
+        <span class="text-xl font-semibold tabular-nums">{durationPrecise(workedMs)}</span>
         <span class="text-xs text-muted-foreground">{taskId ? 'Time on task' : 'Lifetime'}</span>
       </div>
 
