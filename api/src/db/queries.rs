@@ -2271,10 +2271,13 @@ pub async fn global_stats(pool: &PgPool) -> sqlx::Result<StatsAggregate> {
 /// stats reset. A turn belongs to a railway through its task's `railway_id`, so
 /// this mirrors [`global_stats`] but scoped to the lane's cards.
 pub async fn railway_stats(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<StatsAggregate> {
+    // Filter by railway via a subquery rather than a JOIN to `tasks`: `tasks`
+    // also has `started_at`/`finished_at`, so joining it would make the unqualified
+    // columns in the shared STATS_SELECT ambiguous. With only `turns` in scope they
+    // resolve cleanly, and STATS_SELECT stays usable by the non-joined callers.
     sqlx::query_as::<_, StatsAggregate>(&format!(
         "SELECT {STATS_SELECT} FROM turns \
-         JOIN tasks ON tasks.id = turns.task_id \
-         WHERE tasks.railway_id = $1 \
+         WHERE turns.task_id IN (SELECT id FROM tasks WHERE railway_id = $1) \
          AND turns.started_at > COALESCE((SELECT stats_reset_at FROM settings WHERE id = 1), 'epoch'::timestamptz)"
     ))
     .bind(railway_id)
