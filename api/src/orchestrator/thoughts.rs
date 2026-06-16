@@ -87,6 +87,8 @@ async fn summarize(
         // A summary turn doesn't act as the task, so it gets no helper wiring.
         task_id: String::new(),
         internal_api_url: state.internal_api_url.clone(),
+        // Part of the main agent's flow, so it shares the agent PID file.
+        pid_file: super::AGENT_PID_FILE.to_string(),
         env: Vec::new(),
     };
 

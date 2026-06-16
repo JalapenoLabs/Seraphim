@@ -31,7 +31,9 @@ pub async fn board_stream(
                     ServerEvent::Task { .. }
                     | ServerEvent::Notification { .. }
                     | ServerEvent::HeartAttack { .. }
-                    | ServerEvent::TaskFinished { .. },
+                    | ServerEvent::TaskFinished { .. }
+                    | ServerEvent::Compose { .. }
+                    | ServerEvent::ComposeChanged,
                 ) => {}
                 // A lagged consumer just resyncs; a closed channel ends the stream.
                 Err(RecvError::Lagged(_)) => continue,
@@ -82,7 +84,37 @@ pub async fn notification_stream(
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("refresh").data("{}"));
                 }
-                Ok(ServerEvent::Task { .. } | ServerEvent::Usage { .. }) => {}
+                Ok(
+                    ServerEvent::Task { .. }
+                    | ServerEvent::Usage { .. }
+                    | ServerEvent::Compose { .. }
+                    | ServerEvent::ComposeChanged,
+                ) => {}
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `GET /api/v1/compose/stream` - the compose assistant's live chat events plus a
+/// `compose_changed` tick when its drafts or stats change (issue #181).
+pub async fn compose_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut receiver = state.events.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            match receiver.recv().await {
+                Ok(ServerEvent::Compose { payload }) => {
+                    let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("compose").data(data));
+                }
+                Ok(ServerEvent::ComposeChanged) => {
+                    yield Ok(Event::default().event("compose_changed").data("{}"));
+                }
+                Ok(_) => {}
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             }

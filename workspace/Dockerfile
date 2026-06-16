@@ -104,8 +104,10 @@ COPY seraphim-suggest /usr/local/bin/seraphim-suggest
 COPY seraphim-ask /usr/local/bin/seraphim-ask
 COPY seraphim-comment /usr/local/bin/seraphim-comment
 COPY seraphim-state /usr/local/bin/seraphim-state
+COPY seraphim-draft /usr/local/bin/seraphim-draft
 RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask \
-    /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state
+    /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state \
+    /usr/local/bin/seraphim-draft
 
 # --- Throwaway PostgreSQL 17 helper (boots a local cluster for DB validation) -
 COPY pg-ephemeral /usr/local/bin/pg-ephemeral

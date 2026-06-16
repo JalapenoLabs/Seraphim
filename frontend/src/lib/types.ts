@@ -301,6 +301,30 @@ export type AgentEvent = {
   created_at: string
 }
 
+// A draft issue scoped by the compose assistant but not yet created (issue #181).
+// `repo_id` is the optional target repo (where a GitHub issue is filed, or an
+// internal ticket's repo).
+export type IssueDraft = {
+  id: string
+  title: string
+  body: string
+  repo_id: string | null
+  position: number
+  created_at: string
+  updated_at: string
+}
+
+// The compose page's initial state: chat transcript, current drafts, whether a
+// turn is running.
+export type ComposeState = {
+  events: AgentEvent[]
+  drafts: IssueDraft[]
+  running: boolean
+}
+
+// Where a batch of drafts is bulk-created.
+export type ComposeTarget = 'internal' | 'github' | 'jira'
+
 // A setup recommendation the agent made after finishing a task.
 export type EnvSuggestion = {
   id: string

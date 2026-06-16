@@ -11,6 +11,7 @@
 
 mod availability;
 mod ci_watch;
+pub mod compose;
 mod network;
 mod prompt;
 mod provision;
@@ -40,6 +41,12 @@ use crate::git;
 use crate::secrets::Scrubber;
 use crate::state::AppState;
 use review::{PrCi, PrReview, ReviewDecision};
+
+/// Pid file the main agent's `claude` records to, so a reset/defibrillation kills
+/// exactly it and never the compose assistant, which shares the workspace (#181).
+const AGENT_PID_FILE: &str = "/tmp/seraphim-agent.pid";
+/// Pid file the compose assistant's `claude` records to (issue #181).
+pub(crate) const COMPOSE_PID_FILE: &str = "/tmp/seraphim-compose.pid";
 
 /// How often the agent loop checks for work when idle.
 const AGENT_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -1274,6 +1281,7 @@ async fn stream_turn(
         github_token: queries::get_github_token(&state.db).await?,
         task_id: task.id.to_string(),
         internal_api_url: state.internal_api_url.clone(),
+        pid_file: AGENT_PID_FILE.to_string(),
         env,
     };
 
@@ -1979,15 +1987,23 @@ async fn block(state: &AppState, task: &Task, message: &str) -> Result<()> {
 /// (and contend on the shared session). The `[c]` keeps pkill from matching its
 /// own command line. Best-effort: a cleanup failure must never abort the caller.
 async fn kill_agent_process(state: &AppState) {
+    // Kill exactly the main agent's recorded process so the compose assistant,
+    // which shares this workspace, is never collateral (issue #181). If no PID was
+    // recorded (e.g. an orphan from before this build), fall back to reaping stray
+    // `claude -p` processes, but still spare a running compose turn by its PID.
+    let script = format!(
+        "agent_pid=$(cat {agent} 2>/dev/null); compose_pid=$(cat {compose} 2>/dev/null); \
+         if [ -n \"$agent_pid\" ]; then kill -9 \"$agent_pid\" 2>/dev/null || true; rm -f {agent}; \
+         else for p in $(pgrep -f '[c]laude -p' 2>/dev/null); do \
+         [ \"$p\" = \"$compose_pid\" ] || kill -9 \"$p\" 2>/dev/null || true; done; fi; true",
+        agent = AGENT_PID_FILE,
+        compose = COMPOSE_PID_FILE,
+    );
     let _ = state
         .workspace
         .exec_capture(
             "/workspace",
-            vec![
-                "bash".to_string(),
-                "-lc".to_string(),
-                "pkill -9 -f '[c]laude -p' || true".to_string(),
-            ],
+            vec!["bash".to_string(), "-lc".to_string(), script],
             vec![],
         )
         .await;

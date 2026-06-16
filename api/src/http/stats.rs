@@ -211,6 +211,27 @@ pub async fn task(
     )))
 }
 
+/// `GET /api/v1/compose/stats` - the compose assistant's own usage totals, for
+/// its dedicated stats bar (issue #181). Its turns are separate from the board's,
+/// so this never mixes with the global or per-task numbers.
+pub async fn compose(State(state): State<AppState>) -> ApiResult<Json<StatsResponse>> {
+    let settings = queries::get_settings(&state.db).await?;
+    let agg = queries::compose_stats(&state.db).await?;
+    let running_since = queries::compose_running_since(&state.db).await?;
+    let latest_usage = queries::compose_latest_usage(&state.db).await?;
+    let rate_limit = queries::latest_rate_limit(&state.db).await?;
+    Ok(Json(build_response(
+        &settings,
+        &agg,
+        running_since,
+        latest_usage.as_ref(),
+        rate_limit.as_ref(),
+        // The compose stats settle at turn end; no live mid-turn overlay.
+        None,
+        state.usage(),
+    )))
+}
+
 /// `POST /api/v1/stats/reset` - reset the global statistics (non-destructive).
 pub async fn reset(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     queries::reset_global_stats(&state.db).await?;
