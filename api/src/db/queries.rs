@@ -1870,13 +1870,15 @@ pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
 }
 
 /// Marks any turn left `running` by a previous process (killed mid-turn, e.g. an
-/// API restart) as `failed` with a finish time. On a fresh boot no turn is
-/// actually generating, so every `running` row is orphaned; without this they
-/// linger forever and inflate the live worked-time and running-turn count. Returns
-/// how many were cleaned.
+/// API restart) as `failed`. On a fresh boot no turn is actually generating, so
+/// every `running` row is orphaned; left alone they linger forever and inflate the
+/// running-turn count. `finished_at` is set to `started_at` (zero duration), NOT
+/// `now()`: an ancient orphan finished at `now()` would add its whole bogus span to
+/// `worked_ms` (which sums `finished_at - started_at`), so zero is the safe choice.
+/// Returns how many were cleaned.
 pub async fn reclaim_orphaned_turns(pool: &PgPool) -> sqlx::Result<u64> {
     let result = sqlx::query(
-        "UPDATE turns SET status = 'failed', finished_at = now() WHERE status = 'running'",
+        "UPDATE turns SET status = 'failed', finished_at = started_at WHERE status = 'running'",
     )
     .execute(pool)
     .await?;
