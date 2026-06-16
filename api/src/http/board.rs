@@ -93,7 +93,7 @@ pub async fn move_task(
     // the agent abandons the now-misordered work and re-picks from the board on its
     // next tick, instead of grinding the stale turn to completion first (issue #172).
     if was_active_turn {
-        orchestrator::stop_active_turn(&state).await?;
+        orchestrator::stop_active_turn(&state, &task).await?;
         info!(task = %task.id, column = ?body.column, "stopped the agent's turn: its card was moved out of In Progress");
     }
 
@@ -248,7 +248,7 @@ pub async fn bulk_status(
         // If the selection swept up the card the agent is actively working, stop
         // that turn so it pivots instead of finishing misordered work (issue #172).
         if interrupt {
-            orchestrator::stop_active_turn(&state).await?;
+            orchestrator::stop_active_turn(&state, &moved).await?;
             info!(task = %moved.id, column = ?body.column, "stopped the agent's turn: its card was bulk-moved out of In Progress");
         }
         // Reflect the move onto the source ticket (close on Done, reopen

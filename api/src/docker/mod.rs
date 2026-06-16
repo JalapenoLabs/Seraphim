@@ -66,10 +66,25 @@ impl Workspace {
         command: Vec<String>,
         env: Vec<String>,
     ) -> Result<ExecOutput> {
+        self.exec_capture_in(&self.container, working_dir, command, env)
+            .await
+    }
+
+    /// Like [`Self::exec_capture`] but targets a named container, for per-railway
+    /// containers (issue #202): the railway carries which container to exec into.
+    /// With only the `main` railway, `container` is the default workspace, so this
+    /// matches [`Self::exec_capture`].
+    pub async fn exec_capture_in(
+        &self,
+        container: &str,
+        working_dir: &str,
+        command: Vec<String>,
+        env: Vec<String>,
+    ) -> Result<ExecOutput> {
         let exec = self
             .docker
             .create_exec(
-                &self.container,
+                container,
                 CreateExecOptions {
                     cmd: Some(command),
                     working_dir: Some(working_dir.to_string()),

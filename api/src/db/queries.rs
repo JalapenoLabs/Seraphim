@@ -497,30 +497,19 @@ pub async fn replace_environment_variables(
 }
 
 // --- Railways ----------------------------------------------------------------
-//
-// The data layer for railways lands ahead of the loops and HTTP routes that will
-// consume it (issues #202/#203), so these read helpers are not yet called. The
-// `expect(dead_code)` markers will fire (and prompt removal) once they are wired.
 
 /// The undeletable `main` railway, which owns everything by default.
 ///
 /// Exactly one row has `is_main` set (a partial unique index enforces it), so the
 /// fetch is unambiguous; it is always present after the `0036_railways` migration.
-#[expect(
-    dead_code,
-    reason = "wired up by the railway loops/routes in #202/#203"
-)]
 pub async fn get_main_railway(pool: &PgPool) -> sqlx::Result<Railway> {
     sqlx::query_as::<_, Railway>("SELECT * FROM railways WHERE is_main")
         .fetch_one(pool)
         .await
 }
 
-/// Every railway, ordered for swimlane display (`main` first, then by rank).
-#[expect(
-    dead_code,
-    reason = "wired up by the railway loops/routes in #202/#203"
-)]
+/// Every railway, ordered for swimlane display (`main` first, then by rank). The
+/// supervisor reconciles its running agent loops against this set each tick.
 pub async fn list_railways(pool: &PgPool) -> sqlx::Result<Vec<Railway>> {
     sqlx::query_as::<_, Railway>(
         "SELECT * FROM railways ORDER BY is_main DESC, position, created_at",
@@ -529,16 +518,41 @@ pub async fn list_railways(pool: &PgPool) -> sqlx::Result<Vec<Railway>> {
     .await
 }
 
-/// One railway by id, or `None` if it does not exist.
-#[expect(
-    dead_code,
-    reason = "wired up by the railway loops/routes in #202/#203"
-)]
+/// One railway by id, or `None` if it does not exist. The agent loop re-reads its
+/// railway each tick so a runtime pause / session change is picked up promptly.
 pub async fn get_railway(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Railway>> {
     sqlx::query_as::<_, Railway>("SELECT * FROM railways WHERE id = $1")
         .bind(id)
         .fetch_optional(pool)
         .await
+}
+
+/// Persists the railway's long-lived Claude session id (empty string clears it).
+///
+/// A non-`main` railway keeps its session only here; for `main` this mirrors
+/// `settings.current_session_id`, which stays the source of truth so the existing
+/// reset / persist paths are unchanged (issue #202).
+pub async fn set_railway_session_id(
+    pool: &PgPool,
+    railway_id: Uuid,
+    session_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE railways SET session_id = $2, updated_at = now() WHERE id = $1")
+        .bind(railway_id)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Clears every railway's session id, so a global hard reset starts every lane's
+/// conversation blank. `main`'s `settings.current_session_id` is cleared
+/// separately by the reset; this keeps the railway rows consistent with it.
+pub async fn clear_all_railway_sessions(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("UPDATE railways SET session_id = '', updated_at = now() WHERE session_id <> ''")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // --- Repositories ------------------------------------------------------------
@@ -1347,10 +1361,15 @@ pub async fn delete_tasks(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {
 /// finishes (success or failure) leaves `in_progress`, so a blocking task still
 /// sitting here is unfinished, being worked or parked waiting for input, and the
 /// agent must not start anything new.
-pub async fn has_active_blocking_task(pool: &PgPool) -> sqlx::Result<bool> {
+pub async fn has_active_blocking_task(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<bool> {
+    // Scoped to the railway (issue #202): each railway serializes only its own
+    // queue, so a blocking task on another lane never gates this one. With only the
+    // `main` railway every task is on `main`, so this matches the global behavior.
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE blocking = TRUE AND board_column = 'in_progress')",
+        "SELECT EXISTS(SELECT 1 FROM tasks \
+         WHERE blocking = TRUE AND board_column = 'in_progress' AND railway_id = $1)",
     )
+    .bind(railway_id)
     .fetch_one(pool)
     .await
 }
@@ -1480,18 +1499,23 @@ pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
 /// repo set), which is a separate execution model not yet built. Jira tickets
 /// still sync in, map to columns, and transition on moves; they just are not
 /// auto-pulled to be coded.
-pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+pub async fn pick_next_todo(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<Option<Task>> {
     // GitHub issues are always workable; internal tickets are too, but only once
     // the operator has pointed them at a target repo (the agent needs somewhere to
     // branch and open the PR). Jira tickets stay excluded (multi-repo execution is
     // not built yet). An internal ticket with no repo is left for the operator to
     // assign rather than pulled and immediately failed.
+    //
+    // Scoped to the railway (issue #202) so each lane pulls only its own work; with
+    // only `main` every task is on `main`, so the result is unchanged from before.
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'todo' AND hold = FALSE \
+         AND railway_id = $1 \
          AND (source_kind = 'github' \
               OR (source_kind = 'internal' AND repo_id IS NOT NULL)) \
          ORDER BY position ASC LIMIT 1",
     )
+    .bind(railway_id)
     .fetch_optional(pool)
     .await
 }
@@ -1511,11 +1535,12 @@ pub async fn list_review_candidates(pool: &PgPool) -> sqlx::Result<Vec<Task>> {
 
 /// The next PR whose failing CI the agent should fix: top of `In Review` flagged
 /// `ci_failing`, not on hold.
-pub async fn pick_next_ci_fix(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+pub async fn pick_next_ci_fix(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'ci_failing' \
-         AND hold = FALSE ORDER BY position ASC LIMIT 1",
+         AND hold = FALSE AND railway_id = $1 ORDER BY position ASC LIMIT 1",
     )
+    .bind(railway_id)
     .fetch_optional(pool)
     .await
 }
@@ -1526,11 +1551,15 @@ pub async fn pick_next_ci_fix(pool: &PgPool) -> sqlx::Result<Option<Task>> {
 /// Unlike [`pick_next_revisit`] this has no cooldown: a fresh conflict is handed
 /// back to the agent promptly (and ahead of new To Do work) so a PR that just
 /// fell out of mergeability is unblocked rather than left to the idle revisit.
-pub async fn pick_next_merge_conflict(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+pub async fn pick_next_merge_conflict(
+    pool: &PgPool,
+    railway_id: Uuid,
+) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'merge_conflict' \
-         AND hold = FALSE ORDER BY position ASC LIMIT 1",
+         AND hold = FALSE AND railway_id = $1 ORDER BY position ASC LIMIT 1",
     )
+    .bind(railway_id)
     .fetch_optional(pool)
     .await
 }
@@ -1559,13 +1588,18 @@ pub async fn reset_ci_fix_attempts(pool: &PgPool, id: Uuid) -> sqlx::Result<()> 
 /// The oldest blocked PR worth revisiting while the agent is otherwise idle: in
 /// review, `ci_blocked`, not on hold, and untouched for at least `cooldown_secs`
 /// (so a genuinely stuck PR is retried periodically, not in a tight loop).
-pub async fn pick_next_revisit(pool: &PgPool, cooldown_secs: i64) -> sqlx::Result<Option<Task>> {
+pub async fn pick_next_revisit(
+    pool: &PgPool,
+    railway_id: Uuid,
+    cooldown_secs: i64,
+) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'ci_blocked' \
-         AND hold = FALSE \
-         AND (last_activity_at IS NULL OR last_activity_at < now() - ($1 * interval '1 second')) \
+         AND hold = FALSE AND railway_id = $1 \
+         AND (last_activity_at IS NULL OR last_activity_at < now() - ($2 * interval '1 second')) \
          ORDER BY last_activity_at ASC NULLS FIRST LIMIT 1",
     )
+    .bind(railway_id)
     .bind(cooldown_secs)
     .fetch_optional(pool)
     .await
@@ -2194,16 +2228,17 @@ pub async fn count_pending_questions(pool: &PgPool, task_id: Uuid) -> sqlx::Resu
 /// A task that is parked on a question whose answer has arrived but not yet been
 /// delivered to the agent: in progress, nothing pending, at least one answered
 /// question still unacknowledged. This is what the agent loop resumes.
-pub async fn pick_resume_ready(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+pub async fn pick_resume_ready(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
         "SELECT t.* FROM tasks t \
-         WHERE t.board_column = 'in_progress' \
+         WHERE t.board_column = 'in_progress' AND t.railway_id = $1 \
            AND EXISTS (SELECT 1 FROM questions q WHERE q.task_id = t.id \
                        AND q.status <> 'pending' AND q.acknowledged = FALSE) \
            AND NOT EXISTS (SELECT 1 FROM questions q WHERE q.task_id = t.id \
                            AND q.status = 'pending') \
          ORDER BY t.position LIMIT 1",
     )
+    .bind(railway_id)
     .fetch_optional(pool)
     .await
 }

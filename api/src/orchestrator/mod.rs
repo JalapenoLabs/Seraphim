@@ -15,6 +15,7 @@ pub mod compose;
 mod network;
 mod prompt;
 mod provision;
+mod railway;
 mod review;
 mod subscription;
 mod thoughts;
@@ -33,13 +34,14 @@ use tracing::{error, info, warn};
 use crate::automation::{self, QueuePosition, RuleAction, RuleContext};
 use crate::claude::{run_turn, AgentEventKind, TurnArgs};
 use crate::db::models::{
-    AutomationRule, Repository, ReviewPolicy, SourceKind, Task, TaskColumn, TaskPullRequest,
-    TaskStatus,
+    AutomationRule, Railway, Repository, ReviewPolicy, SourceKind, Task, TaskColumn,
+    TaskPullRequest, TaskStatus,
 };
 use crate::db::queries;
 use crate::git;
 use crate::secrets::Scrubber;
 use crate::state::AppState;
+use railway::RailwayHandle;
 use review::{PrCi, PrReview, ReviewDecision};
 
 /// Pid file the main agent's `claude` records to, so a reset/defibrillation kills
@@ -133,6 +135,12 @@ enum WorkMode {
 
 /// Launches the background loops and an initial workspace provision. Returns
 /// immediately.
+///
+/// Sync, review, CI-watch, and the defibrillator are single global loops. The
+/// agent runs **one loop per railway** instead: the supervisor reconciles the
+/// running loops against the `railways` table, spawning [`agent_loop`] for each.
+/// With only the `main` railway that is exactly one agent loop, identical to the
+/// previous single-loop behavior.
 pub fn spawn(state: AppState) {
     tokio::spawn(provision_on_startup(state.clone()));
     tokio::spawn(sync_loop(state.clone()));
@@ -140,7 +148,9 @@ pub fn spawn(state: AppState) {
     tokio::spawn(ci_watch::ci_watch_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
     tokio::spawn(subscription::token_loop(state.clone()));
-    tokio::spawn(agent_loop(state));
+    tokio::spawn(railway::supervise(state, |state, handle| {
+        tokio::spawn(agent_loop(state, handle))
+    }));
 }
 
 /// Best-effort full provision at boot so the workspace is ready before the first
@@ -527,8 +537,11 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
 
     // Clear the shared session so the next turn starts blank, purge the recorded
     // history (which also zeroes the turn-derived stats), and requeue the task the
-    // agent was mid-work on so a fresh session can redo it cleanly.
+    // agent was mid-work on so a fresh session can redo it cleanly. The session is
+    // cleared on settings (main's source of truth) and on every railway row so all
+    // lanes restart blank and stay consistent (issue #202).
     queries::set_current_session_id(&state.db, None).await?;
+    queries::clear_all_railway_sessions(&state.db).await?;
     let turns_purged = queries::purge_history(&state.db).await?;
     let tasks_requeued = queries::reclaim_orphaned_tasks(&state.db).await?;
 
@@ -573,19 +586,23 @@ pub fn is_active_turn(column: TaskColumn, status: TaskStatus) -> bool {
         && matches!(status, TaskStatus::Working | TaskStatus::Preparing)
 }
 
-/// Stops the agent's in-flight turn immediately, abandoning whatever it was doing.
+/// Stops the agent's in-flight turn on `task` immediately, abandoning whatever it
+/// was doing.
 ///
 /// Used both by a per-task reset and when the operator pulls the worked card out
 /// from under the agent (issue #172). It bumps the reset epoch so the dying turn
 /// yields its post-turn handling (it won't move the card or persist its session),
-/// kills the orphaned `claude -p` process, and clears the shared session and live
-/// usage, since a turn killed mid-stream can leave the resumable conversation
-/// inconsistent for the next task. The caller decides *when* to interrupt; the
-/// single-threaded loop guarantees the live turn is unique (see [`is_active_turn`]).
-pub async fn stop_active_turn(state: &AppState) -> Result<()> {
+/// kills the orphaned `claude -p` process in the task's railway container, and
+/// clears that railway's session and the live usage, since a turn killed mid-stream
+/// can leave the resumable conversation inconsistent for the next task. The caller
+/// decides *when* to interrupt; the railway's single-threaded loop guarantees the
+/// live turn is unique (see [`is_active_turn`]).
+pub async fn stop_active_turn(state: &AppState, task: &Task) -> Result<()> {
     state.bump_reset_epoch();
-    kill_agent_process(state).await;
-    queries::set_current_session_id(&state.db, None).await?;
+    let handle = railway::handle_for(state, task.railway_id).await?;
+    kill_agent_process(state, &handle).await;
+    // Clear this railway's session (for `main`, also settings.current_session_id).
+    railway::write_session(state, &handle, None).await?;
     state.set_live_usage(None);
     Ok(())
 }
@@ -610,7 +627,7 @@ pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSu
     // loop is single-threaded, so the live turn is unique; a task merely parked
     // awaiting input, or sitting in review, is not it and must not be disturbed.
     if is_active_turn(task.board_column, task.status) {
-        stop_active_turn(state).await?;
+        stop_active_turn(state, &task).await?;
         summary.interrupted_agent = true;
         info!(task_id = %task.id, "stopped the agent's in-flight turn for the reset");
     }
@@ -733,19 +750,39 @@ async fn delete_local_branch(state: &AppState, repo: &Repository, branch: &str) 
 
 // --- Agent loop --------------------------------------------------------------
 
-async fn agent_loop(state: AppState) {
+/// One railway's agent loop: single-threaded over *its own* work. Many of these
+/// run in parallel (one per railway, supervised by [`railway::supervise`]), but
+/// each only ever pulls and works tasks on its own railway, so a railway never
+/// blocks another. With only `main` present this is the single agent loop of old.
+async fn agent_loop(state: AppState, handle: RailwayHandle) {
     loop {
-        match next_actionable_task(&state).await {
+        // Re-read the railway each tick so a runtime pause, a session change, or a
+        // deletion is picked up promptly. If it is gone (deleted), exit; the
+        // supervisor also aborts us, this just makes the loop self-terminating.
+        let railway = match queries::get_railway(&state.db, handle.id).await {
+            Ok(Some(railway)) => railway,
+            Ok(None) => {
+                info!(railway_id = %handle.id, "railway removed; stopping its agent loop");
+                return;
+            }
+            Err(error) => {
+                warn!(error = %error, railway_id = %handle.id, "agent loop: failed to read railway");
+                sleep(AGENT_IDLE_POLL).await;
+                continue;
+            }
+        };
+
+        match next_actionable_task(&state, &railway).await {
             Ok(Some((task, mode))) => {
                 // Keep a snapshot: if the turn aborts (a `?` propagated, leaving
                 // the card stranded and possibly an orphaned process), the
                 // defibrillator needs the task to record and recover it.
                 let snapshot = task.clone();
-                if let Err(error) = work_task(&state, task, mode).await {
+                if let Err(error) = work_task(&state, &handle, task, mode).await {
                     error!(error = %error, task_id = %snapshot.id, "task run aborted; defibrillating");
                     let detail = format!("The turn aborted with an error: {error}");
                     if let Err(defib_error) =
-                        defibrillate(&state, &snapshot, "working", &detail).await
+                        defibrillate(&state, &handle, &snapshot, "working", &detail).await
                     {
                         error!(error = %defib_error, task_id = %snapshot.id, "defibrillator failed after a turn abort");
                     }
@@ -761,14 +798,21 @@ async fn agent_loop(state: AppState) {
     }
 }
 
-/// The next card to work and how, or `None` if paused, halted, outside the
-/// availability schedule, or idle.
+/// The next card this railway should work and how, or `None` if paused, halted,
+/// outside the availability schedule, or idle.
 ///
-/// Greening an already-open PR takes priority over starting fresh work, so PRs
-/// don't linger red while the agent moves on to new issues.
-async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode)>> {
+/// The global master pause, availability schedule, and config-repo halt gate every
+/// railway; the railway's own pause gates only it. Task selection is scoped to the
+/// railway, so each lane serializes only its own work. Greening an already-open PR
+/// takes priority over starting fresh work, so PRs don't linger red while the
+/// agent moves on to new issues.
+async fn next_actionable_task(
+    state: &AppState,
+    railway: &Railway,
+) -> Result<Option<(Task, WorkMode)>> {
     let settings = queries::get_settings(&state.db).await?;
-    if settings.agent_paused {
+    // The global master pause and the railway's own pause each gate its work.
+    if settings.agent_paused || railway.paused {
         return Ok(None);
     }
     // Automatic usage-limit pause: hold all new work until the subscription
@@ -790,44 +834,50 @@ async fn next_actionable_task(state: &AppState) -> Result<Option<(Task, WorkMode
     if !availability::is_available(&settings, Utc::now()) {
         return Ok(None);
     }
-    if let Some(task) = queries::pick_resume_ready(&state.db).await? {
+    if let Some(task) = queries::pick_resume_ready(&state.db, railway.id).await? {
         return Ok(Some((task, WorkMode::Resume)));
     }
-    if let Some(task) = queries::pick_next_ci_fix(&state.db).await? {
+    if let Some(task) = queries::pick_next_ci_fix(&state.db, railway.id).await? {
         return Ok(Some((task, WorkMode::FixCi)));
     }
     // Resolving a conflict that blocked auto-merge also takes priority over fresh
     // work, so a PR that just lost mergeability is unblocked promptly rather than
     // abandoned while the agent moves on to the next issue.
-    if let Some(task) = queries::pick_next_merge_conflict(&state.db).await? {
+    if let Some(task) = queries::pick_next_merge_conflict(&state.db, railway.id).await? {
         return Ok(Some((task, WorkMode::ResolveConflict)));
     }
     // A blocking task in progress (being worked or parked waiting for input)
-    // serializes the queue: pull no new To Do work until it finishes. Resumes
-    // and CI fixes above continue existing in-flight work and are not gated.
-    if !queries::has_active_blocking_task(&state.db).await? {
-        if let Some(task) = queries::pick_next_todo(&state.db).await? {
+    // serializes this railway's queue: pull no new To Do work until it finishes.
+    // Resumes and CI fixes above continue existing in-flight work and are not gated.
+    if !queries::has_active_blocking_task(&state.db, railway.id).await? {
+        if let Some(task) = queries::pick_next_todo(&state.db, railway.id).await? {
             return Ok(Some((task, WorkMode::Fresh)));
         }
     }
     // Idle: circle back to a PR we gave up on and try once more (cooldown-gated).
     if let Some(task) =
-        queries::pick_next_revisit(&state.db, REVISIT_COOLDOWN.as_secs() as i64).await?
+        queries::pick_next_revisit(&state.db, railway.id, REVISIT_COOLDOWN.as_secs() as i64).await?
     {
         return Ok(Some((task, WorkMode::Revisit)));
     }
     Ok(None)
 }
 
-/// Dispatches a pulled card to the right end-to-end flow.
-async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
+/// Dispatches a pulled card to the right end-to-end flow, all on `handle`'s
+/// railway (its container + session).
+async fn work_task(
+    state: &AppState,
+    handle: &RailwayHandle,
+    task: Task,
+    mode: WorkMode,
+) -> Result<()> {
     match mode {
-        WorkMode::Fresh => work_fresh(state, task, false).await,
-        WorkMode::Resume => work_fresh(state, task, true).await,
+        WorkMode::Fresh => work_fresh(state, handle, task, false).await,
+        WorkMode::Resume => work_fresh(state, handle, task, true).await,
         // Every "re-engage on an existing PR" mode shares one flow; the mode only
         // chooses the prompt and whether the attempt budget is reset.
         WorkMode::FixCi | WorkMode::ResolveConflict | WorkMode::Revisit => {
-            work_pr_fix(state, task, mode).await
+            work_pr_fix(state, handle, task, mode).await
         }
     }
 }
@@ -850,8 +900,14 @@ async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
     repos
 }
 
-/// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR.
-async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
+/// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR. All execs
+/// target `handle`'s railway (its container + session).
+async fn work_fresh(
+    state: &AppState,
+    handle: &RailwayHandle,
+    task: Task,
+    resume: bool,
+) -> Result<()> {
     info!(task_id = %task.id, title = %task.title, resume, "working task");
 
     let Some(repo_id) = task.repo_id else {
@@ -862,6 +918,9 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
     };
 
     let settings = queries::get_settings(&state.db).await?;
+    // This railway's session is the conversation each turn resumes (for `main`,
+    // this mirrors settings.current_session_id).
+    let session_id = railway::read_session(state, handle).await?;
 
     // The per-repo branch template is an optional override of the global default.
     let branch_template = repo
@@ -885,13 +944,7 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         if let Err(error) = provision::prepare_branch(state, &settings, &repo, &branch).await {
             return fail(state, &task, &format!("repo preparation failed: {error}")).await;
         }
-        queries::mark_task_started(
-            &state.db,
-            task.id,
-            &branch,
-            settings.current_session_id.as_deref(),
-        )
-        .await?;
+        queries::mark_task_started(&state.db, task.id, &branch, session_id.as_deref()).await?;
         branch
     };
 
@@ -910,8 +963,8 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         let target_repos = load_target_repos(state, &task).await;
         prompt::build(&settings, &repo, &task, &branch, &comments, &target_repos)
     };
-    let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
-    persist_session(state, &settings, &outcome).await?;
+    let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
+    persist_session(state, handle, &outcome).await?;
     // A hard reset during the turn has already reclaimed this task and wiped the
     // session; don't fail it or move it, just yield to the reset.
     if state.reset_epoch() != outcome.epoch {
@@ -926,7 +979,7 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
             .error
             .as_deref()
             .unwrap_or("the agent stopped responding");
-        return defibrillate(state, &task, "working", detail).await;
+        return defibrillate(state, handle, &task, "working", detail).await;
     }
     // Surface a turn failure (e.g. "Not logged in") on the task itself, instead
     // of letting it fall through to the generic "no pull request" message.
@@ -989,7 +1042,12 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
 /// judged it out of scope, so the PR is left for a human and the agent moves on. A
 /// revisit also resets the fix-attempt counter so the renewed effort gets the full
 /// budget again.
-async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
+async fn work_pr_fix(
+    state: &AppState,
+    handle: &RailwayHandle,
+    task: Task,
+    mode: WorkMode,
+) -> Result<()> {
     info!(task_id = %task.id, attempts = task.ci_fix_attempts, ?mode, "fixing pull request");
 
     let Some(repo_id) = task.repo_id else {
@@ -1081,8 +1139,8 @@ async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()>
         }
     };
     let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
-    let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
-    persist_session(state, &settings, &outcome).await?;
+    let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
+    persist_session(state, handle, &outcome).await?;
     // A hard reset during the turn owns this task now; yield to it.
     if state.reset_epoch() != outcome.epoch {
         info!(task_id = %task.id, "hard reset during turn; leaving the task to the reset");
@@ -1095,7 +1153,7 @@ async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()>
             .error
             .as_deref()
             .unwrap_or("the agent stopped responding");
-        return defibrillate(state, &task, "working", detail).await;
+        return defibrillate(state, handle, &task, "working", detail).await;
     }
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
@@ -1145,19 +1203,22 @@ async fn work_pr_fix(state: &AppState, task: Task, mode: WorkMode) -> Result<()>
     Ok(())
 }
 
-/// Persists a turn's session id when it differs from the stored one. Skipped if a
-/// hard reset happened during the turn, so the just-cleared session isn't revived.
+/// Persists a turn's session id onto its railway when it differs from the stored
+/// one. Skipped if a hard reset happened during the turn, so the just-cleared
+/// session isn't revived. For `main` this also keeps `settings.current_session_id`
+/// in sync (see [`railway::write_session`]).
 async fn persist_session(
     state: &AppState,
-    settings: &crate::db::models::Settings,
+    handle: &RailwayHandle,
     outcome: &TurnOutcome,
 ) -> Result<()> {
     if state.reset_epoch() != outcome.epoch {
         return Ok(());
     }
     if let Some(session_id) = &outcome.session_id {
-        if settings.current_session_id.as_deref() != Some(session_id.as_str()) {
-            queries::set_current_session_id(&state.db, Some(session_id)).await?;
+        let current = railway::read_session(state, handle).await?;
+        if current.as_deref() != Some(session_id.as_str()) {
+            railway::write_session(state, handle, Some(session_id)).await?;
         }
     }
     Ok(())
@@ -1189,6 +1250,7 @@ struct TurnOutcome {
 /// waits. Any other outcome (success, a different error) returns immediately.
 async fn run_agent_turn(
     state: &AppState,
+    handle: &RailwayHandle,
     settings: &crate::db::models::Settings,
     task: &Task,
     prompt: String,
@@ -1196,7 +1258,7 @@ async fn run_agent_turn(
     let mut attempt = 0_u32;
     loop {
         attempt += 1;
-        let outcome = stream_turn(state, settings, task, prompt.clone()).await?;
+        let outcome = stream_turn(state, handle, settings, task, prompt.clone()).await?;
 
         let throttled = outcome
             .error
@@ -1246,6 +1308,7 @@ fn is_transient_rate_limit(message: &str) -> bool {
 /// to the UI. The caller composes the prompt (fresh work or a CI fix).
 async fn stream_turn(
     state: &AppState,
+    handle: &RailwayHandle,
     settings: &crate::db::models::Settings,
     task: &Task,
     prompt: String,
@@ -1257,13 +1320,17 @@ async fn stream_turn(
     // Claude runs at the workspace root so it can work across all cloned repos.
     let working_dir = "/workspace".to_string();
 
+    // The session this turn resumes is the railway's (for `main`, that mirrors
+    // settings.current_session_id).
+    let resume_session_id = railway::read_session(state, handle).await?;
+
     let idx = queries::next_turn_idx(&state.db, task.id).await?;
     let turn = queries::create_turn(
         &state.db,
         task.id,
         idx,
         &prompt,
-        settings.current_session_id.as_deref(),
+        resume_session_id.as_deref(),
     )
     .await?;
 
@@ -1288,10 +1355,10 @@ async fn stream_turn(
     );
 
     let args = TurnArgs {
-        container: state.workspace.container().to_string(),
+        container: handle.container().to_string(),
         working_dir,
         prompt,
-        resume_session_id: settings.current_session_id.clone(),
+        resume_session_id: resume_session_id.clone(),
         model: settings.claude_model.clone(),
         auth_mode: settings.claude_auth_mode,
         // Refresh the subscription token if it is near expiry, so a turn never runs
@@ -1307,12 +1374,12 @@ async fn stream_turn(
     // Clear any claude process leaked by a previously aborted turn. The agent is
     // single-threaded, so none should legitimately be running; a leftover would
     // otherwise contend on the same shared session. Best-effort.
-    kill_agent_process(state).await;
+    kill_agent_process(state, handle).await;
 
     let mut stream = Box::pin(run_turn(state.workspace.docker(), args));
     // seq 0 is the prompt event recorded above; the stream's events follow.
     let mut seq = 1_i32;
-    let mut session_id = settings.current_session_id.clone();
+    let mut session_id = resume_session_id.clone();
     let mut result_text: Option<String> = None;
     let mut total_cost: Option<f64> = None;
     // The terminal `result` event's `usage` block (input/output/cache tokens),
@@ -1353,7 +1420,7 @@ async fn stream_turn(
                 heart_attack = true;
                 // Stop the stalled process now so it can't keep spinning orphaned
                 // and so the dropped stream's exec is reaped promptly.
-                kill_agent_process(state).await;
+                kill_agent_process(state, handle).await;
                 break;
             }
         };
@@ -2000,12 +2067,13 @@ async fn block(state: &AppState, task: &Task, message: &str) -> Result<()> {
 
 // --- Dead-agent management (heart attacks / the defibrillator) ----------------
 
-/// Kills any `claude -p` process left running in the workspace. The agent is
-/// single-threaded, so on a healthy machine none should be running between turns;
-/// a leftover is an orphan from an aborted turn that would otherwise keep spinning
-/// (and contend on the shared session). The `[c]` keeps pkill from matching its
-/// own command line. Best-effort: a cleanup failure must never abort the caller.
-async fn kill_agent_process(state: &AppState) {
+/// Kills any `claude -p` process left running in the railway's workspace. The
+/// agent is single-threaded *per railway*, so on a healthy machine none should be
+/// running between that railway's turns; a leftover is an orphan from an aborted
+/// turn that would otherwise keep spinning (and contend on the shared session).
+/// The `[c]` keeps pkill from matching its own command line. Best-effort: a
+/// cleanup failure must never abort the caller.
+async fn kill_agent_process(state: &AppState, handle: &RailwayHandle) {
     // Kill exactly the main agent's recorded process so the compose assistant,
     // which shares this workspace, is never collateral (issue #181). If no PID was
     // recorded (e.g. an orphan from before this build), fall back to reaping stray
@@ -2020,7 +2088,8 @@ async fn kill_agent_process(state: &AppState) {
     );
     let _ = state
         .workspace
-        .exec_capture(
+        .exec_capture_in(
+            handle.container(),
             "/workspace",
             vec!["bash".to_string(), "-lc".to_string(), script],
             vec![],
@@ -2063,14 +2132,16 @@ fn decide_recovery(incident_count: i64, has_pr: bool) -> Recovery {
 /// operational status at death, captured for the incident record.
 async fn defibrillate(
     state: &AppState,
+    handle: &RailwayHandle,
     task: &Task,
     status_label: &str,
     detail: &str,
 ) -> Result<()> {
     warn!(task_id = %task.id, detail, "heart attack: defibrillating");
 
-    // Shock first: make sure no orphaned claude process keeps spinning.
-    kill_agent_process(state).await;
+    // Shock first: make sure no orphaned claude process keeps spinning in this
+    // railway's container.
+    kill_agent_process(state, handle).await;
 
     // Decide recovery from how many times this task has now died.
     let incident_count = queries::count_heart_attacks_for_task(&state.db, task.id).await? + 1;
@@ -2151,7 +2222,16 @@ async fn defibrillator_loop(state: AppState) {
                      not recover on its own.",
                     WATCHDOG_TIMEOUT.as_secs() / 60,
                 );
-                if let Err(error) = defibrillate(&state, &task, "working", &detail).await {
+                // The watchdog is a single global loop; resolve the stranded task's
+                // railway so the shock targets the right container + session.
+                let handle = match railway::handle_for(&state, task.railway_id).await {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        error!(error = %error, task_id = %task.id, "defibrillator could not resolve the task's railway");
+                        continue;
+                    }
+                };
+                if let Err(error) = defibrillate(&state, &handle, &task, "working", &detail).await {
                     error!(error = %error, task_id = %task.id, "defibrillator failed to recover a stranded task");
                 }
             }
