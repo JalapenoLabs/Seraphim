@@ -214,19 +214,23 @@ pub async fn bulk_create(
     .into_response())
 }
 
-/// Creates an internal ticket from a draft (its repo, if set, becomes the target).
+/// Creates an internal ticket from a draft (its repo, if set, becomes the single
+/// target repo the agent branches in).
 async fn create_internal(state: &AppState, draft: &IssueDraft) -> Result<Option<String>, String> {
     let position = queries::max_position_in_column(&state.db, TaskColumn::Available)
         .await
         .map_err(|error| error.to_string())?
         .unwrap_or(0.0)
         + 1.0;
+    // The draft carries at most one target repo; pass it as the (0-or-1 entry)
+    // repo set the multi-repo `create_internal_task` now expects.
+    let repo_ids: Vec<Uuid> = draft.repo_id.into_iter().collect();
     queries::create_internal_task(
         &state.db,
         draft.title.trim(),
         &draft.body,
         "open",
-        draft.repo_id,
+        &repo_ids,
         position,
     )
     .await
