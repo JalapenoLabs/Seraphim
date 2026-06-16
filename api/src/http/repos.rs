@@ -2,7 +2,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -10,11 +10,82 @@ use super::ApiResult;
 use crate::db::models::{RepoDeletionImpact, Repository, ReviewPolicy};
 use crate::db::queries;
 use crate::git;
+use crate::orchestrator::provision::repo_dir_name;
 use crate::state::AppState;
 
 /// `GET /api/v1/repos`
 pub async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<Repository>>> {
     Ok(Json(queries::list_repositories(&state.db).await?))
+}
+
+/// Soft cap on seeded paths so a huge monorepo cannot return an unbounded payload.
+/// runewood's `exclude` globs and `git ls-files` (which skips gitignored trees like
+/// `node_modules` / `target`) already trim most noise (#216).
+const MAX_TREE_PATHS: usize = 20_000;
+
+/// The tracked-file list used to seed the watch page's activity forest (#216).
+#[derive(Debug, Serialize)]
+pub struct RepoTreeResponse {
+    pub paths: Vec<String>,
+}
+
+/// `GET /api/v1/activity/tree`
+///
+/// Runs `git ls-files` in the workspace for every enabled repo and returns the
+/// tracked paths, each prefixed with the repo's flat clone dir so the first path
+/// segment is the repo, matching the live activity mapper (which strips
+/// `/workspace/`). A repo that is not cloned, or whose exec fails, is skipped
+/// rather than failing the whole request, so the forest still seeds from the rest.
+pub async fn tree(State(state): State<AppState>) -> ApiResult<Json<RepoTreeResponse>> {
+    let repos = queries::list_enabled_repositories(&state.db).await?;
+
+    let mut paths = Vec::new();
+    'repos: for repo in repos {
+        let dir_name = repo_dir_name(&repo.full_name);
+        let dir = format!("/workspace/{dir_name}");
+        // `core.quotePath=false` keeps non-ascii paths literal instead of octal-escaped,
+        // so they match the live event paths exactly.
+        let command = vec![
+            "git".to_string(),
+            "-c".to_string(),
+            "core.quotePath=false".to_string(),
+            "ls-files".to_string(),
+        ];
+
+        let output = match state
+            .workspace
+            .exec_capture(&dir, command, Vec::new())
+            .await
+        {
+            Ok(output) if output.succeeded() => output,
+            Ok(output) => {
+                tracing::debug!(
+                    repo = %repo.full_name,
+                    exit = output.exit_code,
+                    "skipping repo tree: git ls-files failed (repo not cloned?)"
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::debug!(repo = %repo.full_name, %error, "skipping repo tree: exec failed");
+                continue;
+            }
+        };
+
+        for line in output.output.lines() {
+            let file = line.trim();
+            if file.is_empty() {
+                continue;
+            }
+            if paths.len() >= MAX_TREE_PATHS {
+                tracing::debug!(cap = MAX_TREE_PATHS, "repo tree truncated at the path cap");
+                break 'repos;
+            }
+            paths.push(format!("{dir_name}/{file}"));
+        }
+    }
+
+    Ok(Json(RepoTreeResponse { paths }))
 }
 
 #[derive(Debug, Deserialize)]

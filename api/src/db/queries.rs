@@ -772,6 +772,17 @@ pub async fn list_repositories_to_sync(pool: &PgPool) -> sqlx::Result<Vec<Reposi
     .await
 }
 
+/// Enabled repos, for seeding the activity forest with their tracked files (#216).
+/// Every enabled repo is cloned flat under `/workspace`, so this is the set whose
+/// `git ls-files` makes up the seeded tree.
+pub async fn list_enabled_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
+    sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE enabled = TRUE ORDER BY full_name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Repos assigned to one railway, for provisioning that railway's container
 /// (issue #203). A repo belongs to exactly one railway, so this is the exact set
 /// to clone into its container. With only `main`, this is every repo.
