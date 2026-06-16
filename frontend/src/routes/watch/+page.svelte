@@ -3,7 +3,7 @@
   // Stats bar on top; a big remaining count, a huge live ring for the task being
   // worked, and a big completed count in the middle; and a combined live activity
   // feed across every task along the bottom. Built to be left running on a TV.
-  import type { BoardResponse, Task, TaskStatus } from '$lib/types'
+  import type { BoardResponse, Stats, Task, TaskStatus } from '$lib/types'
   import type { RunewoodController, RunewoodHighlight, Hsl } from 'runewood'
 
   import { onMount, onDestroy, tick } from 'svelte'
@@ -12,18 +12,26 @@
   import { cubicOut } from 'svelte/easing'
   import { fly } from 'svelte/transition'
 
-  import { getBoard } from '$lib/api'
+  import { getBoard, getGlobalStats } from '$lib/api'
   import { STATUS_LABELS } from '$lib/types'
   import { isWithinSchedule } from '$lib/schedule'
   import { describeRateLimit } from '$lib/rateLimit'
   import { mapActivityEvent, DEFAULT_EXCLUDES } from '$lib/runewood/mapEvent'
-  import Stats from '$lib/components/Stats.svelte'
+  import UsageGauges from '$lib/components/stats/UsageGauges.svelte'
+  import LifetimeTotals from '$lib/components/stats/LifetimeTotals.svelte'
 
   let board = $state<BoardResponse | null>(null)
   let boardStream: EventSource | null = null
   let activityStream: EventSource | null = null
   let now = $state(Date.now())
   let clock: ReturnType<typeof setInterval> | null = null
+
+  // Global agent stats flank the hero ring (the kiosk has no separate stats bar).
+  // We fetch them here and pass them to the presentational gauge/total components,
+  // so the page holds a single stats source rather than two polling widgets.
+  let stats = $state<Stats | null>(null)
+  let statsFetchedAt = $state(Date.now())
+  let statsPoll: ReturnType<typeof setInterval> | null = null
 
   // The rolling activity feed: one entry per meaningful agent action, newest last.
   type FeedEntry = {
@@ -382,12 +390,33 @@
     }
   }
 
+  async function loadStats() {
+    try {
+      stats = await getGlobalStats()
+      statsFetchedAt = Date.now()
+    } catch (error) {
+      console.debug('failed to load watch stats', error)
+    }
+  }
+
+  // Worked time counts up live between fetches (mirroring the Stats panel): the
+  // server's `worked_ms` already includes each running turn up to the fetch, so we
+  // add only the time elapsed since, scaled by the number of running turns.
+  const workedMs = $derived(
+    stats ? stats.worked_ms + stats.running_turns * Math.max(0, now - statsFetchedAt) : 0
+  )
+
   onMount(() => {
     loadBoard()
+    loadStats()
     clock = setInterval(() => (now = Date.now()), 1000)
+    // A slow baseline poll reconciles with the persisted totals; the live ticking
+    // comes from the `usage` SSE nudge below and the per-second clock.
+    statsPoll = setInterval(loadStats, 5000)
 
     boardStream = new EventSource('/api/v1/board/stream')
     boardStream.addEventListener('board', () => loadBoard())
+    boardStream.addEventListener('usage', () => loadStats())
 
     activityStream = new EventSource('/api/v1/activity/stream')
     activityStream.addEventListener('activity', (message) => {
@@ -447,6 +476,7 @@
 
   onDestroy(() => {
     if (clock) clearInterval(clock)
+    if (statsPoll) clearInterval(statsPoll)
     boardStream?.close()
     activityStream?.close()
     forest?.destroy()
@@ -460,7 +490,7 @@
   <div class="grid-overlay pointer-events-none absolute inset-0" aria-hidden="true"></div>
 
   <div class="relative z-10 flex h-full flex-col gap-5 p-6 xl:p-8">
-    <!-- Stats bar -->
+    <!-- Title + live agent-state pill -->
     <header class="flex items-center justify-between gap-4">
       <a href="/" class="flex items-center gap-2 text-lg font-bold tracking-tight">
         <img
@@ -480,28 +510,33 @@
       </span>
     </header>
 
-    <div class="shrink-0"><Stats /></div>
-
-    <!-- Big trio: remaining · live ring · completed -->
-    <section class="grid grid-cols-1 items-center gap-6 lg:grid-cols-3">
-      <!-- Remaining -->
-      <div class="flex flex-col items-center lg:items-end lg:pr-4 lg:text-right">
-        <div
-          class="text-[clamp(2.1rem,5.4vw,4.8rem)] font-black leading-none tabular-nums text-warning [text-shadow:0_0_40px_color-mix(in_srgb,var(--warning)_45%,transparent)]"
-        >
-          {Math.round(remainingShown.current)}
-        </div>
-        <div class="mt-1 text-sm font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-          Remaining
-        </div>
-        <div class="mt-1 text-xs text-muted-foreground">
-          {queuedCount} queued · {inReviewCount} in review
+    <!-- Hero band: usage gauges + Remaining on the left, the live ring in the
+         center, Completed + lifetime totals on the right. Filling the flanks with
+         the stats kills the dead space and keeps everything glanceable at once. -->
+    <section class="flex flex-wrap items-center justify-between gap-x-8 gap-y-6 lg:flex-nowrap">
+      <!-- Left flank: the three usage gauges, then Remaining nearest the ring. -->
+      <div class="flex flex-1 items-center justify-center gap-6 lg:justify-end lg:gap-8">
+        {#if stats}
+          <UsageGauges {stats} gaugeSize="size-[clamp(4.5rem,6vw,6rem)]" class="justify-end" />
+        {/if}
+        <div class="flex flex-col items-center lg:items-end lg:text-right">
+          <div
+            class="text-[clamp(2.1rem,5.4vw,4.8rem)] font-black leading-none tabular-nums text-warning [text-shadow:0_0_40px_color-mix(in_srgb,var(--warning)_45%,transparent)]"
+          >
+            {Math.round(remainingShown.current)}
+          </div>
+          <div class="mt-1 text-sm font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+            Remaining
+          </div>
+          <div class="mt-1 text-xs text-muted-foreground">
+            {queuedCount} queued · {inReviewCount} in review
+          </div>
         </div>
       </div>
 
-      <!-- Live ring -->
-      <div class="grid place-items-center py-2">
-        <div class="relative grid size-[clamp(7.5rem,13vw,12rem)] place-items-center">
+      <!-- Live ring (center) -->
+      <div class="grid shrink-0 place-items-center py-2">
+        <div class="relative grid size-[clamp(9.5rem,16vw,15rem)] place-items-center">
           <!-- pulsing aura behind the ring -->
           <div
             class="absolute inset-0 rounded-full blur-2xl {spin !== 'none' ? 'animate-breathe' : 'opacity-20'}"
@@ -523,20 +558,20 @@
           {/if}
           <!-- inner face -->
           <div
-            class="absolute inset-[14px] grid place-items-center rounded-full border border-white/5 bg-[#0a0e1a]/90 p-6 text-center backdrop-blur"
+            class="absolute inset-[12px] grid place-items-center rounded-full border border-white/5 bg-[#0a0e1a]/90 p-4 text-center backdrop-blur"
           >
             {#if current}
               {#key current.id}
-                <div class="flex flex-col items-center gap-2" in:fly={{ y: 10, duration: 350 }}>
-                  <span class="text-[0.65rem] font-semibold uppercase tracking-[0.3em] text-success">
+                <div class="flex flex-col items-center gap-1.5" in:fly={{ y: 10, duration: 350 }}>
+                  <span class="text-[0.5rem] font-semibold uppercase tracking-[0.3em] text-success">
                     Now working
                   </span>
-                  <span class="line-clamp-3 text-balance text-lg font-semibold leading-snug xl:text-xl">
+                  <span class="line-clamp-3 text-balance text-sm font-semibold leading-snug xl:text-base">
                     {current.title}
                   </span>
-                  <span class="text-xs text-muted-foreground">#{current.external_id}</span>
+                  <span class="text-[0.7rem] text-muted-foreground">#{current.external_id}</span>
                   <span
-                    class="mt-1 inline-flex items-center gap-1.5 rounded-full bg-success/10 px-3 py-1 text-xs font-medium text-success"
+                    class="mt-0.5 inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-0.5 text-[0.7rem] font-medium text-success"
                   >
                     <span class="size-1.5 animate-pulse rounded-full bg-success"></span>
                     {STATUS_LABELS[current.status] ?? current.status}
@@ -544,27 +579,32 @@
                 </div>
               {/key}
             {:else}
-              <div class="flex flex-col items-center gap-2 text-muted-foreground">
-                <span class="text-4xl">{STANDBY_GLYPH[agentState.key]}</span>
-                <span class="text-sm font-semibold uppercase tracking-[0.3em]">{agentState.label}</span>
-                <span class="max-w-[12rem] text-xs">{STANDBY_MESSAGE[agentState.key]}</span>
+              <div class="flex flex-col items-center gap-1.5 text-muted-foreground">
+                <span class="text-3xl">{STANDBY_GLYPH[agentState.key]}</span>
+                <span class="text-xs font-semibold uppercase tracking-[0.3em]">{agentState.label}</span>
+                <span class="max-w-[9rem] text-[0.7rem] leading-snug">{STANDBY_MESSAGE[agentState.key]}</span>
               </div>
             {/if}
           </div>
         </div>
       </div>
 
-      <!-- Completed -->
-      <div class="flex flex-col items-center lg:items-start lg:pl-4 lg:text-left">
-        <div
-          class="text-[clamp(2.1rem,5.4vw,4.8rem)] font-black leading-none tabular-nums text-success [text-shadow:0_0_40px_color-mix(in_srgb,var(--success)_45%,transparent)]"
-        >
-          {Math.round(completedShown.current)}
+      <!-- Right flank: Completed nearest the ring, then the lifetime totals. -->
+      <div class="flex flex-1 items-center justify-center gap-6 lg:justify-start lg:gap-8">
+        <div class="flex flex-col items-center lg:items-start lg:text-left">
+          <div
+            class="text-[clamp(2.1rem,5.4vw,4.8rem)] font-black leading-none tabular-nums text-success [text-shadow:0_0_40px_color-mix(in_srgb,var(--success)_45%,transparent)]"
+          >
+            {Math.round(completedShown.current)}
+          </div>
+          <div class="mt-1 text-sm font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+            Completed
+          </div>
+          <div class="mt-1 text-xs text-muted-foreground">shipped to done</div>
         </div>
-        <div class="mt-1 text-sm font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-          Completed
-        </div>
-        <div class="mt-1 text-xs text-muted-foreground">shipped to done</div>
+        {#if stats}
+          <LifetimeTotals {stats} {workedMs} class="justify-start" />
+        {/if}
       </div>
     </section>
 
