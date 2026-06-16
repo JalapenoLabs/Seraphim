@@ -17,6 +17,10 @@
   let { taskId = null, compose = false }: { taskId?: string | null; compose?: boolean } = $props()
 
   let stats = $state<Stats | null>(null)
+  // When the current `stats` was fetched. The server's `worked_ms` already counts
+  // running turns up to that instant, so the live tick only adds the time elapsed
+  // since, scaled by how many turns are running.
+  let fetchedAt = $state(Date.now())
   let open = $state(true)
   let now = $state(Date.now())
   let poll: ReturnType<typeof setInterval> | null = null
@@ -29,13 +33,16 @@
 
   async function refresh() {
     try {
+      let next: Stats
       if (compose) {
-        stats = await getComposeStats()
+        next = await getComposeStats()
       } else if (taskId) {
-        stats = await getTaskStats(taskId)
+        next = await getTaskStats(taskId)
       } else {
-        stats = await getGlobalStats()
+        next = await getGlobalStats()
       }
+      stats = next
+      fetchedAt = Date.now()
     } catch (error) {
       console.debug('failed to load stats', error)
     }
@@ -69,15 +76,14 @@
     unsubscribe?.()
   })
 
-  // Worked time counts up live: the persisted total plus the elapsed time of any
-  // turn currently in progress.
+  // Worked time counts up live: the server's `worked_ms` already includes each
+  // running turn's elapsed time at fetch, so we add only the time since the fetch,
+  // multiplied by the number of running turns. Parallel railway lanes therefore
+  // advance the clock at the correct combined rate.
   const workedMs = $derived.by(() => {
     if (!stats) return 0
-    let ms = stats.worked_ms
-    if (stats.running_since) {
-      ms += Math.max(0, now - new Date(stats.running_since).getTime())
-    }
-    return ms
+    const sinceFetch = Math.max(0, now - fetchedAt)
+    return stats.worked_ms + stats.running_turns * sinceFetch
   })
 
   const contextPct = $derived(

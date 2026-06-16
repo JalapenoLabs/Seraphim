@@ -308,10 +308,13 @@ export type Stats = {
   // Total output tokens (includes reasoning).
   output_tokens: number
   total_tokens: number
-  // Time worked, summed over completed turns (does not reset across re-work).
+  // Time worked: the persisted completed-turn total plus each currently-running
+  // turn's elapsed time up to the moment the server answered this request.
   worked_ms: number
-  // If a turn is in progress, when it started, so the UI ticks live.
-  running_since: string | null
+  // How many turns are running right now (0, or up to one per railway). The UI
+  // keeps ticking worked time at `running_turns * elapsed-since-fetch`, so parallel
+  // railway lanes advance the clock at the correct combined rate.
+  running_turns: number
   // Latest turn's context size, and the active model's window (the denominator).
   context_tokens: number
   context_window: number

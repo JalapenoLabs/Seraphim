@@ -1,5 +1,6 @@
 //! Shared application state and the server-sent-event broadcast bus.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -63,8 +64,15 @@ pub enum ServerEvent {
 /// gauges advance smoothly mid-turn instead of only at message/turn boundaries.
 /// It is a live UI affordance, not the billing record (the `result` event remains
 /// the source of truth for persisted cost/usage).
+///
+/// Railways run their turns in parallel, so the live overlay is held per railway
+/// (keyed by `railway_id` on [`AppState::live_usage`]); each turn owns and clears
+/// only its own railway's entry. The global stats aggregate across all entries.
 #[derive(Debug, Clone, Copy)]
 pub struct LiveUsage {
+    /// The railway whose lane this turn runs on. The map key as well, kept on the
+    /// value so an aggregate read needs no separate lookup.
+    pub railway_id: Uuid,
     /// The task whose turn is generating.
     pub task_id: Uuid,
     /// Turn-cumulative output tokens so far: the finalized output of completed
@@ -74,6 +82,39 @@ pub struct LiveUsage {
     /// context gauge. Input recurs per round-trip, so this is the latest message's
     /// value, not a turn sum.
     pub context_tokens: i64,
+}
+
+/// The aggregate of every railway's live overlay, for the global stats endpoint.
+///
+/// Output tokens sum across lanes (each lane's output is additive), the context
+/// gauge takes the **max** over lanes (context fill is per-session and does not
+/// add up, so the global gauge shows the lane closest to compaction), and
+/// `running_turns` counts the lanes currently generating so the client can tick
+/// worked time at the correct combined rate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveUsageAggregate {
+    /// Summed live output tokens across all generating lanes.
+    pub output_tokens: i64,
+    /// The largest live context size across lanes (0 when no lane is generating).
+    pub max_context_tokens: i64,
+    /// How many lanes are currently generating (for the live worked-time tick).
+    pub running_turns: i64,
+}
+
+/// Folds each lane's live overlay into the global aggregate.
+///
+/// Output tokens sum (each lane's output is additive), the context gauge takes the
+/// max (per-session fill does not add up; the global gauge shows the lane closest
+/// to compaction), and `running_turns` counts the lanes. Kept pure and free of the
+/// lock so it can be unit-tested directly.
+fn aggregate_live_usage(entries: impl Iterator<Item = LiveUsage>) -> LiveUsageAggregate {
+    let mut aggregate = LiveUsageAggregate::default();
+    for entry in entries {
+        aggregate.output_tokens += entry.output_tokens;
+        aggregate.max_context_tokens = aggregate.max_context_tokens.max(entry.context_tokens);
+        aggregate.running_turns += 1;
+    }
+    aggregate
 }
 
 /// A cached subscription usage snapshot for the gauge, polled from
@@ -103,10 +144,12 @@ pub struct AppState {
     /// current turn. Purely an ephemeral UI signal, so it lives in memory rather
     /// than the database; the board handler reads it into the settings payload.
     cooldown_until: Arc<RwLock<Option<DateTime<Utc>>>>,
-    /// Live token usage of the turn currently generating, or `None` between turns.
-    /// Ephemeral (like [`Self::cooldown_until`]); the stats endpoints overlay it on
-    /// the persisted totals so the counter ticks during generation.
-    live_usage: Arc<RwLock<Option<LiveUsage>>>,
+    /// Live token usage of each railway's in-progress turn, keyed by `railway_id`.
+    /// Railways generate in parallel, so this is a per-lane map rather than a single
+    /// slot; an absent key means that lane is between turns. Ephemeral (like
+    /// [`Self::cooldown_until`]); the stats endpoints overlay it on the persisted
+    /// totals so the counters tick during generation.
+    live_usage: Arc<RwLock<HashMap<Uuid, LiveUsage>>>,
     /// The PKCE secrets for an in-flight Claude subscription OAuth login, held
     /// between starting the flow (which returns the consent URL) and the operator
     /// pasting the code back. Ephemeral; only one login is in flight at a time.
@@ -173,7 +216,7 @@ impl AppState {
             events,
             internal_api_url,
             cooldown_until: Arc::new(RwLock::new(None)),
-            live_usage: Arc::new(RwLock::new(None)),
+            live_usage: Arc::new(RwLock::new(HashMap::new())),
             pending_oauth: Arc::new(RwLock::new(None)),
             usage: Arc::new(RwLock::new(None)),
             claude_token_refresh: Arc::new(AsyncMutex::new(())),
@@ -221,16 +264,47 @@ impl AppState {
         *self.cooldown_until.write().expect("cooldown lock poisoned") = until;
     }
 
-    /// The live token usage of the in-progress turn, if one is generating.
-    pub fn live_usage(&self) -> Option<LiveUsage> {
-        *self.live_usage.read().expect("live usage lock poisoned")
+    /// The live token usage of one railway's in-progress turn, if it is generating.
+    pub fn live_usage_for(&self, railway_id: Uuid) -> Option<LiveUsage> {
+        self.live_usage
+            .read()
+            .expect("live usage lock poisoned")
+            .get(&railway_id)
+            .copied()
     }
 
-    /// Sets (or clears with `None`) the in-progress turn's live token usage.
-    /// Cheap and called often; pair with the throttled [`Self::notify_usage`] for
-    /// the SSE tick rather than emitting on every update.
-    pub fn set_live_usage(&self, usage: Option<LiveUsage>) {
-        *self.live_usage.write().expect("live usage lock poisoned") = usage;
+    /// The aggregate of every railway's live overlay, for the global stats endpoint.
+    /// Sums output tokens, takes the max context, and counts the generating lanes.
+    pub fn live_usage_aggregate(&self) -> LiveUsageAggregate {
+        let usage = self.live_usage.read().expect("live usage lock poisoned");
+        aggregate_live_usage(usage.values().copied())
+    }
+
+    /// Records one railway's in-progress turn live token usage. Cheap and called
+    /// often; pair with the throttled [`Self::notify_usage`] for the SSE tick rather
+    /// than emitting on every update.
+    pub fn set_live_usage(&self, usage: LiveUsage) {
+        self.live_usage
+            .write()
+            .expect("live usage lock poisoned")
+            .insert(usage.railway_id, usage);
+    }
+
+    /// Drops one railway's live overlay (the turn ended), leaving other lanes' live
+    /// usage intact.
+    pub fn clear_live_usage_for(&self, railway_id: Uuid) {
+        self.live_usage
+            .write()
+            .expect("live usage lock poisoned")
+            .remove(&railway_id);
+    }
+
+    /// Drops every railway's live overlay at once (used by the global hard reset).
+    pub fn clear_live_usage(&self) {
+        self.live_usage
+            .write()
+            .expect("live usage lock poisoned")
+            .clear();
     }
 
     /// Stashes the PKCE secrets for an in-flight subscription OAuth login.
@@ -338,5 +412,52 @@ impl AppState {
     /// Signals that the compose drafts or stats changed; clients refetch them.
     pub fn notify_compose_changed(&self) {
         let _ = self.events.send(ServerEvent::ComposeChanged);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live(output: i64, context: i64) -> LiveUsage {
+        LiveUsage {
+            railway_id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            output_tokens: output,
+            context_tokens: context,
+        }
+    }
+
+    #[test]
+    fn aggregate_is_empty_with_no_lanes() {
+        let aggregate = aggregate_live_usage(std::iter::empty());
+        assert_eq!(aggregate.output_tokens, 0);
+        assert_eq!(aggregate.max_context_tokens, 0);
+        assert_eq!(aggregate.running_turns, 0);
+    }
+
+    #[test]
+    fn aggregate_single_lane_matches_that_lane() {
+        let aggregate = aggregate_live_usage([live(120, 8_000)].into_iter());
+        // The single-railway case reads exactly as the lane's own live usage.
+        assert_eq!(aggregate.output_tokens, 120);
+        assert_eq!(aggregate.max_context_tokens, 8_000);
+        assert_eq!(aggregate.running_turns, 1);
+    }
+
+    #[test]
+    fn aggregate_sums_output_and_counts_two_lanes() {
+        let aggregate = aggregate_live_usage([live(120, 8_000), live(80, 5_000)].into_iter());
+        // Output tokens add across lanes so the live counter roughly doubles.
+        assert_eq!(aggregate.output_tokens, 200);
+        assert_eq!(aggregate.running_turns, 2);
+    }
+
+    #[test]
+    fn aggregate_takes_max_context_not_sum() {
+        let aggregate = aggregate_live_usage([live(10, 8_000), live(10, 5_000)].into_iter());
+        // Context fill is per-session, so the global gauge shows the largest lane,
+        // never the sum (which would overflow the window).
+        assert_eq!(aggregate.max_context_tokens, 8_000);
     }
 }

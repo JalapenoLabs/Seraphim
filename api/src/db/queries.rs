@@ -2310,12 +2310,17 @@ pub async fn task_running_since(
     .await
 }
 
-/// When any currently-running turn started, for the global live time ticker.
-pub async fn global_running_since(pool: &PgPool) -> sqlx::Result<Option<DateTime<Utc>>> {
+/// The start time of every currently-running turn, across all railways.
+///
+/// Railways run turns in parallel, so the global worked-time tick must account for
+/// each running turn's elapsed time, not just one. The handler folds these into the
+/// reported `worked_ms` (persisted total plus each turn's elapsed so far) and the
+/// `running_turns` count the client uses to keep ticking at the combined rate.
+pub async fn global_running_turns(pool: &PgPool) -> sqlx::Result<Vec<DateTime<Utc>>> {
     sqlx::query_scalar(
-        "SELECT started_at FROM turns WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
+        "SELECT started_at FROM turns WHERE status = 'running' ORDER BY started_at DESC",
     )
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
 }
 

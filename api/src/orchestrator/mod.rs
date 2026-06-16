@@ -677,7 +677,8 @@ pub async fn hard_reset(state: &AppState, purge_memories: bool) -> Result<()> {
     let tasks_requeued = queries::reclaim_orphaned_tasks(&state.db).await?;
 
     // Drop the ephemeral in-memory signals so the UI doesn't show stale gauges.
-    state.set_live_usage(None);
+    // The hard reset wipes every railway, so clear all lanes' live overlays.
+    state.clear_live_usage();
     state.set_cooldown_until(None);
 
     state.notify_board();
@@ -805,7 +806,8 @@ pub async fn stop_active_turn(state: &AppState, task: &Task) -> Result<()> {
     kill_agent_process(state, &handle).await;
     // Clear this railway's session (every railway owns its own session row).
     railway::write_session(state, &handle, None).await?;
-    state.set_live_usage(None);
+    // Only this lane's live overlay is stale; leave parallel lanes' entries intact.
+    state.clear_live_usage_for(handle.id);
     Ok(())
 }
 
@@ -1789,8 +1791,9 @@ async fn stream_turn(
     // throttled to `LIVE_USAGE_TICK` so the UI stays smooth without flooding.
     let mut usage = crate::claude::UsageTracker::default();
     let mut last_usage_tick: Option<Instant> = None;
-    // A stale overlay from a prior turn would otherwise show until the first tick.
-    state.set_live_usage(None);
+    // A stale overlay from a prior turn on this railway would otherwise show until
+    // the first tick. Only this lane's entry is cleared; parallel lanes keep theirs.
+    state.clear_live_usage_for(handle.id);
 
     loop {
         // Bound each wait for the next event by the heartbeat: a turn that goes
@@ -1840,11 +1843,12 @@ async fn stream_turn(
                 *cache_read_input_tokens,
                 *cache_creation_input_tokens,
             );
-            state.set_live_usage(Some(crate::state::LiveUsage {
+            state.set_live_usage(crate::state::LiveUsage {
+                railway_id: handle.id,
                 task_id: task.id,
                 output_tokens: usage.output_tokens(),
                 context_tokens: usage.context_tokens(),
-            }));
+            });
             let now = Instant::now();
             if last_usage_tick.is_none_or(|last| now.duration_since(last) >= LIVE_USAGE_TICK) {
                 state.notify_usage(task.id);
@@ -1946,9 +1950,9 @@ async fn stream_turn(
     )
     .await?;
 
-    // The turn's usage is now persisted (the source of truth). Drop the live
-    // overlay and tick once more so the gauges settle on the final total.
-    state.set_live_usage(None);
+    // The turn's usage is now persisted (the source of truth). Drop this railway's
+    // live overlay and tick once more so the gauges settle on the final total.
+    state.clear_live_usage_for(handle.id);
     state.notify_usage(task.id);
 
     // Optionally summarize this turn's reasoning back onto the source issue.

@@ -17,6 +17,9 @@
   let { railwayId }: { railwayId: string } = $props()
 
   let stats = $state<Stats | null>(null)
+  // When the current `stats` was fetched; the live worked-time tick adds only the
+  // time elapsed since, scaled by the lane's running-turn count (0 or 1).
+  let fetchedAt = $state(Date.now())
   let now = $state(Date.now())
   let poll: ReturnType<typeof setInterval> | null = null
   let ticker: ReturnType<typeof setInterval> | null = null
@@ -25,6 +28,7 @@
   async function refresh() {
     try {
       stats = await getRailwayStats(railwayId)
+      fetchedAt = Date.now()
     } catch (error) {
       console.debug('failed to load railway stats', error)
     }
@@ -46,14 +50,13 @@
     unsubscribe?.()
   })
 
-  // Worked time counts up live: the persisted total plus any in-progress turn.
+  // Worked time counts up live: the server's `worked_ms` already includes the
+  // running turn's elapsed time at fetch, so we add only the time since the fetch
+  // (this lane runs at most one turn, so `running_turns` is 0 or 1).
   const workedMs = $derived.by(() => {
     if (!stats) return 0
-    let ms = stats.worked_ms
-    if (stats.running_since) {
-      ms += Math.max(0, now - new Date(stats.running_since).getTime())
-    }
-    return ms
+    const sinceFetch = Math.max(0, now - fetchedAt)
+    return stats.worked_ms + stats.running_turns * sinceFetch
   })
 
   const contextPct = $derived(

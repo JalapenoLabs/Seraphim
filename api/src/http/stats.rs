@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::ApiResult;
 use crate::db::models::{Settings, StatsAggregate};
 use crate::db::queries;
-use crate::state::{AppState, LiveUsage, SubscriptionUsage};
+use crate::state::{AppState, SubscriptionUsage};
 
 #[derive(Debug, Serialize)]
 pub struct StatsResponse {
@@ -30,10 +30,14 @@ pub struct StatsResponse {
     /// Total output tokens (includes reasoning).
     pub output_tokens: i64,
     pub total_tokens: i64,
-    /// Total time worked, in milliseconds, summed over completed turns.
+    /// Total time worked, in milliseconds: the persisted completed-turn total plus
+    /// each currently-running turn's elapsed time up to the moment of this request.
+    /// The client keeps ticking it at `running_turns * elapsed-since-fetch`.
     pub worked_ms: i64,
-    /// If a turn is in progress, when it started, so the UI can tick live.
-    pub running_since: Option<DateTime<Utc>>,
+    /// How many turns are running right now (0, or up to one per railway). The
+    /// client multiplies its post-fetch elapsed time by this so the live worked-time
+    /// tick grows at the correct combined rate across parallel lanes.
+    pub running_turns: i64,
     /// The latest turn's context size (input + cache tokens), as a stand-in for
     /// how full the context window currently is.
     pub context_tokens: i64,
@@ -110,13 +114,24 @@ fn rate_limit_fields(payload: &Value) -> (Option<f64>, Option<i64>, Option<Strin
     (utilization, resets_at, status)
 }
 
+/// The live mid-turn overlay applied on top of the persisted totals.
+///
+/// For a single scope (task / railway) this is one running turn's live usage; for
+/// the global scope `output_tokens` is summed across lanes and `context_tokens` is
+/// the **max** across lanes (context fill is per-session, so it does not add up).
+#[derive(Debug, Clone, Copy, Default)]
+struct LiveOverlay {
+    output_tokens: i64,
+    context_tokens: i64,
+}
+
 fn build_response(
     settings: &Settings,
     agg: &StatsAggregate,
-    running_since: Option<DateTime<Utc>>,
+    running_turns: &[DateTime<Utc>],
     latest_usage: Option<&Value>,
     rate_limit: Option<&Value>,
-    live_usage: Option<LiveUsage>,
+    live: LiveOverlay,
     usage: Option<SubscriptionUsage>,
 ) -> StatsResponse {
     let input_total = agg.input_tokens + agg.cache_creation_tokens + agg.cache_read_tokens;
@@ -141,24 +156,34 @@ fn build_response(
         .as_ref()
         .and_then(|snapshot| snapshot.seven_day_resets_at);
 
-    // Overlay the in-progress turn's live usage (if any) on top of the persisted,
+    // Overlay the in-progress turn(s) live usage (if any) on top of the persisted,
     // completed-turn totals so the counter ticks mid-turn. Only output is added to
     // the totals (output is turn-cumulative); input recurs per round-trip, so the
     // live input feeds only the context gauge, not the cumulative input total. The
     // persisted `result` event remains the source of truth once the turn lands.
-    let live_output = live_usage.map_or(0, |usage| usage.output_tokens);
-    let context = live_usage
-        .map(|usage| usage.context_tokens)
-        .filter(|&tokens| tokens > 0)
-        .unwrap_or_else(|| latest_usage.map_or(0, context_tokens));
+    let live_output = live.output_tokens;
+    let context = if live.context_tokens > 0 {
+        live.context_tokens
+    } else {
+        latest_usage.map_or(0, context_tokens)
+    };
+
+    // Fold each running turn's elapsed time into `worked_ms` so the reported total
+    // already includes the in-flight work, and report the count so the client can
+    // keep ticking at the correct combined rate (one increment per running lane).
+    let now = Utc::now();
+    let running_elapsed: i64 = running_turns
+        .iter()
+        .map(|started_at| (now - *started_at).num_milliseconds().max(0))
+        .sum();
 
     StatsResponse {
         cost_usd: agg.cost_usd,
         input_tokens: input_total,
         output_tokens: agg.output_tokens + live_output,
         total_tokens: input_total + agg.output_tokens + live_output,
-        worked_ms: agg.worked_ms,
-        running_since,
+        worked_ms: agg.worked_ms + running_elapsed,
+        running_turns: i64::try_from(running_turns.len()).unwrap_or(i64::MAX),
         context_tokens: context,
         context_window: context_window(&settings.claude_model),
         usage_utilization,
@@ -174,17 +199,24 @@ fn build_response(
 pub async fn global(State(state): State<AppState>) -> ApiResult<Json<StatsResponse>> {
     let settings = queries::get_settings(&state.db).await?;
     let agg = queries::global_stats(&state.db).await?;
-    let running_since = queries::global_running_since(&state.db).await?;
+    let running_turns = queries::global_running_turns(&state.db).await?;
     let latest_usage = queries::global_latest_usage(&state.db).await?;
     let rate_limit = queries::latest_rate_limit(&state.db).await?;
+    // Railways generate in parallel, so the global overlay aggregates every lane:
+    // output sums across lanes, while context takes the max (per-session fill does
+    // not add up, so the gauge shows the lane closest to compaction).
+    let aggregate = state.live_usage_aggregate();
+    let live = LiveOverlay {
+        output_tokens: aggregate.output_tokens,
+        context_tokens: aggregate.max_context_tokens,
+    };
     Ok(Json(build_response(
         &settings,
         &agg,
-        running_since,
+        &running_turns,
         latest_usage.as_ref(),
         rate_limit.as_ref(),
-        // One shared agent, so any in-progress turn's live usage counts globally.
-        state.live_usage(),
+        live,
         state.usage(),
     )))
 }
@@ -196,17 +228,33 @@ pub async fn task(
 ) -> ApiResult<Json<StatsResponse>> {
     let settings = queries::get_settings(&state.db).await?;
     let agg = queries::task_stats(&state.db, id).await?;
-    let running_since = queries::task_running_since(&state.db, id).await?;
+    let running_turns = queries::task_running_since(&state.db, id)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     let latest_usage = queries::task_latest_usage(&state.db, id).await?;
     let rate_limit = queries::latest_rate_limit(&state.db).await?;
+    // Overlay the live counter only when the running turn is this task's. The turn
+    // runs on the task's railway lane, so read that lane's entry and confirm it is
+    // for this task (another card on the same lane must not borrow its counter).
+    let live = match queries::get_task(&state.db, id).await? {
+        Some(task) => state
+            .live_usage_for(task.railway_id)
+            .filter(|usage| usage.task_id == id)
+            .map(|usage| LiveOverlay {
+                output_tokens: usage.output_tokens,
+                context_tokens: usage.context_tokens,
+            })
+            .unwrap_or_default(),
+        None => LiveOverlay::default(),
+    };
     Ok(Json(build_response(
         &settings,
         &agg,
-        running_since,
+        &running_turns,
         latest_usage.as_ref(),
         rate_limit.as_ref(),
-        // Only overlay the live counter when the running turn is this task's.
-        state.live_usage().filter(|usage| usage.task_id == id),
+        live,
         state.usage(),
     )))
 }
@@ -224,32 +272,32 @@ pub async fn railway(
 ) -> ApiResult<Json<StatsResponse>> {
     let settings = queries::get_settings(&state.db).await?;
     let agg = queries::railway_stats(&state.db, id).await?;
-    let running_since = queries::railway_running_since(&state.db, id).await?;
+    // A railway is single-threaded (one agent loop per lane), so at most one of its
+    // turns runs at a time; this is a 0-or-1 element list for the worked-time tick.
+    let running_turns = queries::railway_running_since(&state.db, id)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     let latest_usage = queries::railway_latest_usage(&state.db, id).await?;
     let rate_limit = queries::latest_rate_limit(&state.db).await?;
 
-    // Overlay the live mid-turn counter only when the running turn's task belongs
-    // to this lane, so a lane that is not the one currently working never borrows
-    // another lane's live tokens.
-    let live_usage = match state.live_usage() {
-        Some(usage) => {
-            let running_railway = queries::get_task(&state.db, usage.task_id)
-                .await?
-                .map(|task| task.railway_id);
-            running_railway
-                .filter(|&railway_id| railway_id == id)
-                .map(|_| usage)
-        }
-        None => None,
-    };
+    // The live overlay is keyed by railway, so this lane's entry is exactly its own
+    // running turn; no other lane's tokens can be borrowed.
+    let live = state
+        .live_usage_for(id)
+        .map(|usage| LiveOverlay {
+            output_tokens: usage.output_tokens,
+            context_tokens: usage.context_tokens,
+        })
+        .unwrap_or_default();
 
     Ok(Json(build_response(
         &settings,
         &agg,
-        running_since,
+        &running_turns,
         latest_usage.as_ref(),
         rate_limit.as_ref(),
-        live_usage,
+        live,
         state.usage(),
     )))
 }
@@ -260,17 +308,20 @@ pub async fn railway(
 pub async fn compose(State(state): State<AppState>) -> ApiResult<Json<StatsResponse>> {
     let settings = queries::get_settings(&state.db).await?;
     let agg = queries::compose_stats(&state.db).await?;
-    let running_since = queries::compose_running_since(&state.db).await?;
+    let running_turns = queries::compose_running_since(&state.db)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     let latest_usage = queries::compose_latest_usage(&state.db).await?;
     let rate_limit = queries::latest_rate_limit(&state.db).await?;
     Ok(Json(build_response(
         &settings,
         &agg,
-        running_since,
+        &running_turns,
         latest_usage.as_ref(),
         rate_limit.as_ref(),
         // The compose stats settle at turn end; no live mid-turn overlay.
-        None,
+        LiveOverlay::default(),
         state.usage(),
     )))
 }
