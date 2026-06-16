@@ -51,6 +51,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The self-hosted runner has rustup installed under $HOME, but its job
+      # shells don't source ~/.cargo/env, so `cargo` is missing from PATH and the
+      # steps below otherwise fail with "cargo: command not found" (exit 127)
+      # across fmt/clippy/test (issue #200). Prepend Cargo's bin dir to PATH via
+      # $GITHUB_PATH, which applies to every subsequent step.
+      - name: Put Cargo on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       # The runner is self-hosted, so $HOME survives between jobs while the
       # checked-out tree does not: actions/checkout runs `git clean -ffdx`, which
       # deletes the gitignored api/target every run. Point Cargo's build output at
