@@ -555,6 +555,52 @@ pub async fn clear_all_railway_sessions(pool: &PgPool) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// Records a railway's container lifecycle state (issue #203).
+///
+/// Driven as the per-railway container is created, started, and idle-stopped, so
+/// the API and UI can show whether a lane is up. `main` is always reported
+/// `running` (its compose container is always on) without going through here.
+pub async fn set_railway_lifecycle_state(
+    pool: &PgPool,
+    railway_id: Uuid,
+    state: crate::db::models::RailwayState,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE railways SET lifecycle_state = $2, updated_at = now() WHERE id = $1")
+        .bind(railway_id)
+        .bind(state)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The most recent task activity on a railway, or `None` if it has no tasks with
+/// recorded activity. The idle-stop reaper compares this against its timeout to
+/// decide whether a non-`main` railway's container can be stopped (issue #203).
+pub async fn railway_last_activity(
+    pool: &PgPool,
+    railway_id: Uuid,
+) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar("SELECT MAX(last_activity_at) FROM tasks WHERE railway_id = $1")
+        .bind(railway_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// Whether a railway has a task currently being worked (`in_progress` +
+/// `working`/`preparing`). The reaper never stops a railway with a live turn, and
+/// the lazy-start path never needs to act on one. Pairs with
+/// [`railway_last_activity`] for the idle decision (issue #203).
+pub async fn railway_has_running_turn(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tasks \
+         WHERE railway_id = $1 AND board_column = 'in_progress' \
+         AND status IN ('working', 'preparing'))",
+    )
+    .bind(railway_id)
+    .fetch_one(pool)
+    .await
+}
+
 // --- Repositories ------------------------------------------------------------
 
 pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
@@ -568,6 +614,21 @@ pub async fn list_repositories_to_sync(pool: &PgPool) -> sqlx::Result<Vec<Reposi
     sqlx::query_as::<_, Repository>(
         "SELECT * FROM repositories WHERE sync_issues = TRUE AND enabled = TRUE ORDER BY full_name",
     )
+    .fetch_all(pool)
+    .await
+}
+
+/// Repos assigned to one railway, for provisioning that railway's container
+/// (issue #203). A repo belongs to exactly one railway, so this is the exact set
+/// to clone into its container. With only `main`, this is every repo.
+pub async fn list_repositories_for_railway(
+    pool: &PgPool,
+    railway_id: Uuid,
+) -> sqlx::Result<Vec<Repository>> {
+    sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE railway_id = $1 ORDER BY full_name",
+    )
+    .bind(railway_id)
     .fetch_all(pool)
     .await
 }

@@ -21,7 +21,16 @@ mod subscription;
 mod thoughts;
 mod usage;
 
-pub use provision::provision_workspace;
+/// Provisions the `main` railway's container (the compose-managed workspace): the
+/// config repo, network policy, env setup, and every repo assigned to `main`.
+///
+/// The manual workspace endpoints and startup both target `main`; a non-`main`
+/// railway provisions lazily on its first task instead (issue #203). A dedicated
+/// per-railway management API is deferred to a later issue.
+pub async fn provision_workspace(state: &AppState) -> Result<()> {
+    let main = railway::handle_for_main(state).await?;
+    provision::provision_workspace(state, &main).await
+}
 
 use std::time::{Duration, Instant};
 
@@ -148,6 +157,9 @@ pub fn spawn(state: AppState) {
     tokio::spawn(ci_watch::ci_watch_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
     tokio::spawn(subscription::token_loop(state.clone()));
+    // The idle-stop reaper: a single global loop that stops idle non-`main`
+    // railway containers (issue #203). It never touches `main`.
+    tokio::spawn(railway::reaper(state.clone()));
     tokio::spawn(railway::supervise(state, |state, handle| {
         tokio::spawn(agent_loop(state, handle))
     }));
@@ -177,7 +189,17 @@ async fn provision_on_startup(state: AppState) {
         }
     }
 
-    match provision::provision_workspace(&state).await {
+    // Startup provisioning targets the `main` railway (the compose workspace).
+    // Non-`main` railways provision lazily on their first task (issue #203), so
+    // they are not (re)provisioned here.
+    let main = match railway::handle_for_main(&state).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            error!(error = %error, "could not resolve the main railway for startup provisioning");
+            return;
+        }
+    };
+    match provision::provision_workspace(&state, &main).await {
         Ok(()) => info!("workspace provisioned"),
         Err(error) => {
             // Only a config-repo failure halts the agent (tracked separately in
@@ -865,12 +887,20 @@ async fn next_actionable_task(
 
 /// Dispatches a pulled card to the right end-to-end flow, all on `handle`'s
 /// railway (its container + session).
+///
+/// Before any exec, the railway's container is brought up: for a non-`main`
+/// railway this lazily creates / starts / provisions it (issue #203); for `main`
+/// it is a no-op, so main-only behavior is unchanged.
 async fn work_task(
     state: &AppState,
     handle: &RailwayHandle,
     task: Task,
     mode: WorkMode,
 ) -> Result<()> {
+    // Lazy start: ensure this railway's container is running and provisioned the
+    // moment it has actionable work, before the turn execs into it.
+    handle.ensure_running(state).await?;
+
     match mode {
         WorkMode::Fresh => work_fresh(state, handle, task, false).await,
         WorkMode::Resume => work_fresh(state, handle, task, true).await,
@@ -941,7 +971,9 @@ async fn work_fresh(
         state.notify_board();
 
         let branch = render_branch(branch_template, &task);
-        if let Err(error) = provision::prepare_branch(state, &settings, &repo, &branch).await {
+        if let Err(error) =
+            provision::prepare_branch(state, handle, &settings, &repo, &branch).await
+        {
             return fail(state, &task, &format!("repo preparation failed: {error}")).await;
         }
         queries::mark_task_started(&state.db, task.id, &branch, session_id.as_deref()).await?;
@@ -1083,7 +1115,7 @@ async fn work_pr_fix(
     let repos = task_branch_repos(state, &task, &repo).await?;
     for branch_repo in &repos {
         if let Err(error) =
-            provision::prepare_existing_branch(state, &settings, branch_repo, &branch).await
+            provision::prepare_existing_branch(state, handle, &settings, branch_repo, &branch).await
         {
             return fail(
                 state,

@@ -8,11 +8,18 @@
 //!
 //! Two entry points: [`provision_workspace`] (heavy, sets up everything) and
 //! [`prepare_branch`] (light, per-task: ensure the focus repo and cut a branch).
+//!
+//! Every prep exec is scoped to a railway's container (issue #203). `main` always
+//! targets the compose-managed workspace, so its behavior is unchanged; a non-
+//! `main` railway targets its own per-railway container and clones only the repos
+//! assigned to that railway. The plumbing is the same in both cases; only the
+//! container name and the repo set differ.
 
 use base64::Engine;
 use eyre::{eyre, Result};
 
 use super::network;
+use super::railway::RailwayHandle;
 use crate::db::models::{Repository, Settings};
 use crate::db::queries;
 use crate::state::AppState;
@@ -78,7 +85,10 @@ fn prelude_agents(settings: &Settings) -> String {
 ///
 /// On failure the error is persisted (so the UI banners it and the agent halts)
 /// and returned.
-pub async fn provision_config_repo(state: &AppState) -> Result<()> {
+///
+/// `handle` selects the railway's container; the config repo is cloned into each
+/// railway's own container so every lane has the agent's brain (issue #203).
+pub async fn provision_config_repo(state: &AppState, handle: &RailwayHandle) -> Result<()> {
     let settings = queries::get_settings(&state.db).await?;
     if settings.config_repo_url.trim().is_empty() {
         queries::set_config_repo_error(&state.db, None).await?;
@@ -93,7 +103,7 @@ pub async fn provision_config_repo(state: &AppState) -> Result<()> {
         config = config_repo_snippet(&settings.config_repo_url),
     );
 
-    match run(state, &script).await {
+    match run(state, handle.container(), &script).await {
         Ok(()) => {
             queries::set_config_repo_error(&state.db, None).await?;
             Ok(())
@@ -156,7 +166,7 @@ with open(path, "w") as fh:
 /// `~/.claude/settings.json` permissions and merges it in. Runs after the config
 /// repo is (re)cloned so it patches whatever `settings.json` the operator ships,
 /// rather than being overwritten by it.
-pub async fn apply_network_policy(state: &AppState) -> Result<()> {
+pub async fn apply_network_policy(state: &AppState, handle: &RailwayHandle) -> Result<()> {
     let settings = queries::get_settings(&state.db).await?;
     let managed = encode(&serde_json::to_string(&network::managed_permissions(
         &settings,
@@ -170,20 +180,26 @@ pub async fn apply_network_policy(state: &AppState) -> Result<()> {
          SERAPHIM_MANAGED_PERMS=\"$(echo {managed} | base64 -d)\" \\\n\
          python3 -c \"$(echo {script} | base64 -d)\"\n",
     );
-    run(state, &bash).await
+    run(state, handle.container(), &bash).await
 }
 
-/// Full provision: config repo (hard fail) + network policy + env setup + every
-/// enabled repo (clone/update, per-repo CLAUDE.md, per-repo setup).
-pub async fn provision_workspace(state: &AppState) -> Result<()> {
+/// Full provision of a railway's container: config repo (hard fail) + network
+/// policy + env setup + every enabled repo assigned to this railway (clone/update,
+/// per-repo CLAUDE.md, per-repo setup).
+///
+/// `handle` selects which container to provision and which repos belong to it: a
+/// repo belongs to exactly one railway, so a non-`main` railway clones only its
+/// own repos, while `main` clones everything assigned to `main`. With only the
+/// `main` railway present, that is every repo, identical to the prior behavior.
+pub async fn provision_workspace(state: &AppState, handle: &RailwayHandle) -> Result<()> {
     // The config repo is the agent's brain (AGENTS.md, skills, docs); set it up
     // first and stop if it fails.
-    provision_config_repo(state).await?;
+    provision_config_repo(state, handle).await?;
     // Then stamp the network policy onto its settings.json (or a fresh one).
-    apply_network_policy(state).await?;
+    apply_network_policy(state, handle).await?;
 
     let settings = queries::get_settings(&state.db).await?;
-    let repos = queries::list_repositories(&state.db).await?;
+    let repos = queries::list_repositories_for_railway(&state.db, handle.id).await?;
 
     let mut script = String::from("set -e\n");
     script.push_str(&prelude_agents(&settings));
@@ -199,7 +215,7 @@ pub async fn provision_workspace(state: &AppState) -> Result<()> {
         script.push_str(&repo_block(repo, true));
     }
 
-    run(state, &script).await
+    run(state, handle.container(), &script).await
 }
 
 /// Bash that returns a repo's working tree to a clean state before a checkout.
@@ -214,9 +230,11 @@ fn reset_tree_snippet() -> &'static str {
      git reset --hard 2>/dev/null || true\n"
 }
 
-/// Per-task prep: ensure config + AGENTS.md + the focus repo, then cut `branch`.
+/// Per-task prep: ensure config + AGENTS.md + the focus repo, then cut `branch`,
+/// all in the task's railway container (`handle`).
 pub async fn prepare_branch(
     state: &AppState,
+    handle: &RailwayHandle,
     settings: &Settings,
     repo: &Repository,
     branch: &str,
@@ -231,7 +249,7 @@ pub async fn prepare_branch(
     script.push_str(reset_tree_snippet());
     script.push_str(&branch_prep_snippet(&repo.default_branch, branch));
 
-    run(state, &script).await
+    run(state, handle.container(), &script).await
 }
 
 /// Bash that re-ups the target branch, then cuts a fresh work branch from it.
@@ -258,6 +276,7 @@ fn branch_prep_snippet(default: &str, branch: &str) -> String {
 /// default, which would discard the work the PR is built on.
 pub async fn prepare_existing_branch(
     state: &AppState,
+    handle: &RailwayHandle,
     settings: &Settings,
     repo: &Repository,
     branch: &str,
@@ -279,7 +298,7 @@ pub async fn prepare_existing_branch(
         branch = branch,
     ));
 
-    run(state, &script).await
+    run(state, handle.container(), &script).await
 }
 
 /// Bash to clone-or-update a single repo, write its CLAUDE.md, and (on a fresh
@@ -322,8 +341,11 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
     )
 }
 
-/// Runs a prep script in the workspace, surfacing a non-zero exit as an error.
-async fn run(state: &AppState, script: &str) -> Result<()> {
+/// Runs a prep script in `container`, surfacing a non-zero exit as an error.
+///
+/// The container is the railway's: `main`'s is the compose-managed workspace, a
+/// non-`main` railway's is its own per-railway container (issue #203).
+async fn run(state: &AppState, container: &str, script: &str) -> Result<()> {
     let github_token = queries::get_github_token(&state.db).await?;
     // Wire git's credential helper for HTTPS remotes (GH_TOKEN is in this exec's
     // env); SSH remotes use the mounted key instead.
@@ -335,7 +357,8 @@ async fn run(state: &AppState, script: &str) -> Result<()> {
     }
     let output = state
         .workspace
-        .exec_capture(
+        .exec_capture_in(
+            container,
             "/workspace",
             vec!["bash".to_string(), "-lc".to_string(), full_script],
             env,

@@ -8,7 +8,10 @@
 //! Following M-SERVICES-CLONE, [`Workspace`] is cheaply cloneable (the inner
 //! `bollard::Docker` is already `Arc`-backed).
 
-use bollard::container::{LogOutput, RemoveContainerOptions};
+use bollard::container::{
+    Config, CreateContainerOptions, LogOutput, RemoveContainerOptions, StartContainerOptions,
+    StopContainerOptions,
+};
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::Docker;
 use eyre::{eyre, Context, Result};
@@ -20,6 +23,21 @@ pub struct Workspace {
     docker: Docker,
     container: String,
     image_tag: String,
+}
+
+/// The running state of a container, as far as the railway lifecycle cares.
+///
+/// A railway's per-railway container (issue #203) is created lazily and idle-
+/// STOPPED (never removed), so these three are the only states the orchestrator
+/// distinguishes when deciding whether to create, start, or leave it be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerState {
+    /// No container by that name exists yet (it has never been created).
+    Absent,
+    /// The container exists but is stopped (idle-stopped, or never started).
+    Stopped,
+    /// The container exists and is running.
+    Running,
 }
 
 /// The captured result of a one-shot command run in the workspace.
@@ -152,7 +170,7 @@ impl Workspace {
         // Rebuild a create-config from the inspected fields, carrying the host
         // config (mounts, socket, restart policy) across the recreate. `inspect`
         // and `create` use different config structs, so we map explicitly.
-        let config = bollard::container::Config {
+        let config = Config {
             image: Some(self.image_tag.clone()),
             cmd: inspected.cmd,
             entrypoint: inspected.entrypoint,
@@ -174,7 +192,7 @@ impl Workspace {
             .await
             .wrap_err("failed to remove workspace container")?;
 
-        let options = bollard::container::CreateContainerOptions {
+        let options = CreateContainerOptions {
             name: self.container.clone(),
             platform: None,
         };
@@ -188,5 +206,100 @@ impl Workspace {
             .wrap_err("failed to start recreated workspace container")?;
 
         Ok(())
+    }
+
+    // --- Per-railway container lifecycle (issue #203) ------------------------
+    //
+    // A non-`main` railway runs in its own container, created lazily on first
+    // work and idle-STOPPED (never removed) so a restart keeps its clones and
+    // session. `main` keeps using the compose-managed workspace container and
+    // never touches any of the methods below, so its behavior is unchanged.
+
+    /// Reports whether `container` is absent, stopped, or running.
+    ///
+    /// A missing container is [`ContainerState::Absent`] rather than an error, so
+    /// the lazy-start path can tell "never created" apart from "created but down".
+    pub async fn container_state(&self, container: &str) -> Result<ContainerState> {
+        match self.docker.inspect_container(container, None).await {
+            Ok(info) => {
+                let running = info.state.and_then(|state| state.running).unwrap_or(false);
+                Ok(if running {
+                    ContainerState::Running
+                } else {
+                    ContainerState::Stopped
+                })
+            }
+            // bollard surfaces a missing container as a 404 from the daemon; treat
+            // only that as "absent" and propagate any other failure.
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(ContainerState::Absent),
+            Err(error) => {
+                Err(error).wrap_err_with(|| format!("failed to inspect container {container}"))
+            }
+        }
+    }
+
+    /// Creates a new railway container named `container`, cloning the existing
+    /// workspace container's spec (image, env, mounts, socket, network) so it is a
+    /// peer sandbox differing only in name. Does not start it; the caller starts
+    /// and provisions it.
+    ///
+    /// The spec is mirrored from the compose-managed workspace via `inspect`, the
+    /// same approach [`Self::recreate`] uses, so a per-railway container stays in
+    /// sync with whatever compose defined for the workspace without re-declaring it.
+    pub async fn create_railway_container(&self, container: &str) -> Result<()> {
+        let template = self
+            .docker
+            .inspect_container(&self.container, None)
+            .await
+            .wrap_err("failed to inspect the workspace container to clone its spec")?;
+
+        let config = template
+            .config
+            .ok_or_else(|| eyre!("workspace container has no config to clone from"))?;
+
+        // Carry the host config (mounts incl. /workspace volume, the Docker socket,
+        // ~/.ssh, the seraphim network, restart policy) so the railway container is
+        // a faithful peer of the workspace. `inspect` and `create` use different
+        // config structs, so map the fields we rely on explicitly.
+        let create = Config {
+            image: Some(self.image_tag.clone()),
+            cmd: config.cmd,
+            entrypoint: config.entrypoint,
+            env: config.env,
+            working_dir: config.working_dir,
+            labels: config.labels,
+            host_config: template.host_config,
+            ..Default::default()
+        };
+
+        let options = CreateContainerOptions {
+            name: container.to_string(),
+            platform: None,
+        };
+        self.docker
+            .create_container(Some(options), create)
+            .await
+            .wrap_err_with(|| format!("failed to create railway container {container}"))?;
+        Ok(())
+    }
+
+    /// Starts an existing (created or idle-stopped) container.
+    pub async fn start_container(&self, container: &str) -> Result<()> {
+        self.docker
+            .start_container(container, None::<StartContainerOptions<String>>)
+            .await
+            .wrap_err_with(|| format!("failed to start container {container}"))
+    }
+
+    /// Stops a running container without removing it, so its clones and persisted
+    /// session survive for a fast later restart. A `None` timeout uses Docker's
+    /// default grace period before the kill.
+    pub async fn stop_container(&self, container: &str) -> Result<()> {
+        self.docker
+            .stop_container(container, None::<StopContainerOptions>)
+            .await
+            .wrap_err_with(|| format!("failed to stop container {container}"))
     }
 }
