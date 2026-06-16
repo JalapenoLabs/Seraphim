@@ -229,16 +229,27 @@ pub async fn prepare_branch(
     script.push_str(&repo_block(repo, false));
     script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
     script.push_str(reset_tree_snippet());
-    script.push_str(&format!(
-        "git checkout \"{default}\"\n\
-         git pull --ff-only origin \"{default}\" || true\n\
-         git checkout -B \"{branch}\" \"origin/{default}\"\n\
-         git submodule update --init --recursive || true\n",
-        default = repo.default_branch,
-        branch = branch,
-    ));
+    script.push_str(&branch_prep_snippet(&repo.default_branch, branch));
 
     run(state, &script).await
+}
+
+/// Bash that re-ups the target branch, then cuts a fresh work branch from it.
+///
+/// Always fetches `default` from origin so the work branch starts from the
+/// latest target rather than whatever the clone last saw, then branches from
+/// the freshly-fetched `origin/{default}`. The fetch runs under the caller's
+/// `set -e`: an unreachable origin fails preparation loudly instead of silently
+/// building on a stale base, which would otherwise leave this PR (and every one
+/// cut after it) with avoidable merge conflicts once another PR lands on the
+/// target in parallel (issue #187). Mirrors the hard fetch in
+/// [`prepare_existing_branch`].
+fn branch_prep_snippet(default: &str, branch: &str) -> String {
+    format!(
+        "git fetch origin \"{default}\"\n\
+         git checkout -B \"{branch}\" \"origin/{default}\"\n\
+         git submodule update --init --recursive || true\n"
+    )
 }
 
 /// Per-task prep for a CI fix: ensure the repo and AGENTS.md, then check out the
@@ -339,4 +350,30 @@ async fn run(state: &AppState, script: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_prep_snippet;
+
+    #[test]
+    fn branch_prep_fetches_the_target_then_cuts_from_its_fresh_tip() {
+        let script = branch_prep_snippet("develop", "seraphim/issue-187-foo");
+
+        // Re-up the target branch before any work begins (issue #187).
+        assert!(script.contains("git fetch origin \"develop\""));
+        // Cut the work branch from the freshly-fetched remote tip, not a local
+        // branch that may be behind.
+        assert!(script.contains("git checkout -B \"seraphim/issue-187-foo\" \"origin/develop\""));
+    }
+
+    #[test]
+    fn branch_prep_does_not_swallow_a_failed_fetch() {
+        // The old `git pull --ff-only ... || true` masked an unreachable origin
+        // and let a stale base through. The fetch must run bare so prep fails
+        // loudly instead.
+        let script = branch_prep_snippet("main", "branch");
+        assert!(!script.contains("pull"));
+        assert!(!script.contains("git fetch origin \"main\" || true"));
+    }
 }

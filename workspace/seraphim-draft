@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+// seraphim-draft: the compose assistant records the current set of DRAFT issues.
+//
+// Used only by the on-demand "compose" assistant (issue #181), not the main
+// agent. The assistant sends the COMPLETE current list of drafts whenever it
+// changes; the API replaces the stored drafts with exactly what is sent, so the
+// assistant's view and the operator's UI stay in sync. The operator reviews,
+// optionally edits, and clicks "Create" to bulk-create them.
+//
+// Usage (JSON as an argument or on stdin):
+//   seraphim-draft '{"drafts":[
+//     {"title":"Add a /health endpoint","body":"...markdown...","repo":"owner/api"},
+//     {"title":"Document the deploy steps","body":"..."}
+//   ]}'
+//
+// `repo` is optional (an "owner/name" target repository). A bare array of draft
+// objects is also accepted for convenience.
+
+const API_URL = process.env.SERAPHIM_API_URL
+
+function fail(message) {
+  console.error(`seraphim-draft: ${message}`)
+  process.exit(1)
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk) => (data += chunk))
+    process.stdin.on('end', () => resolve(data))
+  })
+}
+
+// Normalizes the accepted shapes into an array of {title, body, repo?}.
+function normalizeDrafts(parsed) {
+  const rawList = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.drafts)
+      ? parsed.drafts
+      : [parsed]
+
+  return rawList
+    .map((entry) => {
+      const draft = {
+        title: String(entry?.title ?? '').trim(),
+        body: String(entry?.body ?? '')
+      }
+      const repo = String(entry?.repo ?? '').trim()
+      if (repo) {
+        draft.repo = repo
+      }
+      return draft
+    })
+    .filter((draft) => draft.title.length > 0)
+}
+
+async function main() {
+  if (!API_URL) {
+    fail('SERAPHIM_API_URL must be set (it is injected by the orchestrator)')
+  }
+
+  const rawInput = process.argv[2] ?? (await readStdin())
+  if (!rawInput || !rawInput.trim()) {
+    fail('no drafts provided (pass JSON as an argument or on stdin)')
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(rawInput)
+  } catch (error) {
+    fail(`input is not valid JSON: ${error.message}`)
+  }
+
+  // An empty list is valid: it clears the drafts.
+  const drafts = normalizeDrafts(parsed)
+
+  let response
+  try {
+    response = await fetch(`${API_URL}/api/v1/compose/drafts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ drafts })
+    })
+  } catch (error) {
+    fail(`could not reach the Seraphim API at ${API_URL}: ${error.message}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    fail(`the API rejected the drafts (HTTP ${response.status}): ${detail}`)
+  }
+
+  console.log(`Saved ${drafts.length} draft issue${drafts.length === 1 ? '' : 's'}.`)
+}
+
+main().catch((error) => fail(error.message))

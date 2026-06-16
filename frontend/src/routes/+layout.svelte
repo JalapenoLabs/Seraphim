@@ -19,6 +19,7 @@
   const links = [
     { href: '/', label: 'Board' },
     { href: '/watch', label: 'Watch' },
+    { href: '/compose', label: 'Compose' },
     { href: '/automation', label: 'Automation' },
     { href: '/repos', label: 'Repositories' },
     { href: '/settings', label: 'Settings' }

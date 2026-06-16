@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::ApiResult;
-use crate::db::models::{HeartAttack, Settings, SourceKind, Task, TaskColumn};
+use crate::db::models::{HeartAttack, Settings, SourceKind, Task, TaskColumn, TaskStatus};
 use crate::db::queries;
 use crate::git;
+use crate::orchestrator;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -58,13 +59,44 @@ pub struct MoveRequest {
     pub position: f64,
 }
 
+/// Whether moving a card to `new_column` should stop the agent's in-flight turn.
+///
+/// True only when the card was the live turn (see [`orchestrator::is_active_turn`])
+/// and the operator is moving it to a different lane, e.g. dragging the worked
+/// card back to To Do to re-order the queue (issue #172). A reorder *within* In
+/// Progress leaves the agent alone. Pure, so the rule is unit-tested below.
+fn move_stops_turn(
+    prev_column: TaskColumn,
+    prev_status: TaskStatus,
+    new_column: TaskColumn,
+) -> bool {
+    orchestrator::is_active_turn(prev_column, prev_status) && new_column != prev_column
+}
+
 /// `POST /api/v1/tasks/:id/move` - place a card in a column at a position.
 pub async fn move_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<MoveRequest>,
 ) -> ApiResult<Json<Task>> {
+    // Capture the card's state *before* the move: the move itself re-queues it
+    // (resetting status to `queued`), which would erase the signal that it was
+    // the turn the agent is actively running.
+    let was_active_turn = queries::get_task(&state.db, id)
+        .await?
+        .is_some_and(|prev| move_stops_turn(prev.board_column, prev.status, body.column));
+
     let task = queries::move_task(&state.db, id, body.column, body.position).await?;
+
+    // The operator pulled the card the agent was working out from under it (most
+    // often back to To Do to re-order the queue). Stop the current turn at once so
+    // the agent abandons the now-misordered work and re-picks from the board on its
+    // next tick, instead of grinding the stale turn to completion first (issue #172).
+    if was_active_turn {
+        orchestrator::stop_active_turn(&state).await?;
+        info!(task = %task.id, column = ?body.column, "stopped the agent's turn: its card was moved out of In Progress");
+    }
+
     state.notify_board();
 
     // Two-way sync: reflect the move onto a Jira ticket by transitioning its
@@ -210,7 +242,15 @@ pub async fn bulk_status(
 
     for task in &tasks {
         position += 1.0;
+        // `task` still holds the pre-move state, so check before re-queuing it.
+        let interrupt = move_stops_turn(task.board_column, task.status, body.column);
         let moved = queries::move_task(&state.db, task.id, body.column, position).await?;
+        // If the selection swept up the card the agent is actively working, stop
+        // that turn so it pivots instead of finishing misordered work (issue #172).
+        if interrupt {
+            orchestrator::stop_active_turn(&state).await?;
+            info!(task = %moved.id, column = ?body.column, "stopped the agent's turn: its card was bulk-moved out of In Progress");
+        }
         // Reflect the move onto the source ticket (close on Done, reopen
         // otherwise). Best-effort: a service hiccup must not fail the whole move.
         if let Err(error) = sync_ticket_to_column(&state, &moved, body.column).await {
@@ -270,5 +310,64 @@ async fn sync_ticket_to_column(
             queries::set_task_external_state(&state.db, task.id, desired).await?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_the_worked_card_to_a_different_lane_stops_the_turn() {
+        // The case from issue #172: the agent is mid-turn (In Progress + working)
+        // and the operator drags the card back to To Do.
+        assert!(move_stops_turn(
+            TaskColumn::InProgress,
+            TaskStatus::Working,
+            TaskColumn::Todo,
+        ));
+        // Preparing counts as a live turn too, and any destination lane qualifies.
+        assert!(move_stops_turn(
+            TaskColumn::InProgress,
+            TaskStatus::Preparing,
+            TaskColumn::Available,
+        ));
+        assert!(move_stops_turn(
+            TaskColumn::InProgress,
+            TaskStatus::Working,
+            TaskColumn::InReview,
+        ));
+    }
+
+    #[test]
+    fn reordering_within_in_progress_leaves_the_turn_running() {
+        // A drop back into the same lane is a no-op reorder, not an interruption.
+        assert!(!move_stops_turn(
+            TaskColumn::InProgress,
+            TaskStatus::Working,
+            TaskColumn::InProgress,
+        ));
+    }
+
+    #[test]
+    fn moving_a_card_that_is_not_the_live_turn_never_stops_the_agent() {
+        // An In Progress card that is only parked awaiting input is not the live
+        // turn, so moving it must not kill whatever the agent is actually doing.
+        assert!(!move_stops_turn(
+            TaskColumn::InProgress,
+            TaskStatus::WaitingForInput,
+            TaskColumn::Todo,
+        ));
+        // A queued To Do card, or one sitting in review, is likewise never the turn.
+        assert!(!move_stops_turn(
+            TaskColumn::Todo,
+            TaskStatus::Queued,
+            TaskColumn::Available,
+        ));
+        assert!(!move_stops_turn(
+            TaskColumn::InReview,
+            TaskStatus::AwaitingReview,
+            TaskColumn::Done,
+        ));
     }
 }

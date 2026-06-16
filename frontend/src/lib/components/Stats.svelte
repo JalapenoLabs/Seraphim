@@ -9,9 +9,11 @@
   import { onMount, onDestroy } from 'svelte'
   import { ChevronDown, ArrowUp, ArrowDown } from '@lucide/svelte'
 
-  import { getGlobalStats, getTaskStats } from '$lib/api'
+  import { getComposeStats, getGlobalStats, getTaskStats } from '$lib/api'
 
-  let { taskId = null }: { taskId?: string | null } = $props()
+  // Scope: a task's stats (`taskId`), the compose assistant's (`compose`), or the
+  // global board totals (neither set).
+  let { taskId = null, compose = false }: { taskId?: string | null; compose?: boolean } = $props()
 
   let stats = $state<Stats | null>(null)
   let open = $state(true)
@@ -22,7 +24,13 @@
 
   async function refresh() {
     try {
-      stats = taskId ? await getTaskStats(taskId) : await getGlobalStats()
+      if (compose) {
+        stats = await getComposeStats()
+      } else if (taskId) {
+        stats = await getTaskStats(taskId)
+      } else {
+        stats = await getGlobalStats()
+      }
     } catch (error) {
       console.debug('failed to load stats', error)
     }
@@ -31,15 +39,20 @@
   onMount(() => {
     refresh()
     // A slow baseline poll reconciles with the persisted totals; the live ticking
-    // comes from the SSE `usage` nudges below.
+    // comes from the SSE nudges below.
     poll = setInterval(refresh, 5000)
     ticker = setInterval(() => (now = Date.now()), 1000)
 
-    // The board stream carries global usage ticks; a task's stream carries its
-    // own. The server already throttles these, so refetching on each is smooth.
-    const streamUrl = taskId ? `/api/v1/tasks/${taskId}/stream` : '/api/v1/board/stream'
+    // Each scope refetches off its own stream: the compose stream nudges on
+    // `compose_changed`, a task/board stream on the throttled `usage` tick.
+    const streamUrl = compose
+      ? '/api/v1/compose/stream'
+      : taskId
+        ? `/api/v1/tasks/${taskId}/stream`
+        : '/api/v1/board/stream'
     usageStream = new EventSource(streamUrl)
     usageStream.addEventListener('usage', () => refresh())
+    usageStream.addEventListener('compose_changed', () => refresh())
   })
 
   onDestroy(() => {
@@ -97,6 +110,23 @@
     if (hours > 0) return `${hours}h ${minutes}m`
     if (minutes > 0) return `${minutes}m ${seconds}s`
     return `${seconds}s`
+  }
+
+  // Like `duration`, but always carries down to whole seconds so the headline
+  // Time stat visibly ticks up second-by-second while the agent works, instead
+  // of freezing at "3h 12m" for a minute at a time (issue #173).
+  function durationPrecise(ms: number): string {
+    const total = Math.max(0, Math.floor(ms / 1000))
+    const days = Math.floor(total / 86400)
+    const hours = Math.floor((total % 86400) / 3600)
+    const minutes = Math.floor((total % 3600) / 60)
+    const seconds = total % 60
+    const parts: string[] = []
+    if (days > 0) parts.push(`${days}d`)
+    if (days > 0 || hours > 0) parts.push(`${hours}h`)
+    if (days > 0 || hours > 0 || minutes > 0) parts.push(`${minutes}m`)
+    parts.push(`${seconds}s`)
+    return parts.join(' ')
   }
 
   function resetsLabel(unix: number | null): string {
@@ -198,7 +228,7 @@
 
       <!-- Time -->
       <div class="flex flex-col items-center">
-        <span class="text-xl font-semibold tabular-nums">{duration(workedMs)}</span>
+        <span class="text-xl font-semibold tabular-nums">{durationPrecise(workedMs)}</span>
         <span class="text-xs text-muted-foreground">{taskId ? 'Time on task' : 'Lifetime'}</span>
       </div>
 

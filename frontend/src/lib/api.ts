@@ -9,8 +9,11 @@ import type {
   AutomationTrigger,
   AvailabilityWindow,
   BoardResponse,
+  ComposeState,
+  ComposeTarget,
   ConfigBundle,
   EnvSuggestion,
+  IssueDraft,
   EnvVar,
   HeartAttack,
   IssueComment,
@@ -60,8 +63,22 @@ export function getTask(taskId: string) {
 }
 
 // Create an internal ticket (no GitHub/Jira backing). Returns the new task.
-export function createInternalTask(body: { title: string; body: string; state: 'open' | 'closed' }) {
+// `repo_ids` are the repos the ticket targets, in priority order; the first is
+// the primary one the agent branches in. An empty list leaves it tracking-only.
+export function createInternalTask(body: {
+  title: string
+  body: string
+  state: 'open' | 'closed'
+  repo_ids?: string[]
+}) {
   return apiClient.post('tasks', { json: body }).json<Task>()
+}
+
+// Set the repos an internal ticket targets (priority order; the first is the
+// primary one the agent branches in), or clear them with an empty list. Only
+// valid for internal tickets. Returns the updated task.
+export function setTaskRepos(taskId: string, repoIds: string[]) {
+  return apiClient.post(`tasks/${taskId}/repo`, { json: { repo_ids: repoIds } }).json<Task>()
 }
 
 // --- Live statistics ---------------------------------------------------------
@@ -72,6 +89,48 @@ export function getGlobalStats() {
 
 export function getTaskStats(taskId: string) {
   return apiClient.get(`tasks/${taskId}/stats`).json<Stats>()
+}
+
+// --- Compose assistant (issue #181) ------------------------------------------
+
+// The compose page's initial state: chat transcript, drafts, and running flag.
+export function getComposeState() {
+  return apiClient.get('compose').json<ComposeState>()
+}
+
+// Send the compose assistant a message; the turn runs in the background and is
+// followed over the compose SSE stream.
+export function sendComposeMessage(message: string) {
+  return apiClient.post('compose/message', { json: { message } }).json<{ started: boolean }>()
+}
+
+// The compose assistant's own usage totals (its dedicated stats bar).
+export function getComposeStats() {
+  return apiClient.get('compose/stats').json<Stats>()
+}
+
+// The operator's manual edit of one draft (writes to the stored draft).
+export function updateDraft(
+  id: string,
+  body: { title: string; body: string; repo_id: string | null }
+) {
+  return apiClient.put(`compose/drafts/${id}`, { json: body }).json<IssueDraft>()
+}
+
+export function deleteDraft(id: string) {
+  return apiClient.delete(`compose/drafts/${id}`).json<{ deleted: boolean }>()
+}
+
+// Clear all drafts and wipe the assistant's conversation history.
+export function resetCompose() {
+  return apiClient.post('compose/reset').json<{ reset: boolean }>()
+}
+
+// Deterministically create every draft as the chosen tracker's issue.
+export function bulkCreateDrafts(target: ComposeTarget) {
+  return apiClient
+    .post('compose/bulk-create', { json: { target } })
+    .json<{ created: number; urls: string[]; errors: string[] }>()
 }
 
 export function resetStats() {
@@ -256,6 +315,7 @@ export type UpdateSettingsRequest = {
   jira_deployment?: JiraDeployment
   jira_base_url?: string
   jira_email?: string
+  jira_assigned_to_me_only?: boolean
   attention_sound_enabled?: boolean
   completion_sound_enabled?: boolean
 }

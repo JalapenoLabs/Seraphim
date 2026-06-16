@@ -353,6 +353,22 @@ async fn apply_jira_event(state: &AppState, payload: &serde_json::Value) -> Resu
     };
 
     let settings = queries::get_settings(&state.db).await?;
+
+    // Honor the "assigned to me" filter on the realtime path too. The poll filters
+    // server-side with JQL, but a webhook hands us a payload, so we compare its
+    // assignee against the connected account id. When the id is unknown we can't
+    // judge ownership, so we let the issue through rather than dropping everything;
+    // the next poll backfills the id and reconciles.
+    if settings.jira_assigned_to_me_only && !settings.jira_account_id.trim().is_empty() {
+        let assigned_to_me = jira::assignee_account_id(issue, settings.jira_deployment)
+            .as_deref()
+            .map(str::trim)
+            == Some(settings.jira_account_id.trim());
+        if !assigned_to_me {
+            return Ok(false);
+        }
+    }
+
     let Some(parsed) = jira::issue_from_webhook(issue, &settings.jira_base_url) else {
         return Ok(false);
     };

@@ -19,6 +19,21 @@ RUN apt-get update \
         ca-certificates curl gnupg git jq sudo less ripgrep openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+# --- PostgreSQL 17 (client + server) for local DB validation -----------------
+# The base image's distro ships an older Postgres than the PG17 the API, CI, and
+# production all run, so a hand-installed cluster would drift onto PG16. Install
+# the matching major from the official PostgreSQL APT repository (PGDG) so the
+# agent can stand up a throwaway PG17 (see the `pg-ephemeral` helper below) and
+# verify migrations and integration tests locally before pushing.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        -o /etc/apt/keyrings/pgdg.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-17 postgresql-client-17 \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- GitHub CLI (release tarball; no dependency on an apt source) ------------
 RUN tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest | sed -E 's#.*/tag/##')" \
     && ver="${tag#v}" \
@@ -89,8 +104,14 @@ COPY seraphim-suggest /usr/local/bin/seraphim-suggest
 COPY seraphim-ask /usr/local/bin/seraphim-ask
 COPY seraphim-comment /usr/local/bin/seraphim-comment
 COPY seraphim-state /usr/local/bin/seraphim-state
+COPY seraphim-draft /usr/local/bin/seraphim-draft
 RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask \
-    /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state
+    /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state \
+    /usr/local/bin/seraphim-draft
+
+# --- Throwaway PostgreSQL 17 helper (boots a local cluster for DB validation) -
+COPY pg-ephemeral /usr/local/bin/pg-ephemeral
+RUN chmod +x /usr/local/bin/pg-ephemeral
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

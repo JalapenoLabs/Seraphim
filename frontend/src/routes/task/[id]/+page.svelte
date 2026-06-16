@@ -4,6 +4,7 @@
     AnswerSubmission,
     EnvSuggestion,
     Question,
+    Repository,
     Task,
     TaskPullRequest
   } from '$lib/types'
@@ -28,9 +29,11 @@
     answerQuestion,
     getTask,
     hardResetTask,
+    listRepos,
     setTaskBlocking,
     setTaskHold,
-    setTaskNotes
+    setTaskNotes,
+    setTaskRepos
   } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
@@ -43,12 +46,15 @@
   import * as Resizable from '$lib/components/ui/resizable'
   import { buttonVariants } from '$lib/components/ui/button'
   import IssueView from '$lib/components/IssueView.svelte'
+  import RepoMultiSelect from '$lib/components/RepoMultiSelect.svelte'
   import SuggestionCreateButton from '$lib/components/SuggestionCreateButton.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
   import JsonHighlight from '$lib/components/JsonHighlight.svelte'
   import DiffView from '$lib/components/DiffView.svelte'
+  import AnsiLog from '$lib/components/AnsiLog.svelte'
   import { editDiff } from '$lib/diff'
+  import { describeRateLimit } from '$lib/rateLimit'
 
   const taskId = $page.params.id ?? ''
 
@@ -60,6 +66,29 @@
   let questions = $state<Question[]>([])
   let pullRequests = $state<TaskPullRequest[]>([])
   let eventSource: EventSource | null = null
+
+  // Target-repo picker, shown only for internal tickets (a GitHub task's repo is
+  // its issue's and never reassigned). Internal tickets can target several repos
+  // in priority order; the first is the primary one the agent branches in.
+  let repos = $state<Repository[]>([])
+  // The edited selection, seeded once from the task and saved on demand so an SSE
+  // reload never clobbers an in-progress edit (mirrors the notepad below).
+  let targetRepoIds = $state<string[]>([])
+  let targetReposInitialized = false
+  const targetReposDirty = $derived(
+    !!task &&
+      (targetRepoIds.length !== (task.target_repo_ids?.length ?? 0) ||
+        targetRepoIds.some((id, index) => id !== task?.target_repo_ids?.[index]))
+  )
+
+  async function saveRepos() {
+    if (!task) {
+      return
+    }
+    task = await setTaskRepos(task.id, targetRepoIds)
+    targetRepoIds = [...task.target_repo_ids]
+    toast.success(targetRepoIds.length ? 'Target repos saved' : 'Target repos cleared')
+  }
 
   // A one-word status for a PR row, combining its lifecycle and (while open) its
   // CI verdict, and the badge color that goes with it.
@@ -297,6 +326,11 @@
       notesOpen = notes.trim().length > 0
       notesInitialized = true
     }
+    // Seed the target-repo selection once, so SSE reloads don't drop an edit.
+    if (!targetReposInitialized) {
+      targetRepoIds = [...detail.task.target_repo_ids]
+      targetReposInitialized = true
+    }
   }
 
   // Hold toggle, behind a confirmation so it's a deliberate action.
@@ -350,56 +384,6 @@
         ? 'Marked blocking — the agent starts nothing new while this is in progress'
         : 'No longer blocking'
     )
-  }
-
-  // Human labels for the rate-limit window and status codes Claude emits.
-  const RATE_LIMIT_WINDOWS: Record<string, string> = {
-    five_hour: '5-hour limit',
-    weekly: 'weekly limit'
-  }
-  const RATE_LIMIT_STATUSES: Record<string, string> = {
-    allowed: 'allowed',
-    allowed_warning: 'approaching limit',
-    rejected: 'limit reached'
-  }
-
-  function humanize(value: string): string {
-    return value.replace(/_/g, ' ')
-  }
-
-  // A reset moment as "3:40 PM (in 2h 14m)", or just the clock time once it's past.
-  function formatReset(unixSeconds: number): string {
-    const date = new Date(unixSeconds * 1000)
-    const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    const diffMinutes = Math.round((date.getTime() - Date.now()) / 60000)
-    if (diffMinutes <= 0) {
-      return time
-    }
-    const relative =
-      diffMinutes < 60 ? `${diffMinutes}m` : `${Math.floor(diffMinutes / 60)}h ${diffMinutes % 60}m`
-    return `${time} (in ${relative})`
-  }
-
-  // Turns a rate_limit_event payload into one clean line instead of raw JSON.
-  function describeRateLimit(payload: Record<string, unknown>): string {
-    const info = payload?.rate_limit_info as Record<string, unknown> | undefined
-    if (!info) {
-      return 'Rate limit update'
-    }
-    const window = RATE_LIMIT_WINDOWS[String(info.rateLimitType)] ?? humanize(String(info.rateLimitType ?? 'usage'))
-    const status = RATE_LIMIT_STATUSES[String(info.status)] ?? humanize(String(info.status ?? ''))
-    let line = `Rate limit · ${window}: ${status}`
-    if (typeof info.resetsAt === 'number') {
-      line += `, resets ${formatReset(info.resetsAt)}`
-    }
-    if (info.isUsingOverage) {
-      const overage = RATE_LIMIT_STATUSES[String(info.overageStatus)] ?? humanize(String(info.overageStatus ?? ''))
-      line += ` · overage ${overage}`
-      if (typeof info.overageResetsAt === 'number') {
-        line += `, resets ${formatReset(info.overageResetsAt)}`
-      }
-    }
-    return line
   }
 
   // The most telling argument of a tool call, so `Bash(cargo build)` reads at a
@@ -460,11 +444,29 @@
     if (event.type === 'rate_limit') {
       return describeRateLimit(payload)
     }
+    if (event.type === 'ci') {
+      return String(payload?.text ?? '')
+    }
     return JSON.stringify(event.payload)
+  }
+
+  // CI events carry their own pass/fail/running status, so their dot color is
+  // driven by that rather than the generic per-type table.
+  function ciColor(payload: Record<string, unknown>): string {
+    switch (payload?.status) {
+      case 'step_failed':
+        return 'text-destructive'
+      case 'step_passed':
+      case 'job_passed':
+        return 'text-success'
+      default:
+        return 'text-info'
+    }
   }
 
   onMount(() => {
     load()
+    listRepos().then((loaded) => (repos = loaded))
     timer = setInterval(() => (now = Date.now()), 1000)
     eventSource = new EventSource(`/api/v1/tasks/${taskId}/stream`)
     eventSource.addEventListener('task', (message) => {
@@ -491,6 +493,32 @@
 
   {#if task}
     <Stats taskId={taskId} />
+
+    {#if task.source_kind === 'internal'}
+      <!-- Internal tickets have no upstream repo, so the operator picks where the
+           agent works. Until a repo is set the ticket is tracking-only and is not
+           auto-pulled from To Do. -->
+      <section class="rounded-lg border border-border bg-card p-3">
+        <h2 class="text-sm font-semibold">Target repositories</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground">
+          The repos this ticket affects. The first (primary) is the one the agent branches in and
+          that makes the ticket auto-pullable; the agent gets the whole list as context and opens a
+          PR in each repo it changes. Leave empty to keep the ticket tracking-only.
+        </p>
+        <div class="mt-2">
+          <RepoMultiSelect {repos} bind:selected={targetRepoIds} />
+        </div>
+        {#if targetReposDirty}
+          <button
+            type="button"
+            onclick={saveRepos}
+            class={buttonVariants({ variant: 'default', size: 'sm' }) + ' mt-2 w-full'}
+          >
+            Save target repos
+          </button>
+        {/if}
+      </section>
+    {/if}
 
     {#if suggestions.length}
       <!-- Loud on the task too: the checkboxes here are what clear the board badge. -->
@@ -749,12 +777,35 @@
                     ? editDiff(event.payload as Record<string, unknown>)
                     : null}
                 {#if diff}
-                  <!-- Write/Edit calls render as a red/green patch, not a bare summary line. -->
+                  <!-- Write/Edit calls render as a red/green patch. An all-additions
+                       write (no removals) is collapsed by default so a big new file
+                       doesn't flood the log; click the header to expand it. Edits that
+                       remove lines stay expanded so the change is always visible. -->
+                  {@const writeOnly = diff.removed === 0}
                   <div class="flex items-start gap-2 py-0.5">
                     <span class="w-[1ch] flex-none text-primary">●</span>
                     <div class="min-w-0 flex-1">
-                      <div class="truncate text-primary">{diff.verb}({diff.path})</div>
-                      <DiffView lines={diff.lines} added={diff.added} removed={diff.removed} />
+                      {#if writeOnly}
+                        <button
+                          type="button"
+                          onclick={() => toggle(index)}
+                          title={open ? 'Click to collapse' : 'Click to expand'}
+                          class="flex w-full items-center gap-1 text-left text-primary hover:opacity-80"
+                        >
+                          <ChevronDown
+                            class="size-3.5 flex-none transition-transform {open ? '' : '-rotate-90'}"
+                          />
+                          <span class="truncate">{diff.verb}({diff.path})</span>
+                        </button>
+                      {:else}
+                        <div class="truncate text-primary">{diff.verb}({diff.path})</div>
+                      {/if}
+                      <DiffView
+                        lines={diff.lines}
+                        added={diff.added}
+                        removed={diff.removed}
+                        collapsed={writeOnly && !open}
+                      />
                     </div>
                   </div>
                 {:else if event.type === 'prompt'}
@@ -776,6 +827,25 @@
                       >{describe(event)}</span>
                     </span>
                   </button>
+                {:else if event.type === 'ci'}
+                  <!-- A GitHub Actions step: a colored dot (green pass / red
+                       fail / info running) + the step line, with a failed
+                       step's log tail rendered below honoring ANSI color. -->
+                  {@const ciPayload = event.payload as Record<string, unknown>}
+                  <div class="py-0.5">
+                    <div class="flex items-start gap-2">
+                      <span class="w-[1ch] flex-none {ciColor(ciPayload)}">●</span>
+                      <span class="min-w-0 flex-1 whitespace-pre-wrap break-words {ciColor(ciPayload)}"
+                        >{describe(event)}</span
+                      >
+                    </div>
+                    {#if typeof ciPayload.log === 'string' && ciPayload.log}
+                      <div class="flex gap-2 pl-[1ch]">
+                        <span class="w-[1ch] flex-none text-muted-foreground">⎿</span>
+                        <div class="min-w-0 flex-1"><AnsiLog text={ciPayload.log} isError /></div>
+                      </div>
+                    {/if}
+                  </div>
                 {:else if collapsible}
                   <button
                     type="button"

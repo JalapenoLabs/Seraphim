@@ -1,19 +1,53 @@
 <script lang="ts">
+  import type { Repository } from '$lib/types'
+
+  import { onMount } from 'svelte'
   import { goto } from '$app/navigation'
   import { toast } from 'svelte-sonner'
 
-  import { createInternalTask } from '$lib/api'
+  import { createInternalTask, listRepos } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
   import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
   import { Switch } from '$lib/components/ui/switch'
+  import RepoMultiSelect from '$lib/components/RepoMultiSelect.svelte'
+
+  // Remember the last repo selection so creating many tickets back to back does
+  // not mean re-picking the same repos every time (issue #189). Restored on mount.
+  const REPO_SELECTION_STORAGE_KEY = 'seraphim:new-issue:repo-ids'
 
   let title = $state('')
   let description = $state('')
   let open = $state(true)
   let saving = $state(false)
+  let repos = $state<Repository[]>([])
+  let selectedRepoIds = $state<string[]>([])
+
+  onMount(async () => {
+    repos = await listRepos()
+    // Restore the saved selection, dropping any repos that no longer exist.
+    try {
+      const saved = localStorage.getItem(REPO_SELECTION_STORAGE_KEY)
+      if (saved) {
+        const savedIds = JSON.parse(saved) as string[]
+        const known = new Set(repos.map((repo) => repo.id))
+        selectedRepoIds = savedIds.filter((id) => known.has(id))
+      }
+    } catch (error) {
+      console.debug('failed to restore saved repo selection', error)
+    }
+  })
+
+  // Persist the selection on every change so it survives navigation and reloads.
+  $effect(() => {
+    try {
+      localStorage.setItem(REPO_SELECTION_STORAGE_KEY, JSON.stringify(selectedRepoIds))
+    } catch (error) {
+      console.debug('failed to save repo selection', error)
+    }
+  })
 
   async function submit() {
     if (!title.trim()) {
@@ -25,7 +59,8 @@
       const task = await createInternalTask({
         title: title.trim(),
         body: description.trim(),
-        state: open ? 'open' : 'closed'
+        state: open ? 'open' : 'closed',
+        repo_ids: selectedRepoIds
       })
       toast.success('Issue created')
       goto(`/task/${task.id}`)
@@ -62,6 +97,28 @@
           bind:value={description}
           class="resize-y"
         />
+      </div>
+
+      <div class="grid gap-2">
+        <div class="flex items-center justify-between">
+          <Label for="repo">Target repositories</Label>
+          {#if selectedRepoIds.length}
+            <button
+              type="button"
+              class="text-xs text-muted-foreground hover:text-foreground"
+              onclick={() => (selectedRepoIds = [])}
+            >
+              Clear ({selectedRepoIds.length})
+            </button>
+          {/if}
+        </div>
+        <RepoMultiSelect id="repo" {repos} bind:selected={selectedRepoIds} />
+        <span class="text-xs text-muted-foreground">
+          Pick one or more repos this ticket affects. The first is the primary one the agent
+          branches in; it gets the full list as context and opens a PR in each repo it changes.
+          Leave empty to keep the ticket tracking-only and assign repos later. Your selection is
+          remembered for the next ticket.
+        </span>
       </div>
 
       <div class="flex items-center gap-2">

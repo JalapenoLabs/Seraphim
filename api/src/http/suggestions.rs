@@ -130,7 +130,10 @@ pub async fn create_issue(
                 .await?
                 .unwrap_or(0.0)
                 + 1.0;
-            queries::create_internal_task(&state.db, &title, &detail, "open", position).await?;
+            // No target repo: a recommendation is tracking-only until the operator
+            // assigns a repo (on the task page), keeping its prior behavior.
+            queries::create_internal_task(&state.db, &title, &detail, "open", &[], position)
+                .await?;
             None
         }
         CreateTarget::Github => {

@@ -227,6 +227,14 @@ pub struct Settings {
     pub jira_base_url: String,
     /// Account email (the Basic-auth username on Cloud; unused on Server).
     pub jira_email: String,
+    /// Only sync Jira tickets assigned to the connected account (on by default).
+    /// The poll filters server-side with JQL; the webhook path compares the
+    /// payload's assignee against [`Self::jira_account_id`].
+    pub jira_assigned_to_me_only: bool,
+    /// The connected account's identifier, captured on a successful connection
+    /// test: the opaque `accountId` on Cloud, the username (`name`) on Server.
+    /// Empty until verified; used only to filter realtime webhook events.
+    pub jira_account_id: String,
     /// Whether a Jira API token / PAT is stored (the token itself is never sent).
     pub jira_token_set: bool,
     /// Whether a GitHub webhook secret is stored. With it set, inbound GitHub
@@ -349,6 +357,20 @@ pub struct StatsAggregate {
     pub turns: i64,
 }
 
+/// A draft issue scoped by the compose assistant but not yet created (issue #181).
+/// `repo_id` is the optional target repo (where a GitHub issue is filed, or an
+/// internal ticket's repo). Drafts are bulk-created on demand to the chosen tracker.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct IssueDraft {
+    pub id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub repo_id: Option<Uuid>,
+    pub position: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// One comment on an internal ticket. `author` is `"user"` (the operator) or
 /// `"agent"` (Seraphim).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -406,6 +428,11 @@ pub struct Task {
     pub source_kind: SourceKind,
     pub external_id: String,
     pub repo_id: Option<Uuid>,
+    /// Every repo an internal ticket targets, in priority order; the first equals
+    /// `repo_id`, the primary/focus repo the agent branches in. The agent is told
+    /// about all of them for context but may open a PR in only some. Empty for
+    /// tracking-only tickets and for GitHub/Jira tasks. See issue #189.
+    pub target_repo_ids: Json<Vec<Uuid>>,
     /// For a Jira task, the followed board it came from, so a column move can map
     /// back to a Jira status and transition the ticket. `None` for GitHub tasks.
     pub jira_board_id: Option<Uuid>,

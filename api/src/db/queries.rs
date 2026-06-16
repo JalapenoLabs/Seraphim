@@ -39,6 +39,7 @@ const SETTINGS_COLUMNS: &str =
      usage_limit_threshold, usage_paused_until, post_thoughts_enabled, \
      close_issue_on_done, \
      jira_enabled, jira_deployment, jira_base_url, jira_email, \
+     jira_assigned_to_me_only, jira_account_id, \
      (jira_api_token <> '') AS jira_token_set, \
      (github_webhook_secret <> '') AS github_webhook_secret_set, \
      (jira_webhook_secret <> '') AS jira_webhook_secret_set, \
@@ -83,6 +84,7 @@ pub async fn update_settings(
     jira_deployment: Option<JiraDeployment>,
     jira_base_url: Option<String>,
     jira_email: Option<String>,
+    jira_assigned_to_me_only: Option<bool>,
     close_issue_on_done: Option<bool>,
     attention_sound_enabled: Option<bool>,
     completion_sound_enabled: Option<bool>,
@@ -112,9 +114,10 @@ pub async fn update_settings(
          jira_deployment = COALESCE($19, jira_deployment), \
          jira_base_url = COALESCE($20, jira_base_url), \
          jira_email = COALESCE($21, jira_email), \
-         close_issue_on_done = COALESCE($22, close_issue_on_done), \
-         attention_sound_enabled = COALESCE($23, attention_sound_enabled), \
-         completion_sound_enabled = COALESCE($24, completion_sound_enabled), \
+         jira_assigned_to_me_only = COALESCE($22, jira_assigned_to_me_only), \
+         close_issue_on_done = COALESCE($23, close_issue_on_done), \
+         attention_sound_enabled = COALESCE($24, attention_sound_enabled), \
+         completion_sound_enabled = COALESCE($25, completion_sound_enabled), \
          updated_at = now() \
          WHERE id = 1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -140,11 +143,23 @@ pub async fn update_settings(
     .bind(jira_deployment)
     .bind(jira_base_url)
     .bind(jira_email)
+    .bind(jira_assigned_to_me_only)
     .bind(close_issue_on_done)
     .bind(attention_sound_enabled)
     .bind(completion_sound_enabled)
     .fetch_one(pool)
     .await
+}
+
+/// Records the connected Jira account's identifier (Cloud `accountId` / Server
+/// username), captured after a successful connection test. Used to filter the
+/// realtime webhook path, which cannot run JQL like the poll sync does.
+pub async fn set_jira_account_id(pool: &PgPool, account_id: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE settings SET jira_account_id = $1, updated_at = now() WHERE id = 1")
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn set_paused(pool: &PgPool, paused: bool) -> sqlx::Result<()> {
@@ -1302,25 +1317,51 @@ pub async fn set_task_notes(pool: &PgPool, id: Uuid, notes: &str) -> sqlx::Resul
 // --- Internal tickets --------------------------------------------------------
 
 /// Creates an internal ticket (no external tracker). It lands in `Available` at
-/// the given position with a sequential, human-friendly external id.
+/// the given position with a sequential, human-friendly external id. `repo_ids`
+/// are the repos the ticket targets, in priority order; the first becomes the
+/// primary `repo_id` the agent branches in. Pass an empty slice to triage the
+/// repos later (a tracking-only ticket that is not auto-pulled).
 pub async fn create_internal_task(
     pool: &PgPool,
     title: &str,
     body: &str,
     state: &str,
+    repo_ids: &[Uuid],
     initial_position: f64,
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "INSERT INTO tasks \
-           (source_kind, external_id, title, body_snapshot, url, external_state, board_column, position) \
-         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, '', $3, 'available', $4) \
+           (source_kind, external_id, repo_id, target_repo_ids, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES ('internal', nextval('internal_ticket_seq')::text, $1, $2, $3, $4, '', $5, 'available', $6) \
          RETURNING *",
     )
+    .bind(repo_ids.first().copied())
+    .bind(Json(repo_ids.to_vec()))
     .bind(title)
     .bind(body)
     .bind(state)
     .bind(initial_position)
     .fetch_one(pool)
+    .await
+}
+
+/// Sets the repos an internal ticket targets (priority order; the first becomes
+/// the primary `repo_id`), or clears them with an empty slice. Restricted to
+/// internal tasks: a GitHub task's repo is its issue's and must not be
+/// reassigned. Returns the updated task, or `None` if the id is not internal.
+pub async fn set_internal_task_repos(
+    pool: &PgPool,
+    id: Uuid,
+    repo_ids: &[Uuid],
+) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET repo_id = $2, target_repo_ids = $3, updated_at = now() \
+         WHERE id = $1 AND source_kind = 'internal' RETURNING *",
+    )
+    .bind(id)
+    .bind(repo_ids.first().copied())
+    .bind(Json(repo_ids.to_vec()))
+    .fetch_optional(pool)
     .await
 }
 
@@ -1386,9 +1427,15 @@ pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
 /// still sync in, map to columns, and transition on moves; they just are not
 /// auto-pulled to be coded.
 pub async fn pick_next_todo(pool: &PgPool) -> sqlx::Result<Option<Task>> {
+    // GitHub issues are always workable; internal tickets are too, but only once
+    // the operator has pointed them at a target repo (the agent needs somewhere to
+    // branch and open the PR). Jira tickets stay excluded (multi-repo execution is
+    // not built yet). An internal ticket with no repo is left for the operator to
+    // assign rather than pulled and immediately failed.
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'todo' AND hold = FALSE \
-         AND source_kind = 'github' \
+         AND (source_kind = 'github' \
+              OR (source_kind = 'internal' AND repo_id IS NOT NULL)) \
          ORDER BY position ASC LIMIT 1",
     )
     .fetch_optional(pool)
@@ -1540,6 +1587,51 @@ pub async fn list_task_prs(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<Tas
     .bind(task_id)
     .fetch_all(pool)
     .await
+}
+
+/// Every open pull request across all tasks, for the CI-step watcher. Merged /
+/// closed PRs are settled, so the watcher ignores them.
+pub async fn list_open_task_prs(pool: &PgPool) -> sqlx::Result<Vec<TaskPullRequest>> {
+    sqlx::query_as::<_, TaskPullRequest>(
+        "SELECT * FROM task_pull_requests WHERE pr_state = 'open' ORDER BY task_id, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Prompt sentinel marking a synthetic turn that holds CI-step activity rather
+/// than a real Claude invocation. The watcher appends its events here so they
+/// flow through the same activity-log query as agent events, without a schema
+/// change. No `prompt` event is recorded for it, so it shows nothing of itself.
+const CI_TURN_PROMPT: &str = "[CI activity]";
+
+/// Finds the turn the CI watcher should append to, or creates one. Reuses the
+/// latest turn only when it is already a CI turn, so CI events that arrive after
+/// a fresh agent turn (e.g. a CI-fix turn) open a new CI turn and stay in
+/// chronological order in the activity log.
+pub async fn get_or_create_ci_turn(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Turn> {
+    let latest = sqlx::query_as::<_, Turn>(
+        "SELECT * FROM turns WHERE task_id = $1 ORDER BY idx DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(turn) = latest {
+        if turn.prompt == CI_TURN_PROMPT {
+            return Ok(turn);
+        }
+    }
+    let idx = next_turn_idx(pool, task_id).await?;
+    create_turn(pool, task_id, idx, CI_TURN_PROMPT, None).await
+}
+
+/// The next event sequence number within a turn (max + 1, or 0 for the first).
+pub async fn next_event_seq(pool: &PgPool, turn_id: Uuid) -> sqlx::Result<i32> {
+    let max: Option<i32> = sqlx::query_scalar("SELECT MAX(seq) FROM events WHERE turn_id = $1")
+        .bind(turn_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(max.map_or(0, |value| value + 1))
 }
 
 /// Records (or refreshes) a task's pull request, keyed by `(task, repo, number)`.
@@ -1815,9 +1907,12 @@ pub async fn list_events_for_task(
     pool: &PgPool,
     task_id: Uuid,
 ) -> sqlx::Result<Vec<super::models::Event>> {
+    // `rate_limit` events are persisted only to feed the usage gauge's fallback
+    // (`latest_rate_limit`); they are not activity, so they are omitted from the
+    // activity log the task view renders (issue #182).
     sqlx::query_as::<_, super::models::Event>(
         "SELECT e.* FROM events e JOIN turns t ON e.turn_id = t.id \
-         WHERE t.task_id = $1 ORDER BY t.idx, e.seq",
+         WHERE t.task_id = $1 AND e.type <> 'rate_limit' ORDER BY t.idx, e.seq",
     )
     .bind(task_id)
     .fetch_all(pool)
@@ -2083,5 +2178,215 @@ pub async fn acknowledge_answers(pool: &PgPool, task_id: Uuid) -> sqlx::Result<(
     .bind(task_id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+// --- Compose assistant (issue #181) ------------------------------------------
+//
+// A second, on-demand Claude session with its own conversation and statistics,
+// stored in dedicated tables so nothing here touches the board, the agent loop,
+// or the main shared session.
+
+/// The session id of the most recent compose turn, to resume the conversation.
+/// `None` when there is no history yet (a fresh conversation), e.g. after a reset.
+pub async fn latest_compose_session_id(pool: &PgPool) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT session_id FROM compose_turns WHERE session_id IS NOT NULL \
+         ORDER BY idx DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+}
+
+/// Whether a compose turn is currently running (so a second is rejected).
+pub async fn compose_turn_running(pool: &PgPool) -> sqlx::Result<bool> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM compose_turns WHERE status = 'running'")
+            .fetch_one(pool)
+            .await?;
+    Ok(count > 0)
+}
+
+/// Opens a new compose turn (the next index), returning its id.
+pub async fn create_compose_turn(
+    pool: &PgPool,
+    prompt: &str,
+    session_id: Option<&str>,
+) -> sqlx::Result<Uuid> {
+    let next_idx: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(idx) + 1, 0) FROM compose_turns")
+        .fetch_one(pool)
+        .await?;
+    sqlx::query_scalar(
+        "INSERT INTO compose_turns (idx, prompt, session_id) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(next_idx)
+    .bind(prompt)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Finalizes a compose turn with its outcome (mirrors [`finish_turn`]).
+pub async fn finish_compose_turn(
+    pool: &PgPool,
+    id: Uuid,
+    status: &str,
+    result_text: Option<&str>,
+    total_cost_usd: Option<f64>,
+    token_usage: Option<Value>,
+    session_id: Option<&str>,
+) -> sqlx::Result<()> {
+    let result_text = result_text.map(|text| text.replace('\0', ""));
+    sqlx::query(
+        "UPDATE compose_turns SET status = $2, result_text = $3, total_cost_usd = $4, \
+         token_usage = COALESCE($5, token_usage), \
+         session_id = COALESCE($6, session_id), finished_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(result_text.as_deref())
+    .bind(total_cost_usd)
+    .bind(token_usage.map(Json))
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Appends one parsed event to a compose turn's transcript.
+pub async fn append_compose_event(
+    pool: &PgPool,
+    turn_id: Uuid,
+    seq: i32,
+    event_type: &str,
+    mut payload: Value,
+) -> sqlx::Result<()> {
+    strip_nul(&mut payload);
+    sqlx::query("INSERT INTO compose_events (turn_id, seq, type, payload) VALUES ($1, $2, $3, $4)")
+        .bind(turn_id)
+        .bind(seq)
+        .bind(event_type)
+        .bind(Json(payload))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The whole compose transcript in order, for the chat history on reload.
+pub async fn list_compose_events(pool: &PgPool) -> sqlx::Result<Vec<super::models::Event>> {
+    sqlx::query_as::<_, super::models::Event>(
+        "SELECT e.* FROM compose_events e JOIN compose_turns t ON e.turn_id = t.id \
+         WHERE e.type <> 'rate_limit' ORDER BY t.idx, e.seq",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Aggregated usage for the compose assistant (mirrors [`global_stats`]).
+pub async fn compose_stats(pool: &PgPool) -> sqlx::Result<StatsAggregate> {
+    sqlx::query_as::<_, StatsAggregate>(&format!("SELECT {STATS_SELECT} FROM compose_turns"))
+        .fetch_one(pool)
+        .await
+}
+
+/// When the running compose turn started, for the live time ticker.
+pub async fn compose_running_since(pool: &PgPool) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        "SELECT started_at FROM compose_turns WHERE status = 'running' \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The latest compose turn's token usage, approximating its context fill.
+pub async fn compose_latest_usage(pool: &PgPool) -> sqlx::Result<Option<Value>> {
+    let row: Option<Json<Value>> = sqlx::query_scalar(
+        "SELECT token_usage FROM compose_turns WHERE token_usage IS NOT NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|json| json.0))
+}
+
+/// Wipes the compose conversation (turns + events cascade). Used by reset.
+pub async fn clear_compose_history(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM compose_turns")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Every draft issue, in display order.
+pub async fn list_drafts(pool: &PgPool) -> sqlx::Result<Vec<super::models::IssueDraft>> {
+    sqlx::query_as::<_, super::models::IssueDraft>(
+        "SELECT * FROM issue_drafts ORDER BY position, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Replaces the entire draft set with `drafts` (`title`, `body`, optional
+/// `repo_id`), positioned in the given order. The compose agent always sends the
+/// full desired list, so a replace keeps the agent's view and ours in sync.
+pub async fn replace_drafts(
+    pool: &PgPool,
+    drafts: &[(String, String, Option<Uuid>)],
+) -> sqlx::Result<Vec<super::models::IssueDraft>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM issue_drafts")
+        .execute(&mut *tx)
+        .await?;
+    for (index, (title, body, repo_id)) in drafts.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO issue_drafts (title, body, repo_id, position) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(title)
+        .bind(body)
+        .bind(repo_id)
+        .bind(index as f64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    list_drafts(pool).await
+}
+
+/// Edits one draft's title, body, and target repo. Returns `None` if it's gone.
+pub async fn update_draft(
+    pool: &PgPool,
+    id: Uuid,
+    title: &str,
+    body: &str,
+    repo_id: Option<Uuid>,
+) -> sqlx::Result<Option<super::models::IssueDraft>> {
+    sqlx::query_as::<_, super::models::IssueDraft>(
+        "UPDATE issue_drafts SET title = $2, body = $3, repo_id = $4, updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(title)
+    .bind(body)
+    .bind(repo_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Deletes one draft.
+pub async fn delete_draft(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM issue_drafts WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Deletes every draft (used by reset and after a successful bulk-create).
+pub async fn clear_drafts(pool: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM issue_drafts")
+        .execute(pool)
+        .await?;
     Ok(())
 }

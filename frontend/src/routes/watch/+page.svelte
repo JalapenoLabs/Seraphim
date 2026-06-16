@@ -13,6 +13,7 @@
   import { getBoard } from '$lib/api'
   import { STATUS_LABELS } from '$lib/types'
   import { isWithinSchedule } from '$lib/schedule'
+  import { describeRateLimit } from '$lib/rateLimit'
   import Stats from '$lib/components/Stats.svelte'
 
   let board = $state<BoardResponse | null>(null)
@@ -28,6 +29,9 @@
     type: string
     text: string
     at: number
+    // For CI events, the step status ('step_passed' | 'step_failed' | ...) so the
+    // glyph can be colored green/red rather than the type's single color.
+    status?: string
   }
   let feed = $state<FeedEntry[]>([])
   let feedSeq = 0
@@ -37,11 +41,13 @@
   const tasks = $derived(board?.tasks ?? [])
   const titleById = $derived(new Map(tasks.map((task) => [task.id, task.title])))
 
-  // Remaining = everything still in the pipeline (backlog through review);
-  // completed = the Done lane. Ignored tasks count as neither.
+  // Remaining = work the operator has actually committed to (queued through
+  // review); completed = the Done lane. "Available" tasks are merely suggestions
+  // the operator hasn't picked up yet, so they count toward neither the big
+  // number nor the progress bar. Ignored tasks count as neither too.
   const remainingCount = $derived(
     tasks.filter((task) =>
-      ['available', 'todo', 'in_progress', 'in_review'].includes(task.board_column)
+      ['todo', 'in_progress', 'in_review'].includes(task.board_column)
     ).length
   )
   const completedCount = $derived(tasks.filter((task) => task.board_column === 'done').length)
@@ -68,34 +74,89 @@
     ) ?? null
   )
 
+  // A task is "waiting" when the agent has stopped to ask for input or is blocked
+  // on CI, and "heart attack" when a task has crashed and not yet been
+  // acknowledged. Both pull the whole page into an attention-grabbing state.
+  const hasWaiting = $derived(
+    tasks.some((task) => task.status === 'waiting_for_input' || task.status === 'ci_blocked')
+  )
+  const hasHeartAttack = $derived((board?.heart_attacks?.length ?? 0) > 0)
+
   // Overall agent state, mirroring the navbar's logic, used to theme the page.
-  type StateKey = 'working' | 'paused' | 'halted' | 'cooldown' | 'offhours' | 'idle'
+  type StateKey =
+    | 'working'
+    | 'paused'
+    | 'halted'
+    | 'heart_attack'
+    | 'cooldown'
+    | 'waiting'
+    | 'offhours'
+    | 'idle'
   const agentState = $derived.by<{ key: StateKey; label: string }>(() => {
     const settings = board?.settings
     if (!settings) return { key: 'idle', label: 'Connecting' }
     if (settings.agent_paused) return { key: 'paused', label: 'Paused' }
     if (settings.config_repo_url && settings.config_repo_error)
       return { key: 'halted', label: 'Halted' }
+    if (hasHeartAttack) return { key: 'heart_attack', label: 'Heart attack' }
     if (settings.cooldown_until && new Date(settings.cooldown_until) > new Date(now))
       return { key: 'cooldown', label: 'Cooling down' }
+    if (hasWaiting) return { key: 'waiting', label: 'Waiting for input' }
     if (current) return { key: 'working', label: 'Working' }
     if (settings.availability_enabled && !isWithinSchedule(settings, new Date(now)))
       return { key: 'offhours', label: 'Off hours' }
     return { key: 'idle', label: 'Idle' }
   })
 
-  // Accent color per state: green when working, amber/red when stopped, calm blue
-  // when idle. Drives the ring, the aura, and the status glow.
-  const ACCENTS: Record<StateKey, string> = {
-    working: '#3fb950',
-    paused: '#d29922',
-    halted: '#f85149',
-    cooldown: '#d29922',
-    offhours: '#8b97a6',
-    idle: '#6e8bff'
+  // Each state maps to an accent color and a "liveliness": how fast the ring and
+  // progress bar animate. Working is full-speed green; waiting/cooling is a
+  // half-speed amber warning; paused, halted, or a heart attack is a frozen red
+  // alert; nothing-to-do (idle/off-hours) is a still, grey "halted" look.
+  type Spin = 'full' | 'half' | 'none'
+  const STATE_STYLES: Record<StateKey, { accent: string; spin: Spin }> = {
+    working: { accent: '#3fb950', spin: 'full' },
+    paused: { accent: '#f85149', spin: 'none' },
+    halted: { accent: '#f85149', spin: 'none' },
+    heart_attack: { accent: '#f85149', spin: 'none' },
+    cooldown: { accent: '#d29922', spin: 'half' },
+    waiting: { accent: '#d29922', spin: 'half' },
+    offhours: { accent: '#8b97a6', spin: 'none' },
+    idle: { accent: '#8b97a6', spin: 'none' }
   }
-  const accent = $derived(ACCENTS[agentState.key])
+  const accent = $derived(STATE_STYLES[agentState.key].accent)
+  const spin = $derived(STATE_STYLES[agentState.key].spin)
   const isWorking = $derived(agentState.key === 'working')
+
+  // Animation class for the rotating ring, scaled to the current liveliness.
+  const ringSpinClass = $derived(
+    spin === 'full' ? 'animate-spin-slow' : spin === 'half' ? 'animate-spin-half' : ''
+  )
+  // The progress bar shares the same liveliness via a flowing sheen.
+  const barFlowClass = $derived(
+    spin === 'full' ? 'bar-flow' : spin === 'half' ? 'bar-flow bar-flow-half' : ''
+  )
+
+  // The standby glyph and message shown in the ring when no task is in flight.
+  const STANDBY_GLYPH: Record<StateKey, string> = {
+    working: '✦',
+    paused: '⏸',
+    halted: '✕',
+    heart_attack: '✕',
+    cooldown: '◷',
+    waiting: '?',
+    offhours: '☾',
+    idle: '✦'
+  }
+  const STANDBY_MESSAGE: Record<StateKey, string> = {
+    working: 'Standing by for the next task.',
+    paused: 'The agent is paused.',
+    halted: 'Needs attention to resume.',
+    heart_attack: 'A task crashed and needs attention.',
+    cooldown: 'Cooling down before the next task.',
+    waiting: 'Waiting on your input to continue.',
+    offhours: 'Outside working hours.',
+    idle: 'Standing by for the next task.'
+  }
 
   // --- Activity feed wiring ---------------------------------------------------
 
@@ -107,7 +168,20 @@
     assistant_text: { glyph: '▸', color: 'text-foreground' },
     tool_use: { glyph: '⚙', color: 'text-primary' },
     result: { glyph: '✓', color: 'text-success' },
-    rate_limit: { glyph: '◷', color: 'text-info' }
+    rate_limit: { glyph: '◷', color: 'text-info' },
+    ci: { glyph: '●', color: 'text-info' }
+  }
+
+  // CI glyph color follows the step status (green pass / red fail / info running),
+  // since one CI type covers all three outcomes.
+  function ciGlyphColor(status: string | undefined): string {
+    if (status === 'step_failed') {
+      return 'text-destructive'
+    }
+    if (status === 'step_passed' || status === 'job_passed') {
+      return 'text-success'
+    }
+    return 'text-info'
   }
 
   function firstLine(text: unknown, max = 120): string {
@@ -141,7 +215,9 @@
       case 'result':
         return 'turn complete'
       case 'rate_limit':
-        return 'rate-limit notice'
+        return describeRateLimit(payload)
+      case 'ci':
+        return firstLine(payload?.text)
       default:
         return null
     }
@@ -150,7 +226,8 @@
   async function pushFeed(taskId: string, type: string, payload: Record<string, unknown>, at: number) {
     const text = summarize(type, payload)
     if (!text) return
-    const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at }
+    const status = type === 'ci' ? String(payload?.status ?? '') : undefined
+    const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at, status }
     feed = [...feed, entry].slice(-MAX_FEED)
     // Keep the newest line in view (terminal-style autoscroll).
     await tick()
@@ -235,9 +312,8 @@
         class="status-pill inline-flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm font-semibold"
         style="border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent)"
       >
-        <span class="size-2.5 rounded-full {isWorking ? 'animate-ping-slow' : ''}" style="background: var(--accent)"></span>
+        <span class="size-2.5 rounded-full {spin !== 'none' ? 'animate-ping-slow' : ''}" style="background: var(--accent)"></span>
         {agentState.label}
-        <span class="font-normal text-muted-foreground">· {clockLabel(now)}</span>
       </span>
     </header>
 
@@ -265,12 +341,12 @@
         <div class="relative grid size-[clamp(15rem,26vw,24rem)] place-items-center">
           <!-- pulsing aura behind the ring -->
           <div
-            class="absolute inset-0 rounded-full blur-2xl {isWorking ? 'animate-breathe' : 'opacity-20'}"
+            class="absolute inset-0 rounded-full blur-2xl {spin !== 'none' ? 'animate-breathe' : 'opacity-20'}"
             style="background: radial-gradient(circle, color-mix(in srgb, var(--accent) 55%, transparent), transparent 70%)"
           ></div>
           <!-- rotating gradient ring -->
           <div
-            class="absolute inset-0 rounded-full {isWorking ? 'animate-spin-slow' : ''}"
+            class="absolute inset-0 rounded-full {ringSpinClass}"
             style="background: conic-gradient(from 0deg, transparent 0%, var(--accent) 18%, transparent 38%, color-mix(in srgb, var(--accent) 60%, transparent) 60%, transparent 80%, var(--accent) 100%)"
           ></div>
           <!-- a comet dot orbiting the ring while working -->
@@ -306,15 +382,9 @@
               {/key}
             {:else}
               <div class="flex flex-col items-center gap-2 text-muted-foreground">
-                <span class="text-4xl">{agentState.key === 'paused' ? '⏸' : '✦'}</span>
+                <span class="text-4xl">{STANDBY_GLYPH[agentState.key]}</span>
                 <span class="text-sm font-semibold uppercase tracking-[0.3em]">{agentState.label}</span>
-                <span class="max-w-[12rem] text-xs">
-                  {agentState.key === 'paused'
-                    ? 'The agent is paused.'
-                    : agentState.key === 'halted'
-                      ? 'Needs attention to resume.'
-                      : 'Standing by for the next task.'}
-                </span>
+                <span class="max-w-[12rem] text-xs">{STANDBY_MESSAGE[agentState.key]}</span>
               </div>
             {/if}
           </div>
@@ -342,8 +412,8 @@
       </span>
       <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-white/5">
         <div
-          class="h-full rounded-full transition-[width] duration-700 ease-out"
-          style="width: {completionPct}%; background: linear-gradient(90deg, var(--primary), var(--success)); box-shadow: 0 0 12px color-mix(in srgb, var(--success) 55%, transparent)"
+          class="h-full rounded-full transition-[width] duration-700 ease-out {barFlowClass}"
+          style="width: {completionPct}%; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 40%, transparent), var(--accent), color-mix(in srgb, var(--accent) 40%, transparent)); background-size: 200% 100%; box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent)"
         ></div>
       </div>
       <span class="w-10 shrink-0 text-xs tabular-nums text-muted-foreground">
@@ -363,6 +433,7 @@
         {/if}
         {#each feed as entry (entry.id)}
           {@const meta = GLYPHS[entry.type] ?? { glyph: '·', color: 'text-muted-foreground' }}
+          {@const glyphColor = entry.type === 'ci' ? ciGlyphColor(entry.status) : meta.color}
           {@const hue = taskHue(entry.taskId)}
           <div class="flex items-center gap-3 py-0.5" in:fly={{ y: 8, duration: 250, easing: cubicOut }}>
             <span class="w-[4.5rem] shrink-0 text-xs tabular-nums text-muted-foreground/60">
@@ -375,7 +446,7 @@
             >
               {taskLabel(entry.taskId)}
             </span>
-            <span class="w-[1ch] shrink-0 text-center {meta.color}">{meta.glyph}</span>
+            <span class="w-[1ch] shrink-0 text-center {glyphColor}">{meta.glyph}</span>
             <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
           </div>
         {/each}
@@ -420,6 +491,17 @@
   :global(.watch) .animate-spin-slow {
     animation: spin 5s linear infinite;
   }
+  /* Half-speed spin for the amber "waiting"/"cooling down" warning state. */
+  :global(.watch) .animate-spin-half {
+    animation: spin 10s linear infinite;
+  }
+  /* The progress bar's sheen flows at the same cadence as the ring spins. */
+  :global(.watch) .bar-flow {
+    animation: barflow 2.5s linear infinite;
+  }
+  :global(.watch) .bar-flow-half {
+    animation-duration: 5s;
+  }
   :global(.watch) .animate-breathe {
     animation: breathe 3.5s ease-in-out infinite;
   }
@@ -453,6 +535,11 @@
       transform: rotate(360deg);
     }
   }
+  @keyframes barflow {
+    to {
+      background-position: -200% 0;
+    }
+  }
   @keyframes breathe {
     0%,
     100% {
@@ -477,6 +564,8 @@
   @media (prefers-reduced-motion: reduce) {
     .aura,
     :global(.watch) .animate-spin-slow,
+    :global(.watch) .animate-spin-half,
+    :global(.watch) .bar-flow,
     :global(.watch) .animate-breathe,
     :global(.watch) .animate-ping-slow,
     :global(.watch) .animate-orbit {

@@ -169,6 +169,16 @@ pub struct CreateTaskRequest {
     /// `"open"` (default) or `"closed"`.
     #[serde(default)]
     pub state: Option<String>,
+    /// Target repos the ticket affects, in priority order; the first is the
+    /// primary one the agent branches in (and that makes it auto-pullable). The
+    /// agent is told about all of them but may open a PR in only some. Empty (or
+    /// omitted) leaves the ticket tracking-only until repos are assigned.
+    #[serde(default)]
+    pub repo_ids: Option<Vec<Uuid>>,
+    /// Legacy single-repo field, still accepted: treated as a one-entry
+    /// `repo_ids` when that newer field is absent.
+    #[serde(default)]
+    pub repo_id: Option<Uuid>,
 }
 
 /// `POST /api/v1/tasks` - create an internal ticket (no external tracker). Lands
@@ -194,11 +204,59 @@ pub async fn create(
         .await?
         .unwrap_or(0.0)
         + 1.0;
-    let task =
-        queries::create_internal_task(&state.db, title, body.body.trim(), ticket_state, position)
-            .await?;
+    // Prefer the multi-repo field; fall back to the legacy single `repo_id`.
+    let repo_ids = body
+        .repo_ids
+        .clone()
+        .unwrap_or_else(|| body.repo_id.into_iter().collect());
+    let task = queries::create_internal_task(
+        &state.db,
+        title,
+        body.body.trim(),
+        ticket_state,
+        &repo_ids,
+        position,
+    )
+    .await?;
     state.notify_board();
     Ok(Json(task).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetTaskRepoRequest {
+    /// The target repos in priority order, or an empty list to clear them (back
+    /// to tracking-only). The first becomes the primary repo the agent branches in.
+    #[serde(default)]
+    pub repo_ids: Option<Vec<Uuid>>,
+    /// Legacy single-repo field, still accepted when `repo_ids` is absent.
+    #[serde(default)]
+    pub repo_id: Option<Uuid>,
+}
+
+/// `POST /api/v1/tasks/:id/repo` - set the repos an internal ticket targets (or
+/// clear them). Only valid for internal tickets; a GitHub task's repo is its
+/// issue's and is never reassigned.
+pub async fn set_repo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<SetTaskRepoRequest>,
+) -> ApiResult<Response> {
+    // Prefer the multi-repo field; fall back to the legacy single `repo_id`.
+    let repo_ids = payload
+        .repo_ids
+        .clone()
+        .unwrap_or_else(|| payload.repo_id.into_iter().collect());
+    match queries::set_internal_task_repos(&state.db, id, &repo_ids).await? {
+        Some(task) => {
+            state.notify_board();
+            Ok(Json(task).into_response())
+        }
+        None => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "not an internal ticket" })),
+        )
+            .into_response()),
+    }
 }
 
 /// `GET /api/v1/tasks/:id/issue` - the conversation view: a real GitHub issue

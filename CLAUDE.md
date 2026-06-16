@@ -203,6 +203,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `current_session_id`; Claude auto-compacts.
 - **Auth:** `CLAUDE_CODE_OAUTH_TOKEN` (subscription) for Claude; mounted host
   `~/.ssh` for `git@` clones; `GH_TOKEN` for HTTPS + octocrab.
+- **Local DB validation:** PostgreSQL 17 (client + server) is baked into the
+  workspace image, and `pg-ephemeral` boots a throwaway PG17 on `127.0.0.1` and
+  prints a `DATABASE_URL` (`export DATABASE_URL="$(pg-ephemeral)"`), so the agent
+  can verify migrations / integration tests against the same major as CI and
+  prod without a daemon. The entrypoint also aligns the agent to the mounted host
+  Docker socket's group, so `docker` / `earthly` work without `sudo` too.
 
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts

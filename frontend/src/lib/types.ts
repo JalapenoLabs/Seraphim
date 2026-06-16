@@ -93,6 +93,10 @@ export type Task = {
   source_kind: SourceKind
   external_id: string
   repo_id: string | null
+  // Every repo an internal ticket targets, in priority order; the first equals
+  // `repo_id` (the primary repo the agent branches in). Empty for tracking-only
+  // tickets and for GitHub/Jira tasks.
+  target_repo_ids: string[]
   title: string
   body_snapshot: string
   url: string
@@ -180,6 +184,8 @@ export type Settings = {
   jira_deployment: JiraDeployment
   jira_base_url: string
   jira_email: string
+  // Only sync Jira tickets assigned to the connected account (on by default).
+  jira_assigned_to_me_only: boolean
   jira_token_set: boolean
   // Whether the realtime issue-webhook secrets are stored (booleans only; the
   // raw secrets are never sent back).
@@ -298,6 +304,30 @@ export type AgentEvent = {
   payload: unknown
   created_at: string
 }
+
+// A draft issue scoped by the compose assistant but not yet created (issue #181).
+// `repo_id` is the optional target repo (where a GitHub issue is filed, or an
+// internal ticket's repo).
+export type IssueDraft = {
+  id: string
+  title: string
+  body: string
+  repo_id: string | null
+  position: number
+  created_at: string
+  updated_at: string
+}
+
+// The compose page's initial state: chat transcript, current drafts, whether a
+// turn is running.
+export type ComposeState = {
+  events: AgentEvent[]
+  drafts: IssueDraft[]
+  running: boolean
+}
+
+// Where a batch of drafts is bulk-created.
+export type ComposeTarget = 'internal' | 'github' | 'jira'
 
 // A setup recommendation the agent made after finishing a task.
 export type EnvSuggestion = {

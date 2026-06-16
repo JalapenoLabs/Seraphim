@@ -30,6 +30,21 @@ const PAGE_SIZE: i64 = 50;
 /// Server, hence not deployment-dependent like [`JiraConfig::api_base`].
 const AGILE_API: &str = "/rest/agile/1.0";
 
+/// The JQL that scopes a board's issues during sync.
+///
+/// Completed work is always excluded (`statusCategory != Done`, which covers
+/// Done / Closed / Resolved and any other status in the Done category) so the
+/// board only ever holds actionable tickets. When `assigned_to_me`, the query is
+/// further restricted to the authenticated account; `currentUser()` resolves
+/// server-side, so it is deployment-agnostic and needs no stored account id.
+fn board_sync_jql(assigned_to_me: bool) -> String {
+    if assigned_to_me {
+        "assignee = currentUser() AND statusCategory != Done".to_string()
+    } else {
+        "statusCategory != Done".to_string()
+    }
+}
+
 // --- Pure connection config + helpers ---------------------------------------
 
 /// A resolved Jira connection, built from the settings row + the secret token.
@@ -150,12 +165,37 @@ pub fn issue_from_webhook(issue: &serde_json::Value, base_url: &str) -> Option<J
     })
 }
 
+/// The account identifier an issue is assigned to, used to tell whether a ticket
+/// belongs to the connected user when filtering realtime webhook events. Reads the
+/// field that matches the deployment's identity scheme: `accountId` on Cloud, the
+/// username (`name`) on Server / Data Center. `None` when the issue is unassigned.
+pub fn assignee_account_id(
+    issue: &serde_json::Value,
+    deployment: JiraDeployment,
+) -> Option<String> {
+    let assignee = issue.get("fields")?.get("assignee")?;
+    if assignee.is_null() {
+        return None;
+    }
+    let field = match deployment {
+        JiraDeployment::Cloud => "accountId",
+        JiraDeployment::Server => "name",
+    };
+    assignee
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 // --- Public DTOs -------------------------------------------------------------
 
 /// The current account, returned by a connection test.
 #[derive(Debug, Clone)]
 pub struct JiraIdentity {
     pub display_name: String,
+    /// The account's stable identifier used to match issue assignees: the opaque
+    /// `accountId` on Cloud, the username (`name`) on Server / Data Center.
+    pub account_id: String,
 }
 
 /// A board surfaced by discovery.
@@ -208,15 +248,25 @@ impl JiraClient {
     }
 
     /// Confirms the connection works and returns the authenticated account.
+    ///
+    /// The account id is the identifier an issue's `assignee` is matched against
+    /// in the webhook path: the opaque `accountId` on Cloud, the username (`name`)
+    /// on Server / Data Center. It is empty only if Jira omits both.
     pub async fn verify(&self) -> Result<JiraIdentity> {
         let url = format!("{}{}/myself", self.config.base_url, self.config.api_base());
         let me: RawMyself = self.get_json(&url).await?;
+        let account_id = match self.config.deployment {
+            JiraDeployment::Cloud => me.account_id.clone(),
+            JiraDeployment::Server => me.name.clone(),
+        }
+        .unwrap_or_default();
         Ok(JiraIdentity {
             display_name: me
                 .display_name
                 .or(me.name)
                 .or(me.email_address)
                 .unwrap_or_else(|| "Jira user".to_string()),
+            account_id,
         })
     }
 
@@ -249,17 +299,36 @@ impl JiraClient {
         Ok(boards)
     }
 
-    /// The issues currently on a board, capped at [`MAX_ISSUES_PER_BOARD`].
-    pub async fn list_board_issues(&self, board_id: i64) -> Result<Vec<JiraIssue>> {
+    /// The actionable issues on a board, capped at [`MAX_ISSUES_PER_BOARD`].
+    ///
+    /// The query always drops completed work and, with `assigned_to_me`, scopes to
+    /// the authenticated account so a shared team board only yields the operator's
+    /// own open queue (see [`board_sync_jql`]).
+    pub async fn list_board_issues(
+        &self,
+        board_id: i64,
+        assigned_to_me: bool,
+    ) -> Result<Vec<JiraIssue>> {
+        let jql = board_sync_jql(assigned_to_me);
+        let endpoint = format!(
+            "{}{}/board/{board_id}/issue",
+            self.config.base_url, AGILE_API
+        );
         let mut issues = Vec::new();
         let mut start_at = 0i64;
         loop {
-            let url = format!(
-                "{}{}/board/{board_id}/issue?fields=summary,status,description&startAt={start_at}&maxResults={PAGE_SIZE}",
-                self.config.base_url,
-                AGILE_API
-            );
-            let page: IssuePage = self.get_json(&url).await?;
+            // `parse_with_params` percent-encodes each value, so the JQL's spaces
+            // and operators reach Jira correctly without hand-rolled encoding.
+            let url = reqwest::Url::parse_with_params(
+                &endpoint,
+                &[
+                    ("fields", "summary,status,description"),
+                    ("startAt", &start_at.to_string()),
+                    ("maxResults", &PAGE_SIZE.to_string()),
+                    ("jql", &jql),
+                ],
+            )?;
+            let page: IssuePage = self.get_json(url.as_str()).await?;
             for raw in &page.issues {
                 issues.push(JiraIssue {
                     key: raw.key.clone(),
@@ -431,6 +500,8 @@ fn description_to_text(value: Option<&serde_json::Value>) -> String {
 
 #[derive(Debug, Deserialize)]
 struct RawMyself {
+    #[serde(rename = "accountId")]
+    account_id: Option<String>,
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     name: Option<String>,
@@ -586,6 +657,49 @@ mod tests {
     }
 
     #[test]
+    fn assignee_id_reads_the_field_matching_the_deployment() {
+        let issue = serde_json::json!({
+            "fields": {
+                "assignee": { "accountId": "557058:abc", "name": "jsmith" }
+            }
+        });
+        // Cloud identifies accounts by the opaque accountId; Server by the username.
+        assert_eq!(
+            assignee_account_id(&issue, JiraDeployment::Cloud).as_deref(),
+            Some("557058:abc")
+        );
+        assert_eq!(
+            assignee_account_id(&issue, JiraDeployment::Server).as_deref(),
+            Some("jsmith")
+        );
+    }
+
+    #[test]
+    fn assignee_id_is_none_when_unassigned_or_missing() {
+        let unassigned = serde_json::json!({ "fields": { "assignee": null } });
+        assert_eq!(
+            assignee_account_id(&unassigned, JiraDeployment::Cloud),
+            None
+        );
+
+        let no_field = serde_json::json!({ "fields": {} });
+        assert_eq!(assignee_account_id(&no_field, JiraDeployment::Cloud), None);
+
+        let no_fields = serde_json::json!({});
+        assert_eq!(assignee_account_id(&no_fields, JiraDeployment::Cloud), None);
+    }
+
+    #[test]
+    fn board_sync_jql_always_excludes_done_and_scopes_when_asked() {
+        // Completed work is never pulled, regardless of the assignee filter.
+        assert_eq!(board_sync_jql(false), "statusCategory != Done");
+        assert_eq!(
+            board_sync_jql(true),
+            "assignee = currentUser() AND statusCategory != Done"
+        );
+    }
+
+    #[test]
     fn description_flattens_adf_and_strings() {
         assert_eq!(
             description_to_text(Some(&serde_json::json!("plain text"))),
@@ -638,6 +752,8 @@ mod tests {
             jira_deployment: JiraDeployment::Cloud,
             jira_base_url: "https://acme.atlassian.net".to_string(),
             jira_email: "bot@acme.com".to_string(),
+            jira_assigned_to_me_only: true,
+            jira_account_id: String::new(),
             jira_token_set: true,
             github_webhook_secret_set: false,
             jira_webhook_secret_set: false,

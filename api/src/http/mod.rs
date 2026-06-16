@@ -6,6 +6,7 @@
 
 mod automation;
 mod board;
+mod compose;
 mod data;
 mod heart_attacks;
 mod jira;
@@ -69,6 +70,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id", get(tasks::get_task))
         .route("/tasks/:id/issue", get(tasks::get_issue))
         .route("/tasks/:id/issue/state", post(tasks::set_issue_state))
+        .route("/tasks/:id/repo", post(tasks::set_repo))
         .route("/tasks/:id/comment", post(tasks::add_comment))
         .route("/tasks/:id/stream", get(sse::task_stream))
         .route("/tasks/:id/move", post(board::move_task))
@@ -82,6 +84,19 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/:id/stats", get(stats::task))
         .route("/stats", get(stats::global))
         .route("/stats/reset", post(stats::reset))
+        // The compose assistant (issue #181): a second on-demand session for
+        // drafting issues in bulk, fully separate from the board agent.
+        .route("/compose", get(compose::get_state))
+        .route("/compose/message", post(compose::message))
+        .route("/compose/drafts", post(compose::replace_drafts))
+        .route(
+            "/compose/drafts/:id",
+            axum::routing::put(compose::update_draft).delete(compose::delete_draft),
+        )
+        .route("/compose/reset", post(compose::reset))
+        .route("/compose/bulk-create", post(compose::bulk_create))
+        .route("/compose/stats", get(stats::compose))
+        .route("/compose/stream", get(sse::compose_stream))
         .route("/agent/suggestions", post(suggestions::create))
         .route("/suggestions/:id/ack", post(suggestions::acknowledge))
         .route("/suggestions/:id/create", post(suggestions::create_issue))

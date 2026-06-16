@@ -1,7 +1,14 @@
 <script lang="ts">
   import type { DiffLine, DiffLineKind } from '$lib/diff'
 
-  let { lines, added, removed }: { lines: DiffLine[]; added: number; removed: number } = $props()
+  // `collapsed` hides the patch rows but keeps the one-line summary, so a caller
+  // can offer an expand/collapse affordance for big, all-additions writes.
+  let {
+    lines,
+    added,
+    removed,
+    collapsed = false
+  }: { lines: DiffLine[]; added: number; removed: number; collapsed?: boolean } = $props()
 
   // A long Write would otherwise flood the log; show a generous window and note
   // the remainder rather than rendering hundreds of rows.
@@ -34,7 +41,7 @@
     Added {plural(added, 'line')}, removed {plural(removed, 'line')}
   </div>
 
-  {#if shown.length}
+  {#if shown.length && !collapsed}
     <div class="mt-1 overflow-hidden rounded-md border border-border text-xs">
       {#each shown as line}
         <div class="flex {ROW_CLASS[line.kind]}">

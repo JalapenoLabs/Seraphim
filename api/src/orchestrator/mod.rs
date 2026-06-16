@@ -10,6 +10,8 @@
 //! completion before the next is considered, so turns never overlap.
 
 mod availability;
+mod ci_watch;
+pub mod compose;
 mod network;
 mod prompt;
 mod provision;
@@ -39,6 +41,12 @@ use crate::git;
 use crate::secrets::Scrubber;
 use crate::state::AppState;
 use review::{PrCi, PrReview, ReviewDecision};
+
+/// Pid file the main agent's `claude` records to, so a reset/defibrillation kills
+/// exactly it and never the compose assistant, which shares the workspace (#181).
+const AGENT_PID_FILE: &str = "/tmp/seraphim-agent.pid";
+/// Pid file the compose assistant's `claude` records to (issue #181).
+pub(crate) const COMPOSE_PID_FILE: &str = "/tmp/seraphim-compose.pid";
 
 /// How often the agent loop checks for work when idle.
 const AGENT_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -129,6 +137,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(provision_on_startup(state.clone()));
     tokio::spawn(sync_loop(state.clone()));
     tokio::spawn(review_loop(state.clone()));
+    tokio::spawn(ci_watch::ci_watch_loop(state.clone()));
     tokio::spawn(defibrillator_loop(state.clone()));
     tokio::spawn(subscription::token_loop(state.clone()));
     tokio::spawn(agent_loop(state));
@@ -231,8 +240,25 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
     // of our columns. New tickets land in the mapped column; existing ones refresh
     // their cached fields and live status but keep the human-set column.
     if let Some(jira) = state.jira().await? {
+        let settings = queries::get_settings(&state.db).await?;
+        let assigned_to_me = settings.jira_assigned_to_me_only;
+
+        // The webhook path filters against the stored account id but cannot run JQL
+        // to learn it. If the filter is on and we have never captured the id (e.g.
+        // the operator enabled it without testing the connection), backfill it now
+        // from the same client the poll already holds.
+        if assigned_to_me && settings.jira_account_id.trim().is_empty() {
+            match jira.verify().await {
+                Ok(identity) if !identity.account_id.is_empty() => {
+                    queries::set_jira_account_id(&state.db, &identity.account_id).await?;
+                }
+                Ok(_) => {}
+                Err(error) => warn!(error = %error, "failed to capture Jira account id"),
+            }
+        }
+
         for board in queries::list_jira_boards_to_sync(&state.db).await? {
-            let issues = match jira.list_board_issues(board.board_id).await {
+            let issues = match jira.list_board_issues(board.board_id, assigned_to_me).await {
                 Ok(issues) => issues,
                 Err(error) => {
                     warn!(error = %error, board = %board.name, "failed to list Jira issues");
@@ -535,6 +561,35 @@ pub struct ResetSummary {
     pub issue_reopened: bool,
 }
 
+/// Whether a card is the one the agent is *actively* running a turn on right now.
+///
+/// The agent loop is single-threaded, so at most one task is ever in `InProgress`
+/// with a live (`working`/`preparing`) status, and that task is necessarily the
+/// turn currently streaming. A task parked awaiting input, sitting in review, or
+/// queued is therefore never matched. Pure, so callers deciding whether to
+/// interrupt the agent can be unit-tested.
+pub fn is_active_turn(column: TaskColumn, status: TaskStatus) -> bool {
+    column == TaskColumn::InProgress
+        && matches!(status, TaskStatus::Working | TaskStatus::Preparing)
+}
+
+/// Stops the agent's in-flight turn immediately, abandoning whatever it was doing.
+///
+/// Used both by a per-task reset and when the operator pulls the worked card out
+/// from under the agent (issue #172). It bumps the reset epoch so the dying turn
+/// yields its post-turn handling (it won't move the card or persist its session),
+/// kills the orphaned `claude -p` process, and clears the shared session and live
+/// usage, since a turn killed mid-stream can leave the resumable conversation
+/// inconsistent for the next task. The caller decides *when* to interrupt; the
+/// single-threaded loop guarantees the live turn is unique (see [`is_active_turn`]).
+pub async fn stop_active_turn(state: &AppState) -> Result<()> {
+    state.bump_reset_epoch();
+    kill_agent_process(state).await;
+    queries::set_current_session_id(&state.db, None).await?;
+    state.set_live_usage(None);
+    Ok(())
+}
+
 /// Hard-resets a single stuck task to a clean slate (issue #72): if the agent is
 /// mid-turn on it, that turn is stopped; its pull request is closed, its branch
 /// deleted from the remote and the workspace, a closed source issue is reopened,
@@ -554,17 +609,8 @@ pub async fn reset_task(state: &AppState, task_id: uuid::Uuid) -> Result<ResetSu
     // Stop the agent only if it is *actively* running a turn on THIS task. The
     // loop is single-threaded, so the live turn is unique; a task merely parked
     // awaiting input, or sitting in review, is not it and must not be disturbed.
-    // Interrupting the live turn bumps the reset epoch (so the turn abandons its
-    // post-turn handling rather than re-moving the card), kills the Claude
-    // process, and clears the shared session, since a turn killed mid-stream can
-    // leave the resumable conversation inconsistent for the next task.
-    let actively_working = task.board_column == TaskColumn::InProgress
-        && matches!(task.status, TaskStatus::Working | TaskStatus::Preparing);
-    if actively_working {
-        state.bump_reset_epoch();
-        kill_agent_process(state).await;
-        queries::set_current_session_id(&state.db, None).await?;
-        state.set_live_usage(None);
+    if is_active_turn(task.board_column, task.status) {
+        stop_active_turn(state).await?;
         summary.interrupted_agent = true;
         info!(task_id = %task.id, "stopped the agent's in-flight turn for the reset");
     }
@@ -786,6 +832,24 @@ async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
     }
 }
 
+/// Resolves a ticket's target repos (priority order, the first being the primary)
+/// into `Repository` rows for the prompt, skipping any that have since been
+/// deleted. Best-effort: a lookup error is logged and dropped rather than failing
+/// the turn, since the focus repo is always passed to the prompt separately.
+async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
+    let mut repos = Vec::new();
+    for repo_id in &task.target_repo_ids.0 {
+        match queries::get_repository(&state.db, *repo_id).await {
+            Ok(Some(repo)) => repos.push(repo),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, repo_id = %repo_id, "failed to load a target repo for the prompt");
+            }
+        }
+    }
+    repos
+}
+
 /// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR.
 async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
     info!(task_id = %task.id, title = %task.title, resume, "working task");
@@ -843,7 +907,8 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         prompt
     } else {
         let comments = fetch_issue_comments(state, &repo, &task).await;
-        prompt::build(&settings, &repo, &task, &branch, &comments)
+        let target_repos = load_target_repos(state, &task).await;
+        prompt::build(&settings, &repo, &task, &branch, &comments, &target_repos)
     };
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
@@ -1235,6 +1300,7 @@ async fn stream_turn(
         github_token: queries::get_github_token(&state.db).await?,
         task_id: task.id.to_string(),
         internal_api_url: state.internal_api_url.clone(),
+        pid_file: AGENT_PID_FILE.to_string(),
         env,
     };
 
@@ -1392,10 +1458,17 @@ async fn stream_turn(
         let mut payload = event.raw.clone();
         scrubber.scrub_value(&mut payload);
         queries::append_event(&state.db, turn.id, seq, label, payload.clone()).await?;
-        state.notify_task(
-            task.id,
-            serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
-        );
+        // Rate-limit notices are a stats-only signal: they feed the usage gauge's
+        // fallback via `latest_rate_limit`, but they carry no actionable detail, so
+        // they are deliberately kept out of the live activity stream (and out of
+        // `list_events_for_task`) rather than cluttering the activity log and the
+        // watch feed (issue #182). They are still persisted for the gauge.
+        if label != "rate_limit" {
+            state.notify_task(
+                task.id,
+                serde_json::json!({ "type": label, "payload": payload, "created_at": Utc::now() }),
+            );
+        }
         queries::set_task_status(&state.db, task.id, TaskStatus::Working)
             .await
             .ok();
@@ -1933,15 +2006,23 @@ async fn block(state: &AppState, task: &Task, message: &str) -> Result<()> {
 /// (and contend on the shared session). The `[c]` keeps pkill from matching its
 /// own command line. Best-effort: a cleanup failure must never abort the caller.
 async fn kill_agent_process(state: &AppState) {
+    // Kill exactly the main agent's recorded process so the compose assistant,
+    // which shares this workspace, is never collateral (issue #181). If no PID was
+    // recorded (e.g. an orphan from before this build), fall back to reaping stray
+    // `claude -p` processes, but still spare a running compose turn by its PID.
+    let script = format!(
+        "agent_pid=$(cat {agent} 2>/dev/null); compose_pid=$(cat {compose} 2>/dev/null); \
+         if [ -n \"$agent_pid\" ]; then kill -9 \"$agent_pid\" 2>/dev/null || true; rm -f {agent}; \
+         else for p in $(pgrep -f '[c]laude -p' 2>/dev/null); do \
+         [ \"$p\" = \"$compose_pid\" ] || kill -9 \"$p\" 2>/dev/null || true; done; fi; true",
+        agent = AGENT_PID_FILE,
+        compose = COMPOSE_PID_FILE,
+    );
     let _ = state
         .workspace
         .exec_capture(
             "/workspace",
-            vec![
-                "bash".to_string(),
-                "-lc".to_string(),
-                "pkill -9 -f '[c]laude -p' || true".to_string(),
-            ],
+            vec!["bash".to_string(), "-lc".to_string(), script],
             vec![],
         )
         .await;
@@ -2213,6 +2294,7 @@ mod tests {
             source_kind: crate::db::models::SourceKind::Github,
             external_id: String::new(),
             repo_id: None,
+            target_repo_ids: sqlx::types::Json(Vec::new()),
             jira_board_id: None,
             title: String::new(),
             body_snapshot: String::new(),

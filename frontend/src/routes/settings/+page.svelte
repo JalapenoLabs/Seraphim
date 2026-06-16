@@ -62,6 +62,7 @@
   import { Textarea } from '$lib/components/ui/textarea'
   import { Badge } from '$lib/components/ui/badge'
   import { Switch } from '$lib/components/ui/switch'
+  import TimezonePicker from '$lib/components/TimezonePicker.svelte'
 
   const CUSTOM_MODEL = '__custom__'
 
@@ -130,9 +131,6 @@
   let skipDates = $state<string[]>([])
   let newSkipDate = $state('')
   let scheduleSavedAt = $state<string | null>(null)
-  // The browser's full IANA zone list, when the engine exposes it.
-  const timezones =
-    typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []
 
   // Environment variables (DigitalOcean-style rows).
   let envRows = $state<EnvRow[]>([])
@@ -379,7 +377,8 @@
       jira_enabled: settings?.jira_enabled ?? false,
       jira_deployment: jiraDeployment,
       jira_base_url: jiraBaseUrl.trim(),
-      jira_email: jiraEmail.trim()
+      jira_email: jiraEmail.trim(),
+      jira_assigned_to_me_only: settings?.jira_assigned_to_me_only ?? true
     })
     if (jiraTokenInput.trim()) {
       settings = await setTokens({ jira_api_token: jiraTokenInput.trim() })
@@ -1227,18 +1226,7 @@
         {#if settings.availability_enabled}
           <div class="space-y-1.5">
             <Label for="timezone">Time zone</Label>
-            <select
-              id="timezone"
-              bind:value={settings.availability_timezone}
-              class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
-            >
-              {#if !timezones.includes(settings.availability_timezone)}
-                <option value={settings.availability_timezone}>{settings.availability_timezone}</option>
-              {/if}
-              {#each timezones as timezone}
-                <option value={timezone}>{timezone}</option>
-              {/each}
-            </select>
+            <TimezonePicker id="timezone" bind:value={settings.availability_timezone} />
           </div>
 
           <div class="space-y-2">
@@ -1299,12 +1287,14 @@
               </div>
             {/if}
           </div>
-
-          <div class="flex items-center gap-3">
-            <Button onclick={saveSchedule}>Save schedule</Button>
-            {#if scheduleSavedAt}<span class="text-sm text-muted-foreground">Saved at {scheduleSavedAt}</span>{/if}
-          </div>
         {/if}
+
+        <!-- Always available, even with the schedule off, so turning the
+             restriction off can be saved (the toggle persists via this Save). -->
+        <div class="flex items-center gap-3">
+          <Button onclick={saveSchedule}>Save schedule</Button>
+          {#if scheduleSavedAt}<span class="text-sm text-muted-foreground">Saved at {scheduleSavedAt}</span>{/if}
+        </div>
       </Card.Content>
     </Card.Root>
     {/if}
@@ -1591,6 +1581,17 @@
           {#if settings.jira_token_set}
             <span class="text-xs text-muted-foreground">A token is stored. Leave blank to keep it.</span>
           {/if}
+        </div>
+
+        <div class="flex items-start gap-2">
+          <Switch id="jira-assigned-to-me" bind:checked={settings.jira_assigned_to_me_only} />
+          <div class="grid gap-1">
+            <Label for="jira-assigned-to-me">Only sync tickets assigned to me</Label>
+            <span class="text-xs text-muted-foreground">
+              Pulls only the issues assigned to the connected account, instead of every ticket on the
+              board. Already-synced cards are not removed; this applies to new tickets going forward.
+            </span>
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
