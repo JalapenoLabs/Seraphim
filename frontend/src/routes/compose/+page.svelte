@@ -4,11 +4,11 @@
   // from the board agent. Left: the chat with the assistant and a resizable
   // composer (or, when a draft is selected, that draft's editor). Right: the list
   // of drafts the assistant has scoped. Top-right: Reset, Target, and Bulk create.
-  import type { AgentEvent, IssueDraft, ComposeTarget, Repository } from '$lib/types'
+  import type { AgentEvent, IssueDraft, ComposeTarget, Repository, Railway } from '$lib/types'
 
   import { onMount, onDestroy, tick } from 'svelte'
   import { toast } from 'svelte-sonner'
-  import { RotateCcw, Send, Trash2, ChevronLeft } from '@lucide/svelte'
+  import { RotateCcw, Send, Trash2, ChevronLeft, ChevronUp, ChevronDown } from '@lucide/svelte'
 
   import {
     getComposeState,
@@ -16,8 +16,10 @@
     resetCompose,
     bulkCreateDrafts,
     updateDraft,
+    reorderDrafts,
     deleteDraft,
-    listRepos
+    listRepos,
+    listRailways
   } from '$lib/api'
 
   import * as Select from '$lib/components/ui/select'
@@ -32,10 +34,14 @@
   type StreamEvent = Pick<AgentEvent, 'type' | 'payload' | 'created_at'>
 
   const NO_REPO = '__none__'
+  // A draft with no explicit lane defaults to `main`; this sentinel is that choice
+  // in the picker (the empty `railway_id` the server reads as "main").
+  const DEFAULT_RAILWAY = '__main__'
 
   let events = $state<StreamEvent[]>([])
   let drafts = $state<IssueDraft[]>([])
   let repos = $state<Repository[]>([])
+  let railways = $state<Railway[]>([])
   let running = $state(false)
   let message = $state('')
   let target = $state<ComposeTarget>('internal')
@@ -49,6 +55,7 @@
   let editTitle = $state('')
   let editBody = $state('')
   let editRepo = $state(NO_REPO)
+  let editRailway = $state(DEFAULT_RAILWAY)
 
   const targetLabels = {
     internal: 'Internal',
@@ -86,6 +93,7 @@
   onMount(() => {
     loadState().then(scrollToBottom)
     listRepos().then((list) => (repos = list))
+    listRailways().then((list) => (railways = list))
 
     stream = new EventSource('/api/v1/compose/stream')
     stream.addEventListener('compose', (raw) => {
@@ -144,6 +152,7 @@
     editTitle = draft.title
     editBody = draft.body
     editRepo = draft.repo_id ?? NO_REPO
+    editRailway = draft.railway_id ?? DEFAULT_RAILWAY
   }
 
   function closeDraft() {
@@ -158,7 +167,8 @@
       const updated = await updateDraft(selectedDraft.id, {
         title: editTitle.trim(),
         body: editBody,
-        repo_id: editRepo === NO_REPO ? null : editRepo
+        repo_id: editRepo === NO_REPO ? null : editRepo,
+        railway_id: editRailway === DEFAULT_RAILWAY ? null : editRailway
       })
       const index = drafts.findIndex((draft) => draft.id === updated.id)
       if (index !== -1) {
@@ -167,6 +177,27 @@
       toast.success('Draft saved')
     } catch {
       toast.error('Could not save the draft')
+    }
+  }
+
+  // Moves one draft up or down in the dependency sequence and persists the new
+  // order; bulk-create lays the cards into To Do in exactly this order (#207).
+  async function reorderDraft(id: string, direction: -1 | 1) {
+    const index = drafts.findIndex((draft) => draft.id === id)
+    const target = index + direction
+    if (index === -1 || target < 0 || target >= drafts.length) {
+      return
+    }
+    const next = [...drafts]
+    const [moved] = next.splice(index, 1)
+    next.splice(target, 0, moved)
+    // Optimistically reflect the move, then reconcile with the server's order.
+    drafts = next
+    try {
+      drafts = await reorderDrafts(next.map((draft) => draft.id))
+    } catch {
+      toast.error('Could not reorder the drafts')
+      await loadState()
     }
   }
 
@@ -223,8 +254,38 @@
     return repos.find((repo) => repo.id === repoId)?.full_name ?? ''
   }
 
+  function railwayName(railwayId: string | null): string {
+    if (!railwayId) {
+      return 'main'
+    }
+    return railways.find((railway) => railway.id === railwayId)?.name ?? 'main'
+  }
+
+  // The lane a draft's card will actually land on. The railway always follows the
+  // repo, so a repo-bound draft lands on that repo's railway; only a repo-less
+  // draft uses its explicit lane (defaulting to `main`). This mirrors the backend.
+  function effectiveRailwayName(draft: IssueDraft): string {
+    if (draft.repo_id) {
+      const repo = repos.find((entry) => entry.id === draft.repo_id)
+      return railwayName(repo?.railway_id ?? null)
+    }
+    return railwayName(draft.railway_id)
+  }
+
   const editRepoLabel = $derived(
     editRepo === NO_REPO ? 'No repo' : (repos.find((repo) => repo.id === editRepo)?.full_name ?? 'Select a repo')
+  )
+
+  // True while a repo is chosen: the lane is pinned by the repo, so the explicit
+  // railway picker is disabled and we show the repo's lane instead.
+  const editRepoHasRepo = $derived(editRepo !== NO_REPO)
+  const editRailwayLabel = $derived(
+    editRailway === DEFAULT_RAILWAY
+      ? 'main'
+      : (railways.find((railway) => railway.id === editRailway)?.name ?? 'main')
+  )
+  const editRepoRailwayName = $derived(
+    railwayName(repos.find((repo) => repo.id === editRepo)?.railway_id ?? null)
   )
 </script>
 
@@ -299,6 +360,28 @@
             </Select.Root>
           </div>
           <div class="grid gap-1.5">
+            <Label for="draft-railway">Target railway</Label>
+            {#if editRepoHasRepo}
+              <!-- The railway follows the repo, so the lane is fixed by the repo. -->
+              <div
+                id="draft-railway"
+                class="flex h-9 items-center rounded-md border border-border bg-muted/40 px-3 text-sm text-muted-foreground"
+              >
+                {editRepoRailwayName} (follows the repository)
+              </div>
+            {:else}
+              <Select.Root type="single" value={editRailway} onValueChange={(value) => (editRailway = value)}>
+                <Select.Trigger id="draft-railway" class="w-full">{editRailwayLabel}</Select.Trigger>
+                <Select.Content>
+                  <Select.Item value={DEFAULT_RAILWAY} label="main">main (default)</Select.Item>
+                  {#each railways.filter((railway) => !railway.is_main) as railway (railway.id)}
+                    <Select.Item value={railway.id} label={railway.name}>{railway.name}</Select.Item>
+                  {/each}
+                </Select.Content>
+              </Select.Root>
+            {/if}
+          </div>
+          <div class="grid gap-1.5">
             <Label for="draft-body">Body (Markdown)</Label>
             <Textarea id="draft-body" bind:value={editBody} rows={12} class="resize-y font-mono text-sm" />
           </div>
@@ -365,7 +448,7 @@
       {/if}
     </section>
 
-    <!-- Right panel: the draft list. -->
+    <!-- Right panel: the draft list, in dependency order. -->
     <section class="flex min-h-0 w-1/2 flex-col rounded-lg border border-border bg-card">
       <div class="border-b border-border px-4 py-2 text-sm font-semibold">
         Drafts {drafts.length ? `(${drafts.length})` : ''}
@@ -374,21 +457,50 @@
         {#if drafts.length === 0}
           <p class="px-2 py-3 text-sm text-muted-foreground">No drafts yet.</p>
         {/if}
-        {#each drafts as draft (draft.id)}
-          <button
-            type="button"
-            onclick={() => openDraft(draft)}
-            class="flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left hover:bg-secondary/50 {selectedId === draft.id ? 'bg-secondary/60' : ''}"
+        {#each drafts as draft, index (draft.id)}
+          <div
+            class="flex items-center gap-1 rounded-md pr-1 hover:bg-secondary/50 {selectedId === draft.id ? 'bg-secondary/60' : ''}"
           >
-            <span class="truncate text-sm font-medium">{draft.title}</span>
-            <span class="flex items-center gap-2 text-xs text-muted-foreground">
-              {#if repoName(draft.repo_id)}
-                <span class="truncate">{repoName(draft.repo_id)}</span>
-              {:else}
-                <span>No repo</span>
-              {/if}
-            </span>
-          </button>
+            <!-- Order controls: the list order is the bulk-create To Do order. -->
+            <div class="flex flex-col">
+              <button
+                type="button"
+                aria-label="Move draft earlier"
+                disabled={index === 0}
+                onclick={() => reorderDraft(draft.id, -1)}
+                class="px-1 text-muted-foreground hover:text-foreground disabled:opacity-30"
+              >
+                <ChevronUp class="size-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-label="Move draft later"
+                disabled={index === drafts.length - 1}
+                onclick={() => reorderDraft(draft.id, 1)}
+                class="px-1 text-muted-foreground hover:text-foreground disabled:opacity-30"
+              >
+                <ChevronDown class="size-3.5" />
+              </button>
+            </div>
+            <span class="w-5 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{index + 1}</span>
+            <button
+              type="button"
+              onclick={() => openDraft(draft)}
+              class="flex min-w-0 flex-1 flex-col gap-0.5 px-2 py-2 text-left"
+            >
+              <span class="truncate text-sm font-medium">{draft.title}</span>
+              <span class="flex items-center gap-2 text-xs text-muted-foreground">
+                {#if repoName(draft.repo_id)}
+                  <span class="truncate">{repoName(draft.repo_id)}</span>
+                {:else}
+                  <span>No repo</span>
+                {/if}
+                <span class="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+                  {effectiveRailwayName(draft)}
+                </span>
+              </span>
+            </button>
+          </div>
         {/each}
       </div>
     </section>

@@ -1,6 +1,10 @@
 //! HTTP surface for the compose assistant (issue #181): the chat turn trigger,
-//! draft CRUD (including the `seraphim-draft` helper endpoint), reset, and the
-//! deterministic bulk-create to GitHub / Jira / internal.
+//! draft CRUD (including the `seraphim-draft` helper endpoint), draft reorder,
+//! reset, and the deterministic bulk-create to GitHub / Jira / internal.
+//!
+//! The planner is railway-aware (issue #207): each draft carries an optional
+//! target railway and a position (its dependency order), and bulk-create routes
+//! every board-landing card into its railway's To Do in that order.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -65,7 +69,9 @@ pub async fn message(
 }
 
 /// One draft as the `seraphim-draft` helper sends it: a target `repo` named as
-/// `owner/name` (optional), which we resolve to a repo id.
+/// `owner/name` (optional), which we resolve to a repo id. The helper does not set
+/// a railway; the operator assigns lanes from the planner UI (issue #207), and a
+/// replace preserves those choices for kept drafts.
 #[derive(Debug, Deserialize)]
 pub struct DraftInput {
     pub title: String,
@@ -83,13 +89,15 @@ pub struct ReplaceDraftsRequest {
 
 /// `POST /api/v1/compose/drafts` - replace the whole draft set (the
 /// `seraphim-draft` helper always sends the full desired list). Blank-titled
-/// entries are dropped; an unknown repo name is kept as no repo.
+/// entries are dropped; an unknown repo name is kept as no repo. The helper never
+/// sends a railway, so `replace_drafts` re-applies the operator's per-draft lane
+/// choice to the kept drafts (matched by title).
 pub async fn replace_drafts(
     State(state): State<AppState>,
     Json(body): Json<ReplaceDraftsRequest>,
 ) -> ApiResult<Json<Vec<IssueDraft>>> {
     let repos = queries::list_repositories(&state.db).await?;
-    let resolved: Vec<(String, String, Option<Uuid>)> = body
+    let resolved: Vec<(String, String, Option<Uuid>, Option<Uuid>)> = body
         .drafts
         .into_iter()
         .filter(|draft| !draft.title.trim().is_empty())
@@ -100,7 +108,9 @@ pub async fn replace_drafts(
                     .find(|repo| repo.full_name.eq_ignore_ascii_case(name.trim()))
                     .map(|repo| repo.id)
             });
-            (draft.title, draft.body, repo_id)
+            // The helper carries no railway; `replace_drafts` keeps the operator's
+            // choice for matching drafts, so `None` here is the correct default.
+            (draft.title, draft.body, repo_id, None)
         })
         .collect();
     let drafts = queries::replace_drafts(&state.db, &resolved).await?;
@@ -115,15 +125,28 @@ pub struct UpdateDraftRequest {
     pub body: String,
     #[serde(default)]
     pub repo_id: Option<Uuid>,
+    /// The target railway, or `None` to use the default (`main`) lane.
+    #[serde(default)]
+    pub railway_id: Option<Uuid>,
 }
 
-/// `PUT /api/v1/compose/drafts/:id` - the operator's manual edit of one draft.
+/// `PUT /api/v1/compose/drafts/:id` - the operator's manual edit of one draft,
+/// including its target repo and railway (issue #207).
 pub async fn update_draft(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateDraftRequest>,
 ) -> ApiResult<Response> {
-    match queries::update_draft(&state.db, id, body.title.trim(), &body.body, body.repo_id).await? {
+    let updated = queries::update_draft(
+        &state.db,
+        id,
+        body.title.trim(),
+        &body.body,
+        body.repo_id,
+        body.railway_id,
+    )
+    .await?;
+    match updated {
         Some(draft) => {
             state.notify_compose_changed();
             Ok(Json(draft).into_response())
@@ -134,6 +157,24 @@ pub async fn update_draft(
         )
             .into_response()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderDraftsRequest {
+    /// The draft ids in the operator's chosen dependency order.
+    pub ids: Vec<Uuid>,
+}
+
+/// `POST /api/v1/compose/drafts/reorder` - reorder the drafts to the planner's
+/// dependency sequence. Bulk-create then routes each card into its lane's To Do in
+/// this order (issue #207).
+pub async fn reorder_drafts(
+    State(state): State<AppState>,
+    Json(body): Json<ReorderDraftsRequest>,
+) -> ApiResult<Json<Vec<IssueDraft>>> {
+    let drafts = queries::reorder_drafts(&state.db, &body.ids).await?;
+    state.notify_compose_changed();
+    Ok(Json(drafts))
 }
 
 /// `DELETE /api/v1/compose/drafts/:id` - drop one draft.
@@ -169,6 +210,12 @@ pub struct BulkCreateRequest {
 /// the chosen tracker's issue, then clear the drafts that succeeded. Per-draft
 /// failures are reported but never abort the rest, so a half-created batch is
 /// transparent rather than silently lost.
+///
+/// Drafts are processed in their planner order (issue #207), and every card that
+/// lands on the board (the internal target) is placed into its railway's **To Do**
+/// at a strictly increasing position so the dependency sequence is preserved. The
+/// railway follows the repo: a repo-bound draft's card lands on that repo's
+/// railway; a repo-less draft uses its chosen railway (or `main`).
 pub async fn bulk_create(
     State(state): State<AppState>,
     Json(body): Json<BulkCreateRequest>,
@@ -178,6 +225,13 @@ pub async fn bulk_create(
         return Ok(bad_request("There are no drafts to create"));
     }
 
+    // Append the batch below whatever is already in To Do, then step each draft up
+    // by one so the list order becomes the To Do order within each lane.
+    let mut next_position = queries::max_position_in_column(&state.db, TaskColumn::Todo)
+        .await?
+        .unwrap_or(0.0)
+        + 1.0;
+
     let mut created_urls: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     // Track the ids that succeeded so a partial failure leaves the rest in place.
@@ -185,7 +239,7 @@ pub async fn bulk_create(
 
     for draft in &drafts {
         let result = match body.target {
-            BulkTarget::Internal => create_internal(&state, draft).await,
+            BulkTarget::Internal => create_internal(&state, draft, next_position).await,
             BulkTarget::Github => create_github(&state, draft).await,
             BulkTarget::Jira => create_jira(&state, draft).await,
         };
@@ -195,6 +249,9 @@ pub async fn bulk_create(
                 if let Some(url) = url {
                     created_urls.push(url);
                 }
+                // Only the board-landing path consumes a position; advancing it
+                // unconditionally keeps the order stable even on a mixed batch.
+                next_position += 1.0;
             }
             Err(message) => errors.push(format!("{}: {message}", draft.title)),
         }
@@ -214,23 +271,21 @@ pub async fn bulk_create(
     .into_response())
 }
 
-/// Creates an internal ticket from a draft (its repo, if set, becomes the single
-/// target repo the agent branches in).
-async fn create_internal(state: &AppState, draft: &IssueDraft) -> Result<Option<String>, String> {
-    let position = queries::max_position_in_column(&state.db, TaskColumn::Available)
-        .await
-        .map_err(|error| error.to_string())?
-        .unwrap_or(0.0)
-        + 1.0;
-    // The draft carries at most one target repo; pass it as the (0-or-1 entry)
-    // repo set the multi-repo `create_internal_task` now expects.
-    let repo_ids: Vec<Uuid> = draft.repo_id.into_iter().collect();
-    queries::create_internal_task(
+/// Creates an internal ticket from a draft straight into its railway's To Do at
+/// `position`. The repo, if set, becomes the single target repo the agent branches
+/// in and pins the card's railway; otherwise the draft's chosen railway (or `main`)
+/// is used (issue #207).
+async fn create_internal(
+    state: &AppState,
+    draft: &IssueDraft,
+    position: f64,
+) -> Result<Option<String>, String> {
+    queries::create_internal_task_in_todo(
         &state.db,
         draft.title.trim(),
         &draft.body,
-        "open",
-        &repo_ids,
+        draft.repo_id,
+        draft.railway_id,
         position,
     )
     .await

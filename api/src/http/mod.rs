@@ -90,6 +90,8 @@ pub fn router(state: AppState) -> Router {
         .route("/compose", get(compose::get_state))
         .route("/compose/message", post(compose::message))
         .route("/compose/drafts", post(compose::replace_drafts))
+        // Registered before `/compose/drafts/:id` so "reorder" is not read as an id.
+        .route("/compose/drafts/reorder", post(compose::reorder_drafts))
         .route(
             "/compose/drafts/:id",
             axum::routing::put(compose::update_draft).delete(compose::delete_draft),

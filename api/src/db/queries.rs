@@ -1631,6 +1631,45 @@ pub async fn create_internal_task(
     .await
 }
 
+/// Creates an internal ticket directly in a railway's **To Do**, at `position`
+/// (issue #207's bulk-create from the planner).
+///
+/// The railway always follows the repo: when `repo_id` is set the card lands on
+/// that repo's railway, ignoring `railway_id`; only a repo-less draft uses the
+/// explicit `railway_id`, falling back to `main` when that is `None` too. This
+/// keeps the "railway follows repo" invariant intact while letting the planner
+/// place repo-less drafts on a chosen lane. `position` carries the planner's
+/// dependency order so the To Do lane preserves it.
+pub async fn create_internal_task_in_todo(
+    pool: &PgPool,
+    title: &str,
+    body: &str,
+    repo_id: Option<Uuid>,
+    railway_id: Option<Uuid>,
+    position: f64,
+) -> sqlx::Result<Task> {
+    let repo_ids: Vec<Uuid> = repo_id.into_iter().collect();
+    sqlx::query_as::<_, Task>(
+        // railway = repo's railway, else the chosen railway, else `main`.
+        "INSERT INTO tasks \
+           (railway_id, source_kind, external_id, repo_id, target_repo_ids, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES (COALESCE( \
+             (SELECT railway_id FROM repositories WHERE id = $1), \
+             $2, \
+             (SELECT id FROM railways WHERE is_main)), \
+           'internal', nextval('internal_ticket_seq')::text, $1, $3, $4, $5, '', 'open', 'todo', $6) \
+         RETURNING *",
+    )
+    .bind(repo_id)
+    .bind(railway_id)
+    .bind(Json(repo_ids))
+    .bind(title)
+    .bind(body)
+    .bind(position)
+    .fetch_one(pool)
+    .await
+}
+
 /// Sets the repos an internal ticket targets (priority order; the first becomes
 /// the primary `repo_id`), or clears them with an empty slice. Restricted to
 /// internal tasks: a GitHub task's repo is its issue's and must not be
@@ -2676,23 +2715,38 @@ pub async fn list_drafts(pool: &PgPool) -> sqlx::Result<Vec<super::models::Issue
 }
 
 /// Replaces the entire draft set with `drafts` (`title`, `body`, optional
-/// `repo_id`), positioned in the given order. The compose agent always sends the
-/// full desired list, so a replace keeps the agent's view and ours in sync.
+/// `repo_id`, optional `railway_id`), positioned in the given order. The compose
+/// agent always sends the full desired list, so a replace keeps its view and ours
+/// in sync. The `seraphim-draft` helper does not set a railway, so a replace
+/// preserves the operator's per-draft railway choice by re-applying it to the
+/// matching kept draft (matched by title) when the incoming entry has none.
 pub async fn replace_drafts(
     pool: &PgPool,
-    drafts: &[(String, String, Option<Uuid>)],
+    drafts: &[(String, String, Option<Uuid>, Option<Uuid>)],
 ) -> sqlx::Result<Vec<super::models::IssueDraft>> {
+    // Snapshot the operator's railway choices before the wipe so the agent's
+    // repo/body-only replace does not silently reset the lane assignments.
+    let existing = list_drafts(pool).await?;
+
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM issue_drafts")
         .execute(&mut *tx)
         .await?;
-    for (index, (title, body, repo_id)) in drafts.iter().enumerate() {
+    for (index, (title, body, repo_id, railway_id)) in drafts.iter().enumerate() {
+        let railway_id = railway_id.or_else(|| {
+            existing
+                .iter()
+                .find(|draft| draft.title == *title)
+                .and_then(|draft| draft.railway_id)
+        });
         sqlx::query(
-            "INSERT INTO issue_drafts (title, body, repo_id, position) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO issue_drafts (title, body, repo_id, railway_id, position) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(title)
         .bind(body)
         .bind(repo_id)
+        .bind(railway_id)
         .bind(index as f64)
         .execute(&mut *tx)
         .await?;
@@ -2701,24 +2755,48 @@ pub async fn replace_drafts(
     list_drafts(pool).await
 }
 
-/// Edits one draft's title, body, and target repo. Returns `None` if it's gone.
+/// Edits one draft's title, body, target repo, and target railway. Returns `None`
+/// if it's gone.
 pub async fn update_draft(
     pool: &PgPool,
     id: Uuid,
     title: &str,
     body: &str,
     repo_id: Option<Uuid>,
+    railway_id: Option<Uuid>,
 ) -> sqlx::Result<Option<super::models::IssueDraft>> {
     sqlx::query_as::<_, super::models::IssueDraft>(
-        "UPDATE issue_drafts SET title = $2, body = $3, repo_id = $4, updated_at = now() \
+        "UPDATE issue_drafts \
+         SET title = $2, body = $3, repo_id = $4, railway_id = $5, updated_at = now() \
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
     .bind(title)
     .bind(body)
     .bind(repo_id)
+    .bind(railway_id)
     .fetch_optional(pool)
     .await
+}
+
+/// Reorders the drafts to exactly `ordered_ids` (the planner's dependency
+/// sequence), rewriting each draft's `position` to its index. Ids not present are
+/// left after the ordered run, preserving their relative order, so a stale id in
+/// the request never drops a draft.
+pub async fn reorder_drafts(
+    pool: &PgPool,
+    ordered_ids: &[Uuid],
+) -> sqlx::Result<Vec<super::models::IssueDraft>> {
+    let mut tx = pool.begin().await?;
+    for (index, id) in ordered_ids.iter().enumerate() {
+        sqlx::query("UPDATE issue_drafts SET position = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(index as f64)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    list_drafts(pool).await
 }
 
 /// Deletes one draft.

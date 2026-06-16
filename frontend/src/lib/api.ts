@@ -125,12 +125,19 @@ export function getComposeStats() {
   return apiClient.get('compose/stats').json<Stats>()
 }
 
-// The operator's manual edit of one draft (writes to the stored draft).
+// The operator's manual edit of one draft (writes to the stored draft), including
+// its target repo and railway (issue #207).
 export function updateDraft(
   id: string,
-  body: { title: string; body: string; repo_id: string | null }
+  body: { title: string; body: string; repo_id: string | null; railway_id: string | null }
 ) {
   return apiClient.put(`compose/drafts/${id}`, { json: body }).json<IssueDraft>()
+}
+
+// Reorder the drafts to the operator's dependency sequence; bulk-create routes the
+// cards into their lane's To Do in this order (issue #207).
+export function reorderDrafts(ids: string[]) {
+  return apiClient.post('compose/drafts/reorder', { json: { ids } }).json<IssueDraft[]>()
 }
 
 export function deleteDraft(id: string) {

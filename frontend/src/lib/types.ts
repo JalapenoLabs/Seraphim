@@ -335,12 +335,16 @@ export type AgentEvent = {
 
 // A draft issue scoped by the compose assistant but not yet created (issue #181).
 // `repo_id` is the optional target repo (where a GitHub issue is filed, or an
-// internal ticket's repo).
+// internal ticket's repo). `railway_id` is the optional target lane (issue #207),
+// defaulting to `main`; because a task's railway follows its repo, it only takes
+// effect for repo-less (internal) drafts. The `position` order is the dependency
+// sequence bulk-create preserves in the destination To Do lane.
 export type IssueDraft = {
   id: string
   title: string
   body: string
   repo_id: string | null
+  railway_id: string | null
   position: number
   created_at: string
   updated_at: string

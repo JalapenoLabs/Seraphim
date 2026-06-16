@@ -400,12 +400,20 @@ pub struct StatsAggregate {
 /// A draft issue scoped by the compose assistant but not yet created (issue #181).
 /// `repo_id` is the optional target repo (where a GitHub issue is filed, or an
 /// internal ticket's repo). Drafts are bulk-created on demand to the chosen tracker.
+///
+/// `railway_id` is the optional target railway (issue #207): the lane the resulting
+/// board card lands on, defaulting to `main` when unset. Because a task's railway
+/// always follows its repo, this choice only takes effect for repo-less (internal)
+/// drafts; a repo-bound draft's card lands on that repo's railway regardless. The
+/// drafts' `position` order is the dependency sequence bulk-create preserves in the
+/// destination To Do lane.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct IssueDraft {
     pub id: Uuid,
     pub title: String,
     pub body: String,
     pub repo_id: Option<Uuid>,
+    pub railway_id: Option<Uuid>,
     pub position: f64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
