@@ -423,6 +423,26 @@ pub struct IssueDraft {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A remembered board placement for an issue the route planner bulk-created on an
+/// external tracker, applied the first time the sync upserts that issue in.
+///
+/// The planner orders GitHub / Jira drafts and picks a lane, but the resulting
+/// card is created by the sync loop, which would otherwise drop every fresh issue
+/// at the top of Available. This row carries the planner's intended To Do
+/// `position` and `railway_id` so the first upsert can honor them, then delete it.
+/// The "railway follows repo" invariant still wins: `railway_id` is authoritative
+/// only for a repo-less issue (see issue #207).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PendingPlacement {
+    pub id: Uuid,
+    pub source_kind: SourceKind,
+    pub repo_id: Option<Uuid>,
+    pub external_id: String,
+    pub position: f64,
+    pub railway_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// One comment on an internal ticket. `author` is `"user"` (the operator) or
 /// `"agent"` (Seraphim).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

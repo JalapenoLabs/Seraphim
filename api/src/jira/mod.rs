@@ -445,13 +445,16 @@ impl JiraClient {
         let created: Created = response.json().await?;
         Ok(CreatedJiraIssue {
             url: format!("{}/browse/{}", self.config.base_url, created.key),
+            key: created.key,
         })
     }
 }
 
-/// A freshly created Jira ticket.
+/// A freshly created Jira ticket: its key (to dedupe and to key a pending
+/// placement) and its browse URL.
 #[derive(Debug, Clone)]
 pub struct CreatedJiraIssue {
+    pub key: String,
     pub url: String,
 }
 

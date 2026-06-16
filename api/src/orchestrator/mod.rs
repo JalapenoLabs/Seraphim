@@ -13,6 +13,7 @@ mod availability;
 mod ci_watch;
 pub mod compose;
 mod network;
+mod placement;
 mod prompt;
 mod provision;
 mod railway;
@@ -65,6 +66,14 @@ const AGENT_IDLE_POLL: Duration = Duration::from_secs(5);
 const REVIEW_POLL: Duration = Duration::from_secs(30);
 /// Fallback issue-sync cadence when a source omits its own interval.
 const DEFAULT_SYNC_POLL: Duration = Duration::from_secs(120);
+
+/// How long an unconsumed route-planner placement is kept before a sync prunes it.
+///
+/// A placement is consumed the first time its issue syncs in; one whose issue is
+/// deleted upstream before it ever syncs would otherwise linger. A week is far
+/// longer than any sane sync delay, so a still-pending placement past this age is
+/// safely stale (issue #207).
+const PENDING_PLACEMENT_MAX_AGE_DAYS: i32 = 7;
 
 /// How many times we re-check for the agent's freshly opened PR before giving
 /// up. GitHub's pull-request list lags a few seconds behind `gh pr create`
@@ -304,6 +313,17 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
         }
     }
 
+    // Sweep route-planner placements whose issue never synced in (e.g. it was
+    // deleted upstream) so the table stays bounded. Best-effort: a prune failure
+    // must never abort a sync pass.
+    match queries::prune_stale_pending_placements(&state.db, PENDING_PLACEMENT_MAX_AGE_DAYS).await {
+        Ok(pruned) if pruned > 0 => {
+            info!(pruned, "pruned stale pending placements");
+        }
+        Ok(_) => {}
+        Err(error) => warn!(error = %error, "failed to prune stale pending placements"),
+    }
+
     if changed {
         state.notify_board();
     }
@@ -438,20 +458,69 @@ pub async fn upsert_github_issue(
     )
     .await?;
 
-    queries::upsert_issue_task(
-        &state.db,
-        SourceKind::Github,
-        &external_id,
-        Some(repo_id),
-        &issue.title,
-        &issue.body,
-        &issue.url,
-        external_state,
-        &issue.author_login,
-        &issue.author_avatar_url,
-        position,
-    )
-    .await?;
+    // Honor a route-planner placement, but only the first time the issue is brought
+    // in: an already-tracked card is curated by the operator and must not be moved,
+    // so we only consume the placement when no task exists yet. With no placement
+    // (the common case) this is one cheap query and the default upsert runs exactly
+    // as before. See `placement::resolve`.
+    let pending =
+        match queries::find_issue_task(&state.db, SourceKind::Github, Some(repo_id), &external_id)
+            .await?
+        {
+            Some(_) => None,
+            None => {
+                queries::take_pending_placement(
+                    &state.db,
+                    SourceKind::Github,
+                    Some(repo_id),
+                    &external_id,
+                )
+                .await?
+            }
+        };
+
+    match placement::resolve(pending.as_ref()) {
+        placement::Placement::Default => {
+            queries::upsert_issue_task(
+                &state.db,
+                SourceKind::Github,
+                &external_id,
+                Some(repo_id),
+                &issue.title,
+                &issue.body,
+                &issue.url,
+                external_state,
+                &issue.author_login,
+                &issue.author_avatar_url,
+                position,
+            )
+            .await?;
+        }
+        placement::Placement::Placed {
+            column,
+            position: placed_position,
+            // A GitHub issue always has a repo, so its railway follows that repo;
+            // the placement's lane is ignored here (it only matters for repo-less
+            // tickets, i.e. Jira).
+            railway_id: _,
+        } => {
+            queries::upsert_issue_task_placed(
+                &state.db,
+                SourceKind::Github,
+                &external_id,
+                Some(repo_id),
+                &issue.title,
+                &issue.body,
+                &issue.url,
+                external_state,
+                &issue.author_login,
+                &issue.author_avatar_url,
+                column,
+                placed_position,
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -505,19 +574,58 @@ pub async fn upsert_jira_issue(
     // A ticket can target several repos; the first is the primary one the agent
     // would branch in (multi-repo execution is a follow-up).
     let primary_repo = board.repo_ids.0.first().copied();
-    queries::upsert_jira_task(
-        &state.db,
-        &issue.key,
-        primary_repo,
-        board.id,
-        &issue.summary,
-        &issue.description,
-        &issue.url,
-        &issue.status,
-        column,
-        position,
-    )
-    .await?;
+
+    // Honor a route-planner placement only on the ticket's first sync in: a Jira
+    // key is globally unique, so existence and the placement are both keyed on the
+    // key alone. An already-tracked card is left to the operator's curation. With
+    // no placement (the common case) the default upsert runs exactly as before.
+    let pending = match queries::find_jira_task(&state.db, &issue.key).await? {
+        Some(_) => None,
+        None => {
+            queries::take_pending_placement(&state.db, SourceKind::Jira, None, &issue.key).await?
+        }
+    };
+
+    match placement::resolve(pending.as_ref()) {
+        placement::Placement::Default => {
+            queries::upsert_jira_task(
+                &state.db,
+                &issue.key,
+                primary_repo,
+                board.id,
+                &issue.summary,
+                &issue.description,
+                &issue.url,
+                &issue.status,
+                column,
+                position,
+            )
+            .await?;
+        }
+        placement::Placement::Placed {
+            column: placed_column,
+            position: placed_position,
+            railway_id,
+        } => {
+            // A repo-bound ticket follows its repo's railway; only a repo-less one
+            // uses the planner's chosen lane (handled inside the placed upsert's
+            // COALESCE), so the railway-follows-repo invariant still holds.
+            queries::upsert_jira_task_placed(
+                &state.db,
+                &issue.key,
+                primary_repo,
+                board.id,
+                &issue.summary,
+                &issue.description,
+                &issue.url,
+                &issue.status,
+                placed_column,
+                placed_position,
+                railway_id,
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 

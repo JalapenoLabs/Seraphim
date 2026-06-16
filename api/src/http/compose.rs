@@ -240,8 +240,8 @@ pub async fn bulk_create(
     for draft in &drafts {
         let result = match body.target {
             BulkTarget::Internal => create_internal(&state, draft, next_position).await,
-            BulkTarget::Github => create_github(&state, draft).await,
-            BulkTarget::Jira => create_jira(&state, draft).await,
+            BulkTarget::Github => create_github(&state, draft, next_position).await,
+            BulkTarget::Jira => create_jira(&state, draft, next_position).await,
         };
         match result {
             Ok(url) => {
@@ -294,7 +294,17 @@ async fn create_internal(
 }
 
 /// Creates a GitHub issue from a draft in its target repo, returning the URL.
-async fn create_github(state: &AppState, draft: &IssueDraft) -> Result<Option<String>, String> {
+///
+/// Records a pending placement keyed by the new issue's number so the first sync
+/// that brings the card in lands it in To Do at `position` (the planner's order)
+/// rather than the top of Available (issue #207). The railway follows the repo, so
+/// the draft's chosen lane is irrelevant here and is left to the placement consumer
+/// to ignore for repo-bound issues.
+async fn create_github(
+    state: &AppState,
+    draft: &IssueDraft,
+    position: f64,
+) -> Result<Option<String>, String> {
     let Some(repo_id) = draft.repo_id else {
         return Err("no target repository set for a GitHub issue".to_string());
     };
@@ -309,11 +319,36 @@ async fn create_github(state: &AppState, draft: &IssueDraft) -> Result<Option<St
     let issue = git::create_issue(&github, owner, name, draft.title.trim(), &draft.body)
         .await
         .map_err(|error| error.to_string())?;
+
+    // Best-effort: a failed placement record only means the card lands at the top
+    // of Available (the prior behavior), never that the issue is lost. The issue
+    // itself is already created, so we do not surface this as a draft failure.
+    if let Err(error) = queries::create_pending_placement(
+        &state.db,
+        crate::db::models::SourceKind::Github,
+        Some(repo_id),
+        &issue.number.to_string(),
+        position,
+        draft.railway_id,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, issue = issue.number, "failed to record pending placement");
+    }
     Ok(Some(issue.html_url))
 }
 
 /// Creates a Jira ticket from a draft in the first followed board's project.
-async fn create_jira(state: &AppState, draft: &IssueDraft) -> Result<Option<String>, String> {
+///
+/// Records a pending placement keyed by the new ticket's key so its first sync in
+/// lands the card in To Do at `position` on the draft's chosen lane (issue #207).
+/// A Jira ticket may be repo-less, so the lane is honored when the placement is
+/// consumed; a repo-bound ticket still follows its repo's railway.
+async fn create_jira(
+    state: &AppState,
+    draft: &IssueDraft,
+    position: f64,
+) -> Result<Option<String>, String> {
     let Some(jira) = state.jira().await.map_err(|error| error.to_string())? else {
         return Err("Jira isn't configured; connect it in Settings first".to_string());
     };
@@ -330,6 +365,21 @@ async fn create_jira(state: &AppState, draft: &IssueDraft) -> Result<Option<Stri
         .create_issue(&project_key, draft.title.trim(), &draft.body)
         .await
         .map_err(|error| error.to_string())?;
+
+    // Best-effort, as for GitHub: a missed placement only forgoes the planner's
+    // ordering, never the ticket itself (which is already created).
+    if let Err(error) = queries::create_pending_placement(
+        &state.db,
+        crate::db::models::SourceKind::Jira,
+        None,
+        &issue.key,
+        position,
+        draft.railway_id,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, key = %issue.key, "failed to record pending placement");
+    }
     Ok(Some(issue.url))
 }
 

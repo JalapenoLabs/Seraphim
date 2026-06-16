@@ -742,9 +742,10 @@ pub async fn set_issue_state(
 }
 
 /// Posts a comment to an issue and returns the created comment.
-/// A freshly opened GitHub issue, enough to link to it.
+/// A freshly opened GitHub issue: its number (to key a pending placement) and URL.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreatedIssue {
+    pub number: u64,
     pub html_url: String,
 }
 

@@ -14,9 +14,9 @@ use uuid::Uuid;
 use super::models::{
     AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
     EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
-    PendingQuestion, Question, QuestionOption, QuestionStatus, Railway, RepoDeletionImpact,
-    Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskColumn,
-    TaskPullRequest, TaskStatus, Turn,
+    PendingPlacement, PendingQuestion, Question, QuestionOption, QuestionStatus, Railway,
+    RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task,
+    TaskColumn, TaskPullRequest, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -1083,6 +1083,119 @@ pub async fn upsert_jira_task(
     .await
 }
 
+/// Upserts a Jira ticket as a task, landing a brand-new one in `initial_column` at
+/// `initial_position` on the planner's chosen `railway_id` lane (issue #207).
+///
+/// Used only when the route planner pre-recorded a placement for this ticket. The
+/// railway-follows-repo invariant still wins: a repo-bound ticket lands on its
+/// repo's railway, and only a repo-less ticket falls through to the placement's
+/// `railway_id` (then `main`), mirroring `create_internal_task_in_todo`. An
+/// existing card takes the same conflict path as [`upsert_jira_task`], so its
+/// human-curated column / position / railway are never disturbed.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_jira_task_placed(
+    pool: &PgPool,
+    external_id: &str,
+    repo_id: Option<Uuid>,
+    jira_board_id: Uuid,
+    title: &str,
+    body: &str,
+    url: &str,
+    status: &str,
+    initial_column: TaskColumn,
+    initial_position: f64,
+    railway_id: Option<Uuid>,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        // railway = repo's railway, else the planner's chosen lane, else `main`.
+        // Only the railway / column / position differ from `upsert_jira_task`; the
+        // conflict path is identical, so an existing card is never disturbed.
+        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
+         VALUES (COALESCE( \
+             (SELECT railway_id FROM repositories WHERE id = $2), \
+             $10, \
+             (SELECT id FROM railways WHERE is_main)), \
+          'jira', $1, $2, $3, $4, $5, $6, $7, $8, $9) \
+         ON CONFLICT (external_id) WHERE source_kind = 'jira' DO UPDATE SET \
+         repo_id = EXCLUDED.repo_id, \
+         jira_board_id = EXCLUDED.jira_board_id, \
+         title = EXCLUDED.title, \
+         body_snapshot = EXCLUDED.body_snapshot, \
+         url = EXCLUDED.url, \
+         external_state = EXCLUDED.external_state, \
+         updated_at = now() \
+         RETURNING *",
+    )
+    .bind(external_id)
+    .bind(repo_id)
+    .bind(jira_board_id)
+    .bind(title)
+    .bind(body)
+    .bind(url)
+    .bind(status)
+    .bind(initial_column)
+    .bind(initial_position)
+    .bind(railway_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Upserts a GitHub issue as a task, landing a brand-new one in `initial_column`
+/// at `initial_position` instead of the default top of Available.
+///
+/// Used only when the route planner pre-recorded a placement for this issue (issue
+/// #207): a fresh card lands in the planner's lane and order, while an existing
+/// task takes the identical conflict path as [`upsert_issue_task`] (refresh cached
+/// fields, never the human-curated column / position / railway). A GitHub issue
+/// always has a repo, so its railway still follows that repo; the placement only
+/// supplies the column and position.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_issue_task_placed(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    external_id: &str,
+    repo_id: Option<Uuid>,
+    title: &str,
+    body: &str,
+    url: &str,
+    external_state: &str,
+    author_login: &str,
+    author_avatar_url: &str,
+    initial_column: TaskColumn,
+    initial_position: f64,
+) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        // A task's railway follows its repo, falling back to `main` (issue #201).
+        // Only the landing column / position differ from `upsert_issue_task`; the
+        // conflict path is identical, so an existing card is never disturbed.
+        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, title, body_snapshot, url, external_state, author_login, author_avatar_url, board_column, position) \
+         VALUES (COALESCE((SELECT railway_id FROM repositories WHERE id = $3), (SELECT id FROM railways WHERE is_main)), \
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+         ON CONFLICT (repo_id, source_kind, external_id) DO UPDATE SET \
+         title = EXCLUDED.title, \
+         body_snapshot = EXCLUDED.body_snapshot, \
+         url = EXCLUDED.url, \
+         external_state = EXCLUDED.external_state, \
+         author_login = EXCLUDED.author_login, \
+         author_avatar_url = EXCLUDED.author_avatar_url, \
+         updated_at = now() \
+         RETURNING *",
+    )
+    .bind(source_kind)
+    .bind(external_id)
+    .bind(repo_id)
+    .bind(title)
+    .bind(body)
+    .bind(url)
+    .bind(external_state)
+    .bind(author_login)
+    .bind(author_avatar_url)
+    .bind(initial_column)
+    .bind(initial_position)
+    .fetch_one(pool)
+    .await
+}
+
 // --- Jira boards -------------------------------------------------------------
 
 /// Every followed Jira board, ordered by name.
@@ -1426,6 +1539,16 @@ pub async fn delete_issue_task(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Finds a tracked Jira ticket by its key alone (the unique Jira dedupe key),
+/// regardless of which repo it currently targets. Used to tell a brand-new ticket
+/// from one already on the board before consuming a planner placement.
+pub async fn find_jira_task(pool: &PgPool, external_id: &str) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE source_kind = 'jira' AND external_id = $1")
+        .bind(external_id)
+        .fetch_optional(pool)
+        .await
 }
 
 /// Removes a tracked Jira ticket (deduped on its key alone) when it is deleted
@@ -2812,4 +2935,79 @@ pub async fn clear_drafts(pool: &PgPool) -> sqlx::Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// --- Pending placements ------------------------------------------------------
+
+/// Records (or replaces) the planner's intended board placement for an issue it
+/// bulk-created on an external tracker, so the first sync that brings the issue in
+/// can land its card in the chosen lane and order instead of the top of Available.
+///
+/// Keyed by the issue's identity (`source_kind`, `repo_id`, `external_id`); a
+/// re-created draft for the same issue overwrites the prior intent. The stored
+/// `railway_id` is the planner's chosen lane, only authoritative for a repo-less
+/// issue (a repo-bound issue follows its repo's railway when consumed).
+pub async fn create_pending_placement(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    repo_id: Option<Uuid>,
+    external_id: &str,
+    position: f64,
+    railway_id: Option<Uuid>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO pending_placements (source_kind, repo_id, external_id, position, railway_id) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (source_kind, repo_id, external_id) DO UPDATE SET \
+         position = EXCLUDED.position, \
+         railway_id = EXCLUDED.railway_id, \
+         created_at = now()",
+    )
+    .bind(source_kind)
+    .bind(repo_id)
+    .bind(external_id)
+    .bind(position)
+    .bind(railway_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(())
+}
+
+/// Fetches and deletes the pending placement for an issue identity, if one exists.
+///
+/// Returning the deleted row makes the read-and-consume a single atomic statement,
+/// so a placement is never applied twice. Matches Jira's NULL `repo_id` via `IS
+/// NOT DISTINCT FROM`. Returns `None` (the overwhelmingly common case) when the
+/// issue was not planner-created, leaving the caller's default placement intact.
+pub async fn take_pending_placement(
+    pool: &PgPool,
+    source_kind: SourceKind,
+    repo_id: Option<Uuid>,
+    external_id: &str,
+) -> sqlx::Result<Option<PendingPlacement>> {
+    sqlx::query_as::<_, PendingPlacement>(
+        "DELETE FROM pending_placements \
+         WHERE source_kind = $1 AND repo_id IS NOT DISTINCT FROM $2 AND external_id = $3 \
+         RETURNING *",
+    )
+    .bind(source_kind)
+    .bind(repo_id)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Deletes pending placements older than `max_age_days`, returning how many were
+/// removed. A placement is only consumed when its issue first syncs in, so one
+/// whose issue is deleted on the tracker before it ever syncs would otherwise
+/// linger forever; this best-effort sweep keeps the table bounded.
+pub async fn prune_stale_pending_placements(pool: &PgPool, max_age_days: i32) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM pending_placements \
+         WHERE created_at < now() - make_interval(days => $1)",
+    )
+    .bind(max_age_days)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
