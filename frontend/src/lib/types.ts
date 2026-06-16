@@ -93,6 +93,10 @@ export type Task = {
   source_kind: SourceKind
   external_id: string
   repo_id: string | null
+  // Every repo an internal ticket targets, in priority order; the first equals
+  // `repo_id` (the primary repo the agent branches in). Empty for tracking-only
+  // tickets and for GitHub/Jira tasks.
+  target_repo_ids: string[]
   title: string
   body_snapshot: string
   url: string

@@ -832,6 +832,24 @@ async fn work_task(state: &AppState, task: Task, mode: WorkMode) -> Result<()> {
     }
 }
 
+/// Resolves a ticket's target repos (priority order, the first being the primary)
+/// into `Repository` rows for the prompt, skipping any that have since been
+/// deleted. Best-effort: a lookup error is logged and dropped rather than failing
+/// the turn, since the focus repo is always passed to the prompt separately.
+async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
+    let mut repos = Vec::new();
+    for repo_id in &task.target_repo_ids.0 {
+        match queries::get_repository(&state.db, *repo_id).await {
+            Ok(Some(repo)) => repos.push(repo),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, repo_id = %repo_id, "failed to load a target repo for the prompt");
+            }
+        }
+    }
+    repos
+}
+
 /// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR.
 async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
     info!(task_id = %task.id, title = %task.title, resume, "working task");
@@ -889,7 +907,8 @@ async fn work_fresh(state: &AppState, task: Task, resume: bool) -> Result<()> {
         prompt
     } else {
         let comments = fetch_issue_comments(state, &repo, &task).await;
-        prompt::build(&settings, &repo, &task, &branch, &comments)
+        let target_repos = load_target_repos(state, &task).await;
+        prompt::build(&settings, &repo, &task, &branch, &comments, &target_repos)
     };
     let outcome = run_agent_turn(state, &settings, &task, prompt).await?;
     persist_session(state, &settings, &outcome).await?;
@@ -2275,6 +2294,7 @@ mod tests {
             source_kind: crate::db::models::SourceKind::Github,
             external_id: String::new(),
             repo_id: None,
+            target_repo_ids: sqlx::types::Json(Vec::new()),
             jira_board_id: None,
             title: String::new(),
             body_snapshot: String::new(),

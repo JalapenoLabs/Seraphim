@@ -428,6 +428,11 @@ pub struct Task {
     pub source_kind: SourceKind,
     pub external_id: String,
     pub repo_id: Option<Uuid>,
+    /// Every repo an internal ticket targets, in priority order; the first equals
+    /// `repo_id`, the primary/focus repo the agent branches in. The agent is told
+    /// about all of them for context but may open a PR in only some. Empty for
+    /// tracking-only tickets and for GitHub/Jira tasks. See issue #189.
+    pub target_repo_ids: Json<Vec<Uuid>>,
     /// For a Jira task, the followed board it came from, so a column move can map
     /// back to a Jira status and transition the ticket. `None` for GitHub tasks.
     pub jira_board_id: Option<Uuid>,
