@@ -1,11 +1,13 @@
 <script lang="ts">
-  import type { Task } from '../types'
+  import type { Railway, Task } from '../types'
 
   import { goto } from '$app/navigation'
-  import { Pause, Ban } from '@lucide/svelte'
+  import { Pause, Ban, TrainFront } from '@lucide/svelte'
 
   import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
   import { Badge } from './ui/badge'
+  import { buttonVariants } from './ui/button'
+  import * as DropdownMenu from './ui/dropdown-menu'
   import SourceIcon from './SourceIcon.svelte'
 
   let {
@@ -15,7 +17,9 @@
     suggestionCount = 0,
     selectionMode = false,
     selected = false,
-    onselect
+    onselect,
+    railways = [],
+    onMoveToRailway
   }: {
     task: Task
     onchange: () => void
@@ -27,7 +31,19 @@
     selectionMode?: boolean
     selected?: boolean
     onselect?: () => void
+    // The full set of railways (swimlanes). When more than one exists and the card
+    // has a repo, a "move to lane" control reassigns the card's repo's railway
+    // (cross-lane is a repo move, never a card drag). Omitted when there is only
+    // the single `main` lane, where the control is meaningless.
+    railways?: Railway[]
+    onMoveToRailway?: (railwayId: string) => void
   } = $props()
+
+  // The other lanes this card's repo can move to. Empty for a tracking-only card
+  // (no repo) or when `main` is the only lane, which hides the control entirely.
+  const otherRailways = $derived(
+    task.repo_id ? railways.filter((railway) => railway.id !== task.railway_id) : []
+  )
 
   // Show just the repo name (after the owner); the full owner/repo is on hover.
   const repoShort = $derived(repoName ? repoName.split('/').pop() : null)
@@ -107,17 +123,48 @@
     </div>
   {/if}
 
-  {#if task.pr_url}
-    <div class="mt-2 flex justify-end">
-      <a
-        href={task.pr_url}
-        target="_blank"
-        rel="noreferrer"
-        onclick={(event) => event.stopPropagation()}
-        class="text-xs text-primary hover:underline"
-      >
-        PR ↗
-      </a>
+  {#if (otherRailways.length > 0 && !selectionMode) || task.pr_url}
+    <div class="mt-2 flex items-center justify-end gap-3">
+      {#if otherRailways.length > 0 && !selectionMode}
+        <!-- Reassign the card's repo to another swimlane. This moves the repo (and
+             all its tasks), so it is a repo action, not a single-card drag. The
+             backend blocks it while a live turn is working the repo. -->
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger
+            onclick={(event: MouseEvent) => event.stopPropagation()}
+            class={buttonVariants({ variant: 'ghost', size: 'sm' }) +
+              ' h-6 gap-1 px-1.5 text-xs text-muted-foreground'}
+            title="Move this repo to another railway"
+          >
+            <TrainFront class="size-3.5" />
+            Move lane
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Content align="end" class="min-w-44">
+            <DropdownMenu.Label class="text-xs">Move repo to railway</DropdownMenu.Label>
+            {#each otherRailways as railway (railway.id)}
+              <DropdownMenu.Item
+                onclick={(event: MouseEvent) => {
+                  event.stopPropagation()
+                  onMoveToRailway?.(railway.id)
+                }}
+              >
+                {railway.name}
+              </DropdownMenu.Item>
+            {/each}
+          </DropdownMenu.Content>
+        </DropdownMenu.Root>
+      {/if}
+      {#if task.pr_url}
+        <a
+          href={task.pr_url}
+          target="_blank"
+          rel="noreferrer"
+          onclick={(event) => event.stopPropagation()}
+          class="text-xs text-primary hover:underline"
+        >
+          PR ↗
+        </a>
+      {/if}
     </div>
   {/if}
 

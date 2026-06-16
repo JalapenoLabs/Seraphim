@@ -2087,6 +2087,51 @@ pub async fn global_stats(pool: &PgPool) -> sqlx::Result<StatsAggregate> {
     .await
 }
 
+/// Aggregated usage for one railway, over turns of its tasks since the global
+/// stats reset. A turn belongs to a railway through its task's `railway_id`, so
+/// this mirrors [`global_stats`] but scoped to the lane's cards.
+pub async fn railway_stats(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<StatsAggregate> {
+    sqlx::query_as::<_, StatsAggregate>(&format!(
+        "SELECT {STATS_SELECT} FROM turns \
+         JOIN tasks ON tasks.id = turns.task_id \
+         WHERE tasks.railway_id = $1 \
+         AND turns.started_at > COALESCE((SELECT stats_reset_at FROM settings WHERE id = 1), 'epoch'::timestamptz)"
+    ))
+    .bind(railway_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// When any currently-running turn on this railway started, for its live ticker.
+pub async fn railway_running_since(
+    pool: &PgPool,
+    railway_id: Uuid,
+) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        "SELECT turns.started_at FROM turns \
+         JOIN tasks ON tasks.id = turns.task_id \
+         WHERE tasks.railway_id = $1 AND turns.status = 'running' \
+         ORDER BY turns.started_at DESC LIMIT 1",
+    )
+    .bind(railway_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The latest turn's token usage on this railway, approximating its context fill.
+pub async fn railway_latest_usage(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<Option<Value>> {
+    let row: Option<Json<Value>> = sqlx::query_scalar(
+        "SELECT turns.token_usage FROM turns \
+         JOIN tasks ON tasks.id = turns.task_id \
+         WHERE tasks.railway_id = $1 AND turns.token_usage IS NOT NULL \
+         ORDER BY turns.started_at DESC LIMIT 1",
+    )
+    .bind(railway_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|json| json.0))
+}
+
 /// When the currently-running turn for a task started, for the live time ticker.
 pub async fn task_running_since(
     pool: &PgPool,

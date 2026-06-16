@@ -124,6 +124,7 @@ pub fn router(state: AppState) -> Router {
                 .put(railways::update)
                 .delete(railways::delete),
         )
+        .route("/railways/:id/stats", get(stats::railway))
         .route("/railways/:id/pause", post(railways::set_pause))
         .route("/railways/:id/repos", post(railways::assign_repo))
         .route("/railways/:id/start", post(railways::start))

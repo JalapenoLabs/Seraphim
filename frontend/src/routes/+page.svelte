@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DndEvent } from 'svelte-dnd-action'
-  import type { HeartAttack, Settings, Task, TaskColumn } from '$lib/types'
+  import type { HeartAttack, Railway, Settings, Task, TaskColumn } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { SvelteSet } from 'svelte/reactivity'
@@ -24,9 +24,11 @@
   import { COLUMNS } from '$lib/types'
   import {
     acknowledgeHeartAttack,
+    assignRepoToRailway,
     bulkDeleteTasks,
     bulkSetTaskFields,
     bulkSetTaskStatus,
+    extractApiError,
     getBoard,
     getNotepad,
     listRepos,
@@ -34,6 +36,7 @@
     provisionWorkspace,
     setNotepad,
     setPaused,
+    setRailwayPaused,
     syncNow
   } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
@@ -41,6 +44,7 @@
   import BulkActionBar from '$lib/components/BulkActionBar.svelte'
   import Card from '$lib/components/Card.svelte'
   import ColumnSort from '$lib/components/ColumnSort.svelte'
+  import RailwayLane from '$lib/components/RailwayLane.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -56,15 +60,31 @@
   // Unacknowledged heart attacks (dead turns) the defibrillator recorded; shown
   // as a dismissible alert banner so the operator notices and can read the logs.
   let heartAttacks = $state<HeartAttack[]>([])
-  // One array per lane; svelte-dnd-action mutates these during a drag.
-  let columns = $state<Record<TaskColumn, Task[]>>({
-    available: [],
-    todo: [],
-    in_progress: [],
-    in_review: [],
-    done: [],
-    ignored: []
-  })
+  // Every railway (swimlane), already ordered `main` first then by rank.
+  let railways = $state<Railway[]>([])
+  // The board cards, grouped first by railway id, then by column. One array per
+  // (railway, column); svelte-dnd-action mutates these arrays during a drag, so a
+  // column move stays inside its lane (cross-lane moves are repo reassignments,
+  // never a card drag).
+  let columnsByRailway = $state<Record<string, Record<TaskColumn, Task[]>>>({})
+
+  // A fresh, empty set of column buckets for one lane.
+  function emptyColumns(): Record<TaskColumn, Task[]> {
+    return {
+      available: [],
+      todo: [],
+      in_progress: [],
+      in_review: [],
+      done: [],
+      ignored: []
+    }
+  }
+
+  // The buckets for a lane, creating an empty set on first access so a brand-new
+  // railway (with no cards yet) still renders all its columns.
+  function laneColumns(railwayId: string): Record<TaskColumn, Task[]> {
+    return columnsByRailway[railwayId] ?? emptyColumns()
+  }
 
   let eventSource: EventSource | null = null
   // Maps a task's repo_id to its full name, so each card can show its source repo.
@@ -147,10 +167,10 @@
     }
   }
 
-  // Clicking a column header in bulk mode selects every card in that lane, or
-  // clears them when all are already selected (a partial selection fills in).
-  function toggleColumnSelected(column: TaskColumn) {
-    const ids = columns[column].map((task) => task.id)
+  // Clicking a column header in bulk mode selects every card in that lane's
+  // column, or clears them when all are already selected (a partial fills in).
+  function toggleColumnSelected(railwayId: string, column: TaskColumn) {
+    const ids = laneColumns(railwayId)[column].map((task) => task.id)
     const allSelected = ids.length > 0 && ids.every((id) => selected.has(id))
     for (const id of ids) {
       if (allSelected) {
@@ -193,8 +213,9 @@
     }
   }
 
-  // Per-column sort level (default "custom" = the board's manual order). Hydrated
-  // from session storage on mount; the header sort button changes it.
+  // Per-column sort level (default "custom" = the board's manual order), shared
+  // across every lane's instance of that column. Hydrated from session storage on
+  // mount; the header sort button changes it.
   let sortState = $state<Record<TaskColumn, SortKey>>({
     available: 'custom',
     todo: 'custom',
@@ -204,13 +225,15 @@
     ignored: 'custom'
   })
 
-  // Re-sorts a column when its sort level changes, and persists the choice. The
-  // sort is applied imperatively (here and in `load`), never reactively, so it
-  // never fights svelte-dnd-action mid-drag.
+  // Re-sorts that column in every lane when its sort level changes, and persists
+  // the choice. The sort is applied imperatively (here and in `load`), never
+  // reactively, so it never fights svelte-dnd-action mid-drag.
   function changeSort(column: TaskColumn, next: SortKey) {
     sortState[column] = next
     saveSort(column, next)
-    columns[column] = sortTasks(columns[column], next)
+    for (const railwayId of Object.keys(columnsByRailway)) {
+      columnsByRailway[railwayId][column] = sortTasks(columnsByRailway[railwayId][column], next)
+    }
   }
 
   // The Done column hides older items by default so it doesn't grow without
@@ -226,13 +249,28 @@
     return !!stamp && new Date(stamp).toDateString() === new Date().toDateString()
   }
 
-  // Recomputed on every board reload (the SSE stream keeps that frequent enough
-  // that the "today" boundary stays fresh while the page is open). Counts honor
-  // the active board filter so the Done header + reveal toggle reflect what's
-  // actually shown.
-  const matchingDone = $derived(columns.done.filter(matchesFilter))
-  const doneTodayCount = $derived(matchingDone.filter(isDoneToday).length)
-  const hasHiddenDone = $derived(matchingDone.length > doneTodayCount)
+  // The Done-column counts for one lane, honoring the active board filter so the
+  // header + reveal toggle reflect what's actually shown.
+  function laneMatchingDone(railwayId: string): Task[] {
+    return laneColumns(railwayId).done.filter(matchesFilter)
+  }
+  function laneDoneTodayCount(railwayId: string): number {
+    return laneMatchingDone(railwayId).filter(isDoneToday).length
+  }
+  function laneHasHiddenDone(railwayId: string): boolean {
+    return laneMatchingDone(railwayId).length > laneDoneTodayCount(railwayId)
+  }
+
+  // How many cards a lane shows (across all columns) under the active filter, for
+  // the lane header's card count.
+  function laneVisibleCount(railwayId: string): number {
+    const buckets = laneColumns(railwayId)
+    let total = 0
+    for (const column of COLUMNS) {
+      total += buckets[column.key].filter(matchesFilter).length
+    }
+    return total
+  }
 
   // --- Global notepad --------------------------------------------------------
   // A scratchpad in a resizable pane beside the board. Default collapsed; the
@@ -277,30 +315,58 @@
     }
   }
 
+  // The display name of the railway a card / incident belongs to, for the lane
+  // banners. Falls back to "main" when the lane is not (yet) known.
+  function railwayName(railwayId: string | null | undefined): string {
+    if (!railwayId) return 'main'
+    return railways.find((railway) => railway.id === railwayId)?.name ?? 'main'
+  }
+
+  // The railway one heart-attack belongs to, looked up via its task. Null when the
+  // task is gone or the lane is unknown, so the banner simply omits the tag.
+  function heartAttackRailwayName(incident: HeartAttack): string | null {
+    if (!incident.task_id) return null
+    for (const railway of railways) {
+      const buckets = columnsByRailway[railway.id]
+      if (!buckets) continue
+      for (const column of COLUMNS) {
+        if (buckets[column.key].some((task) => task.id === incident.task_id)) {
+          return railway.name
+        }
+      }
+    }
+    return null
+  }
+
   async function load() {
     const [board, repos] = await Promise.all([getBoard(), listRepos()])
     settings = board.settings
+    railways = board.railways
     suggestionCounts = board.suggestion_counts
     heartAttacks = board.heart_attacks
     repoNames = Object.fromEntries(repos.map((repo) => [repo.id, repo.full_name]))
-    const grouped: Record<TaskColumn, Task[]> = {
-      available: [],
-      todo: [],
-      in_progress: [],
-      in_review: [],
-      done: [],
-      ignored: []
+
+    // Group every card by railway, then by column. A lane with no cards still gets
+    // an empty bucket set so all its swimlane columns render.
+    const grouped: Record<string, Record<TaskColumn, Task[]>> = {}
+    for (const railway of board.railways) {
+      grouped[railway.id] = emptyColumns()
     }
     for (const task of board.tasks) {
-      grouped[task.board_column].push(task)
+      // Defensive: a card whose lane is not in the railway list (mid-migration)
+      // still needs a home, so create its bucket on the fly.
+      const buckets = grouped[task.railway_id] ?? (grouped[task.railway_id] = emptyColumns())
+      buckets[task.board_column].push(task)
     }
-    for (const key of Object.keys(grouped) as TaskColumn[]) {
-      // Base order is the manual (position) order; then apply the column's sort
-      // on top (a no-op for "custom").
-      grouped[key].sort((left, right) => left.position - right.position)
-      grouped[key] = sortTasks(grouped[key], sortState[key])
+    for (const buckets of Object.values(grouped)) {
+      for (const column of COLUMNS) {
+        // Base order is the manual (position) order; then apply the column's sort
+        // on top (a no-op for "custom").
+        buckets[column.key].sort((left, right) => left.position - right.position)
+        buckets[column.key] = sortTasks(buckets[column.key], sortState[column.key])
+      }
     }
-    columns = grouped
+    columnsByRailway = grouped
 
     // Drop any selected ids that no longer exist (deleted or closed elsewhere),
     // so the bulk bar's count stays truthful across live board refreshes.
@@ -325,13 +391,17 @@
     }
   }
 
-  function handleConsider(column: TaskColumn, event: CustomEvent<DndEvent<Task>>) {
-    columns[column] = event.detail.items
+  function handleConsider(railwayId: string, column: TaskColumn, event: CustomEvent<DndEvent<Task>>) {
+    columnsByRailway[railwayId][column] = event.detail.items
   }
 
-  async function handleFinalize(column: TaskColumn, event: CustomEvent<DndEvent<Task>>) {
+  async function handleFinalize(
+    railwayId: string,
+    column: TaskColumn,
+    event: CustomEvent<DndEvent<Task>>
+  ) {
     const items = event.detail.items
-    columns[column] = items
+    columnsByRailway[railwayId][column] = items
 
     const movedId = event.detail.info.id
     const index = items.findIndex((task) => task.id === movedId)
@@ -360,11 +430,41 @@
     return 1
   }
 
+  // Reassign a card's repo (and all its tasks) to another railway. Cross-lane is a
+  // repo move, not a card drag, so this is the explicit control behind the card's
+  // "move lane" menu. The backend blocks it while a live turn is working the repo
+  // on its current lane and returns the reason, which we surface in a toast.
+  async function moveTaskToRailway(task: Task, railwayId: string) {
+    if (!task.repo_id) {
+      return
+    }
+    const repoLabel = repoNames[task.repo_id] ?? 'repo'
+    try {
+      await assignRepoToRailway(railwayId, task.repo_id)
+      await load()
+      toast.success(`Moved ${repoLabel} to ${railwayName(railwayId)}`)
+    } catch (error) {
+      const message = await extractApiError(error, 'Failed to move the repo to that railway.')
+      toast.error(message)
+    }
+  }
+
   async function togglePause() {
     if (!settings) {
       return
     }
     settings = await setPaused(!settings.agent_paused)
+  }
+
+  // Toggle one lane's per-railway pause (independent of the global master pause).
+  async function toggleRailwayPause(railway: Railway) {
+    try {
+      const updated = await setRailwayPaused(railway.id, !railway.paused)
+      railways = railways.map((existing) => (existing.id === updated.id ? updated : existing))
+    } catch (error) {
+      console.debug('failed to toggle railway pause', error)
+      toast.error('Failed to update the railway pause.')
+    }
   }
 
   // True when the agent is enabled but the schedule currently holds it idle, so
@@ -429,23 +529,29 @@
 <!--
   Fill the available height (viewport minus the topbar, supplied by `<main>`) as a
   single flex column: the banners and the env-name/action row size to content,
-  while the kanban grid takes the remaining space and scrolls within each lane.
-  This keeps the page itself from scrolling on desktop, so there is one scrollbar
-  (the lanes) instead of the page and the lanes both scrolling. The height cap is
-  `lg`-only; on narrow screens the lanes stack and the page scrolls normally.
+  while the swimlane stack takes the remaining space and scrolls. Each lane holds
+  its own kanban columns row; the lanes are stacked vertically (the board scrolls
+  as a whole rather than each column scrolling independently).
 -->
 <svelte:window onkeydown={onWindowKeydown} />
 
 <div class="flex flex-col lg:h-full lg:min-h-0">
   {#each heartAttacks as incident (incident.id)}
+    {@const lane = heartAttackRailwayName(incident)}
     <!-- A turn died and the defibrillator handled it. Keep the diagnostic detail
          visible (monospaced) so the operator can patch the underlying cause, with
-         a dismiss once they have read it. -->
+         a dismiss once they have read it. The banner stays global but is tagged
+         with the railway it belongs to. -->
     <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-start justify-between gap-4">
       <div class="min-w-0">
         <Alert.Title class="flex items-center gap-1.5">
           <HeartPulse class="size-4 flex-none" />
           Agent heart attack: "{incident.task_title}"
+          {#if lane}
+            <span class="rounded border border-current/40 px-1.5 py-0 text-[10px] font-normal opacity-80">
+              {lane}
+            </span>
+          {/if}
         </Alert.Title>
         <Alert.Description class="break-words">
           <span class="font-mono text-xs break-words">{incident.detail}</span>
@@ -560,29 +666,34 @@
     </div>
   </div>
 
-  <!-- Full-width live statistics banner below the action buttons. -->
+  <!-- Full-width live statistics banner: the shared subscription usage gauge plus
+       the global aggregate cost / tokens / time rollup across every railway. -->
   <div class="flex-none px-6 pb-2">
     <Stats />
   </div>
 
-  {#snippet kanbanColumns()}
+  <!-- The kanban columns for one lane. Parameterized by railway id so each lane's
+       dnd zones hold only that lane's cards: a column drop stays in the lane, and
+       cross-lane moves go through the card's "move lane" reassign control. -->
+  {#snippet kanbanColumns(railwayId: string)}
+    {@const buckets = laneColumns(railwayId)}
     {#each COLUMNS as column}
       {@const isDone = column.key === 'done'}
       <!-- Done hides items finished before today; toggle to reveal them. Older
            cards are kept in the dnd list (just display:none) so drag-and-drop
            never desyncs from the rendered children. -->
       {@const collapsed = isDone && !showAllDone}
-      {@const columnSelected = columns[column.key].filter((task) => selected.has(task.id)).length}
+      {@const columnSelected = buckets[column.key].filter((task) => selected.has(task.id)).length}
       <section class="flex max-h-full min-h-0 flex-col rounded-lg border border-border bg-card">
         <header
           class="flex items-center justify-between border-b border-border px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
         >
           <div class="flex items-center gap-1.5">
             {#if bulkMode}
-              <!-- In bulk mode the lane title selects (or clears) the whole lane. -->
+              <!-- In bulk mode the lane title selects (or clears) the whole column. -->
               <button
                 type="button"
-                onclick={() => toggleColumnSelected(column.key)}
+                onclick={() => toggleColumnSelected(railwayId, column.key)}
                 title={`Select all in ${column.label}`}
                 class="-mx-1 rounded px-1 uppercase tracking-wide transition-colors hover:bg-secondary hover:text-foreground {columnSelected >
                 0
@@ -596,7 +707,7 @@
             {:else}
               <span>{column.label}</span>
             {/if}
-            {#if isDone && hasHiddenDone}
+            {#if isDone && laneHasHiddenDone(railwayId)}
               <button
                 type="button"
                 onclick={() => (showAllDone = !showAllDone)}
@@ -619,7 +730,11 @@
               onchange={(next) => changeSort(column.key, next)}
               label={column.label}
             />
-            <span>{collapsed ? doneTodayCount : columns[column.key].filter(matchesFilter).length}</span>
+            <span>
+              {collapsed
+                ? laneDoneTodayCount(railwayId)
+                : buckets[column.key].filter(matchesFilter).length}
+            </span>
           </div>
         </header>
         <div
@@ -627,16 +742,16 @@
             ? 'pb-24'
             : ''}"
           use:dndzone={{
-            items: columns[column.key],
+            items: buckets[column.key],
             flipDurationMs: FLIP_MS,
             dropTargetStyle: {},
             dropTargetClasses: ['drop-active'],
             dragDisabled: bulkMode
           }}
-          onconsider={(event) => handleConsider(column.key, event)}
-          onfinalize={(event) => handleFinalize(column.key, event)}
+          onconsider={(event) => handleConsider(railwayId, column.key, event)}
+          onfinalize={(event) => handleFinalize(railwayId, column.key, event)}
         >
-          {#each columns[column.key] as task (task.id)}
+          {#each buckets[column.key] as task (task.id)}
             <div class:hidden={(collapsed && !isDoneToday(task)) || !matchesFilter(task)}>
               <Card
                 {task}
@@ -646,12 +761,37 @@
                 selectionMode={bulkMode}
                 selected={selected.has(task.id)}
                 onselect={() => toggleSelected(task.id)}
+                {railways}
+                onMoveToRailway={(targetRailwayId) => moveTaskToRailway(task, targetRailwayId)}
               />
             </div>
           {/each}
         </div>
       </section>
     {/each}
+  {/snippet}
+
+  <!-- The swimlane stack: one lane per railway, `main` first then by rank. Each
+       lane frames its own kanban columns row. A board with only `main` renders as
+       a single lane, so the layout degrades to today's board through one lane. -->
+  {#snippet swimlanes()}
+    <div
+      class="flex flex-col gap-4 p-4 lg:px-6 lg:pb-6 {bulkMode
+        ? 'rounded-lg ring-1 ring-inset ring-primary/40'
+        : ''}"
+    >
+      {#each railways as railway (railway.id)}
+        <RailwayLane
+          {railway}
+          taskCount={laneVisibleCount(railway.id)}
+          onTogglePause={() => toggleRailwayPause(railway)}
+        >
+          <div class="grid grid-cols-1 items-start gap-3 lg:grid-cols-6">
+            {@render kanbanColumns(railway.id)}
+          </div>
+        </RailwayLane>
+      {/each}
+    </div>
   {/snippet}
 
   {#if notesOpen}
@@ -665,12 +805,8 @@
       class="flex h-[70vh] w-full overflow-hidden lg:h-auto lg:min-h-0 lg:flex-1"
     >
       <Resizable.Pane defaultSize={72} minSize={40} class="min-w-0">
-        <div
-          class="grid h-full min-h-0 grid-cols-1 items-start gap-3 p-4 lg:grid-cols-6 lg:px-6 lg:pb-6 {bulkMode
-            ? 'rounded-lg ring-1 ring-inset ring-primary/40'
-            : ''}"
-        >
-          {@render kanbanColumns()}
+        <div class="h-full min-h-0 overflow-y-auto">
+          {@render swimlanes()}
         </div>
       </Resizable.Pane>
 
@@ -709,12 +845,8 @@
       </Resizable.Pane>
     </PaneGroup>
   {:else}
-    <div
-      class="grid grid-cols-1 items-start gap-3 p-4 lg:min-h-0 lg:flex-1 lg:grid-cols-6 lg:px-6 lg:pb-6 {bulkMode
-        ? 'rounded-lg ring-1 ring-inset ring-primary/40'
-        : ''}"
-    >
-      {@render kanbanColumns()}
+    <div class="lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+      {@render swimlanes()}
     </div>
   {/if}
 

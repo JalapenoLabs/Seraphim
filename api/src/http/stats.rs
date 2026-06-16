@@ -211,6 +211,49 @@ pub async fn task(
     )))
 }
 
+/// `GET /api/v1/railways/:id/stats` - this railway's totals (context, cost,
+/// tokens, time) over its tasks' turns since the global stats reset.
+///
+/// The subscription usage gauge in the response is the same shared, global figure
+/// (one subscription powers every lane); the board's top bar renders that gauge
+/// once from the global stats, while each lane reads only the per-railway context,
+/// cost, tokens, and time from here.
+pub async fn railway(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<StatsResponse>> {
+    let settings = queries::get_settings(&state.db).await?;
+    let agg = queries::railway_stats(&state.db, id).await?;
+    let running_since = queries::railway_running_since(&state.db, id).await?;
+    let latest_usage = queries::railway_latest_usage(&state.db, id).await?;
+    let rate_limit = queries::latest_rate_limit(&state.db).await?;
+
+    // Overlay the live mid-turn counter only when the running turn's task belongs
+    // to this lane, so a lane that is not the one currently working never borrows
+    // another lane's live tokens.
+    let live_usage = match state.live_usage() {
+        Some(usage) => {
+            let running_railway = queries::get_task(&state.db, usage.task_id)
+                .await?
+                .map(|task| task.railway_id);
+            running_railway
+                .filter(|&railway_id| railway_id == id)
+                .map(|_| usage)
+        }
+        None => None,
+    };
+
+    Ok(Json(build_response(
+        &settings,
+        &agg,
+        running_since,
+        latest_usage.as_ref(),
+        rate_limit.as_ref(),
+        live_usage,
+        state.usage(),
+    )))
+}
+
 /// `GET /api/v1/compose/stats` - the compose assistant's own usage totals, for
 /// its dedicated stats bar (issue #181). Its turns are separate from the board's,
 /// so this never mixes with the global or per-task numbers.

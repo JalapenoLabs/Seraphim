@@ -88,11 +88,37 @@ export type JiraBoard = {
 
 export type SourceKind = 'github' | 'jira' | 'internal'
 
+// The lifecycle of a railway's workspace container. Containers start lazily on
+// first work and idle-STOP (stopped, not removed); the in-flight transitions are
+// 'starting' and 'stopping'.
+export type RailwayState = 'stopped' | 'starting' | 'running' | 'stopping'
+
+// A railway: a named parallel agent lane with its own workspace container, agent
+// loop, Claude session, and set of repos. The undeletable `main` railway owns
+// everything by default. The board renders one swimlane per railway, `main` first
+// then by `position`.
+export type Railway = {
+  id: string
+  name: string
+  description: string
+  session_id: string
+  // The per-railway pause; gates work alongside the global master pause.
+  paused: boolean
+  lifecycle_state: RailwayState
+  // True for the single undeletable `main` railway.
+  is_main: boolean
+  position: number
+  created_at: string
+  updated_at: string
+}
+
 export type Task = {
   id: string
   source_kind: SourceKind
   external_id: string
   repo_id: string | null
+  // The railway (swimlane) working this card; always set and follows the repo.
+  railway_id: string
   // Every repo an internal ticket targets, in priority order; the first equals
   // `repo_id` (the primary repo the agent branches in). Empty for tracking-only
   // tickets and for GitHub/Jira tasks.
@@ -247,6 +273,8 @@ export type Repository = {
   full_name: string
   clone_url: string
   default_branch: string
+  // The railway this repo belongs to for work; always set (defaults to `main`).
+  railway_id: string
   // Per-repo override of the global branch template; null inherits it.
   branch_template: string | null
   setup_script: string
@@ -439,6 +467,9 @@ export type ResetSummary = {
 export type BoardResponse = {
   tasks: Task[]
   settings: Settings
+  // Every railway (swimlane), `main` first then by rank, so the board lays out
+  // one lane per railway and refreshes them together with the tasks.
+  railways: Railway[]
   // Unacknowledged suggestion counts keyed by task id (tasks with none omitted).
   suggestion_counts: Record<string, number>
   // Unacknowledged heart attacks (dead turns), newest first, for the alert banner.

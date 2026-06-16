@@ -13,7 +13,7 @@ use uuid::Uuid;
 use tracing::{info, warn};
 
 use super::ApiResult;
-use crate::db::models::{HeartAttack, Settings, SourceKind, Task, TaskColumn, TaskStatus};
+use crate::db::models::{HeartAttack, Railway, Settings, SourceKind, Task, TaskColumn, TaskStatus};
 use crate::db::queries;
 use crate::git;
 use crate::orchestrator;
@@ -23,6 +23,9 @@ use crate::state::AppState;
 pub struct BoardResponse {
     pub tasks: Vec<Task>,
     pub settings: Settings,
+    /// Every railway (swimlane), `main` first then by rank, so the board can lay
+    /// out one lane per railway in a single fetch and refresh them with the tasks.
+    pub railways: Vec<Railway>,
     /// Unacknowledged setup-suggestion counts, keyed by task id, so a card can
     /// shout when the agent left recommendations. Tasks with none are omitted.
     pub suggestion_counts: HashMap<Uuid, i64>,
@@ -35,6 +38,7 @@ pub struct BoardResponse {
 /// open environment suggestions, and any unacknowledged heart attacks.
 pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardResponse>> {
     let tasks = queries::list_tasks(&state.db).await?;
+    let railways = queries::list_railways(&state.db).await?;
     let mut settings = queries::get_settings(&state.db).await?;
     // Overlay the live, in-memory rate-limit cooldown (not a stored column).
     settings.cooldown_until = state.cooldown_until();
@@ -46,6 +50,7 @@ pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardRes
     Ok(Json(BoardResponse {
         tasks,
         settings,
+        railways,
         suggestion_counts,
         heart_attacks,
     }))

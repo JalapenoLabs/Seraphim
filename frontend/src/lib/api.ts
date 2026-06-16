@@ -24,6 +24,7 @@ import type {
   NetworkAccessLevel,
   PendingQuestion,
   Question,
+  Railway,
   RepoDeletionImpact,
   Repository,
   ResetSummary,
@@ -41,6 +42,21 @@ import type {
 } from './types'
 
 const apiClient = ky.create({ prefixUrl: '/api/v1' })
+
+// Pulls the API's `{ error }` message out of a thrown ky HTTPError so callers can
+// surface the backend's reason (e.g. a blocked railway reassign) in a toast.
+// Falls back to the given default when there is no JSON error body.
+export async function extractApiError(error: unknown, fallback: string): Promise<string> {
+  if (error && typeof error === 'object' && 'response' in error) {
+    try {
+      const body = await (error as { response: Response }).response.json()
+      if (body?.error) return String(body.error)
+    } catch {
+      // No JSON body; fall through to the default message.
+    }
+  }
+  return fallback
+}
 
 // --- Board + tasks -----------------------------------------------------------
 
@@ -284,6 +300,51 @@ export function importOrg(owner: string, issueLabels: string[] = []) {
 
 export function syncNow() {
   return apiClient.post('sync').json()
+}
+
+// --- Railways (swimlanes) ----------------------------------------------------
+
+export function listRailways() {
+  return apiClient.get('railways').json<Railway[]>()
+}
+
+export function createRailway(body: { name: string; description?: string }) {
+  return apiClient.post('railways', { json: body }).json<Railway>()
+}
+
+export function updateRailway(id: string, body: { name: string; description?: string }) {
+  return apiClient.put(`railways/${id}`, { json: body }).json<Railway>()
+}
+
+export function deleteRailway(id: string) {
+  return apiClient.delete(`railways/${id}`).json<{ deleted: boolean }>()
+}
+
+// Toggle one lane's per-railway pause. Independent of the global master pause
+// (`setPaused`); either being set stops the lane pulling new work.
+export function setRailwayPaused(id: string, paused: boolean) {
+  return apiClient.post(`railways/${id}/pause`, { json: { paused } }).json<Railway>()
+}
+
+// Move a repo (and all its tasks) onto a lane. The backend blocks this while a
+// live turn is working the repo on its current lane and returns a 400 with an
+// `{ error }` message; surface that to the operator.
+export function assignRepoToRailway(railwayId: string, repoId: string) {
+  return apiClient.post(`railways/${railwayId}/repos`, { json: { repo_id: repoId } }).json<Repository>()
+}
+
+export function startRailway(id: string) {
+  return apiClient.post(`railways/${id}/start`).json<{ status: string; message?: string }>()
+}
+
+export function stopRailway(id: string) {
+  return apiClient.post(`railways/${id}/stop`).json<{ status: string; message?: string }>()
+}
+
+// One lane's live stats. The usage-gauge fields are the same shared subscription
+// figure as the global stats; the lane reads only context, cost, tokens, time.
+export function getRailwayStats(id: string) {
+  return apiClient.get(`railways/${id}/stats`).json<Stats>()
 }
 
 // --- Settings + workspace ----------------------------------------------------
