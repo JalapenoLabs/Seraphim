@@ -44,7 +44,9 @@ pub fn build(
          - If this issue needs changes in more than one repo, make them in each affected sibling \
          repo on a branch with the SAME name `{branch}`, and open a pull request in each. Seraphim \
          tracks every PR you open on `{branch}`: the task is not done until all of them pass CI and \
-         merge, so do not leave a needed repo without its PR.\n\
+         merge, so do not leave a needed repo without its PR. In each such repo, branch from the \
+         up-to-date target first (`git fetch origin`, then cut `{branch}` from the latest default \
+         branch) so your PR opens on top of the current target and avoids needless merge conflicts.\n\
          - After the PR(s) are open, stop. Do not poll, watch, or wait for CI to finish: Seraphim \
          watches every PR's checks for you and automatically brings you back to fix anything that \
          fails, so a long `gh pr checks` wait only blocks the queue behind you.\n\
