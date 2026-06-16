@@ -90,5 +90,19 @@ jobs:
       - name: Provide placeholder env
         run: cp .env.example .env
 
+      # The workspace image's base, mcr.microsoft.com/devcontainers/universal, is
+      # pulled from Microsoft's registry, whose anonymous token endpoint
+      # (mcrprod.azurecr.io/oauth2/token) intermittently returns 401 and flakes
+      # otherwise-green PRs. Retry the build a few times with a short backoff;
+      # cached layers make retries cheap and a genuine build error still fails.
       - name: Build images
-        run: docker compose build api frontend workspace
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose build api frontend workspace; then
+              exit 0
+            fi
+            echo "::warning::image build attempt ${attempt} failed (likely a transient MCR pull 401); retrying in 15s"
+            sleep 15
+          done
+          echo "::error::image build failed after 3 attempts"
+          exit 1
