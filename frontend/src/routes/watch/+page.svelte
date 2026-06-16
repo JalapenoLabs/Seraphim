@@ -77,12 +77,15 @@
     ) ?? null
   )
 
-  // A task is "waiting" when the agent has stopped to ask for input or is blocked
-  // on CI, and "heart attack" when a task has crashed and not yet been
-  // acknowledged. Both pull the whole page into an attention-grabbing state.
-  const hasWaiting = $derived(
-    tasks.some((task) => task.status === 'waiting_for_input' || task.status === 'ci_blocked')
-  )
+  // A task is "waiting" only when the agent has actually stopped to ask the
+  // operator a question; a "heart attack" is a task that crashed and has not yet
+  // been acknowledged. Both pull the whole page into an attention-grabbing state.
+  const hasWaiting = $derived(tasks.some((task) => task.status === 'waiting_for_input'))
+  // A task parked after CI gave up needs a human, but it is not an open question
+  // for the operator, so it gets its own "Blocked" state rather than reading as
+  // "Waiting for input" (which would send the operator hunting the board for a
+  // prompt that does not exist).
+  const hasBlocked = $derived(tasks.some((task) => task.status === 'ci_blocked'))
   const hasHeartAttack = $derived((board?.heart_attacks?.length ?? 0) > 0)
 
   // Overall agent state, mirroring the navbar's logic, used to theme the page.
@@ -93,6 +96,7 @@
     | 'heart_attack'
     | 'cooldown'
     | 'waiting'
+    | 'blocked'
     | 'offhours'
     | 'idle'
   const agentState = $derived.by<{ key: StateKey; label: string }>(() => {
@@ -105,6 +109,7 @@
     if (settings.cooldown_until && new Date(settings.cooldown_until) > new Date(now))
       return { key: 'cooldown', label: 'Cooling down' }
     if (hasWaiting) return { key: 'waiting', label: 'Waiting for input' }
+    if (hasBlocked) return { key: 'blocked', label: 'Blocked' }
     if (current) return { key: 'working', label: 'Working' }
     if (settings.availability_enabled && !isWithinSchedule(settings, new Date(now)))
       return { key: 'offhours', label: 'Off hours' }
@@ -123,6 +128,7 @@
     heart_attack: { accent: '#f85149', spin: 'none' },
     cooldown: { accent: '#d29922', spin: 'half' },
     waiting: { accent: '#d29922', spin: 'half' },
+    blocked: { accent: '#d29922', spin: 'half' },
     offhours: { accent: '#8b97a6', spin: 'none' },
     idle: { accent: '#8b97a6', spin: 'none' }
   }
@@ -147,6 +153,7 @@
     heart_attack: '✕',
     cooldown: '◷',
     waiting: '?',
+    blocked: '⚠',
     offhours: '☾',
     idle: '✦'
   }
@@ -157,6 +164,7 @@
     heart_attack: 'A task crashed and needs attention.',
     cooldown: 'Cooling down before the next task.',
     waiting: 'Waiting on your input to continue.',
+    blocked: 'A task is blocked and needs attention.',
     offhours: 'Outside working hours.',
     idle: 'Standing by for the next task.'
   }
@@ -254,6 +262,32 @@
 
   function clockLabel(at: number): string {
     return new Date(at).toLocaleTimeString([], { hour12: false })
+  }
+
+  // Humanize an event's age for the row's hover title, e.g. "3 minutes ago". The
+  // exact clock time is appended so the tooltip is both readable and precise.
+  function humanizeTime(at: number, ref: number): string {
+    const seconds = Math.max(0, Math.round((ref - at) / 1000))
+    let relative: string
+    if (seconds < 5) {
+      relative = 'just now'
+    } else if (seconds < 60) {
+      relative = `${seconds} seconds ago`
+    } else {
+      const minutes = Math.round(seconds / 60)
+      if (minutes < 60) {
+        relative = `${minutes} minute${minutes === 1 ? '' : 's'} ago`
+      } else {
+        const hours = Math.round(minutes / 60)
+        if (hours < 24) {
+          relative = `${hours} hour${hours === 1 ? '' : 's'} ago`
+        } else {
+          const days = Math.round(hours / 24)
+          relative = `${days} day${days === 1 ? '' : 's'} ago`
+        }
+      }
+    }
+    return `${relative} · ${clockLabel(at)}`
   }
 
   // --- Activity forest (runewood, issue #180) ---------------------------------
@@ -453,7 +487,7 @@
       <!-- Remaining -->
       <div class="flex flex-col items-center lg:items-end lg:pr-4 lg:text-right">
         <div
-          class="text-[clamp(3.5rem,9vw,8rem)] font-black leading-none tabular-nums text-warning [text-shadow:0_0_40px_color-mix(in_srgb,var(--warning)_45%,transparent)]"
+          class="text-[clamp(2.1rem,5.4vw,4.8rem)] font-black leading-none tabular-nums text-warning [text-shadow:0_0_40px_color-mix(in_srgb,var(--warning)_45%,transparent)]"
         >
           {Math.round(remainingShown.current)}
         </div>
@@ -467,7 +501,7 @@
 
       <!-- Live ring -->
       <div class="grid place-items-center py-2">
-        <div class="relative grid size-[clamp(15rem,26vw,24rem)] place-items-center">
+        <div class="relative grid size-[clamp(7.5rem,13vw,12rem)] place-items-center">
           <!-- pulsing aura behind the ring -->
           <div
             class="absolute inset-0 rounded-full blur-2xl {spin !== 'none' ? 'animate-breathe' : 'opacity-20'}"
@@ -523,7 +557,7 @@
       <!-- Completed -->
       <div class="flex flex-col items-center lg:items-start lg:pl-4 lg:text-left">
         <div
-          class="text-[clamp(3.5rem,9vw,8rem)] font-black leading-none tabular-nums text-success [text-shadow:0_0_40px_color-mix(in_srgb,var(--success)_45%,transparent)]"
+          class="text-[clamp(2.1rem,5.4vw,4.8rem)] font-black leading-none tabular-nums text-success [text-shadow:0_0_40px_color-mix(in_srgb,var(--success)_45%,transparent)]"
         >
           {Math.round(completedShown.current)}
         </div>
@@ -566,10 +600,11 @@
             {@const meta = GLYPHS[entry.type] ?? { glyph: '·', color: 'text-muted-foreground' }}
             {@const glyphColor = entry.type === 'ci' ? ciGlyphColor(entry.status) : meta.color}
             {@const hue = taskHue(entry.taskId)}
-            <div class="flex items-center gap-2 py-0.5" in:fly={{ y: 8, duration: 250, easing: cubicOut }}>
-              <span class="w-[3.5rem] shrink-0 tabular-nums text-muted-foreground/60">
-                {clockLabel(entry.at)}
-              </span>
+            <div
+              class="flex items-center gap-2 py-0.5"
+              title={humanizeTime(entry.at, now)}
+              in:fly={{ y: 8, duration: 250, easing: cubicOut }}
+            >
               <span
                 class="w-28 shrink-0 truncate rounded px-1.5 py-0.5 font-medium"
                 style="color: hsl({hue} 75% 72%); background: hsl({hue} 75% 55% / 0.12)"
