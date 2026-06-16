@@ -15,12 +15,17 @@ use super::provision::repo_dir_name;
 /// `comments` is the issue's discussion thread (empty when there is none or it
 /// could not be fetched); it is rendered into the brief so the agent works from
 /// the full conversation, not just the title and description.
+/// `target_repos` is the full set of repos the ticket targets (priority order,
+/// the first being `repo`, the focus repo). For a multi-repo ticket they are all
+/// named in the working agreement so the agent has the full context up front,
+/// even though it may end up opening a PR in only some of them.
 pub fn build(
     settings: &Settings,
     repo: &Repository,
     task: &Task,
     branch: &str,
     comments: &[IssueComment],
+    target_repos: &[Repository],
 ) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let mut prompt = context_header(settings, repo, task, comments);
@@ -55,6 +60,28 @@ pub fn build(
         default = repo.default_branch,
         issue_reference = issue_reference,
     ));
+
+    // When the ticket targets several repos, name them so the agent knows the full
+    // blast radius up front. It branches in the focus repo above; it should change
+    // and open a PR in each repo that actually needs it. Some targets may need no
+    // change, and that is fine: do not force an empty PR.
+    if target_repos.len() > 1 {
+        let names = target_repos
+            .iter()
+            .map(|repo| repo.full_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        prompt.push_str(&format!(
+            "- This ticket targets multiple repositories: {names}. They are all cloned as \
+             siblings under `/workspace`, and `{focus}` (above) is the primary one. Make the \
+             changes each affected repo needs and open a pull request (same branch name \
+             `{branch}`) in every repo you actually change. A target that needs no change \
+             needs no PR.\n",
+            names = names,
+            focus = repo.full_name,
+            branch = branch,
+        ));
+    }
 
     prompt.push_str(ASKING_FOR_HELP);
     prompt
@@ -521,6 +548,7 @@ mod tests {
             source_kind: SourceKind::Github,
             external_id: "57".to_string(),
             repo_id: None,
+            target_repo_ids: Json(Vec::new()),
             jira_board_id: None,
             title: "Ask the user for help".to_string(),
             body_snapshot: String::new(),
@@ -562,6 +590,7 @@ mod tests {
             &task,
             "seraphim/task-3",
             &[],
+            &[],
         );
 
         // An internal ticket has no upstream issue, so the brief and the PR step
@@ -582,9 +611,48 @@ mod tests {
             &sample_task(),
             "seraphim/issue-57",
             &[],
+            &[],
         );
         assert!(prompt.contains("Work issue #57"));
         assert!(prompt.contains("referencing issue #57"));
+    }
+
+    #[test]
+    fn multi_repo_ticket_names_every_target_repo() {
+        let mut task = sample_task();
+        task.source_kind = SourceKind::Internal;
+
+        let focus = sample_repo();
+        let mut other = sample_repo();
+        other.id = uuid::Uuid::from_u128(1);
+        other.full_name = "navarrotech/yearloom".to_string();
+        let targets = [focus.clone(), other];
+
+        let prompt = build(
+            &sample_settings(),
+            &focus,
+            &task,
+            "seraphim/task-57",
+            &[],
+            &targets,
+        );
+
+        assert!(prompt.contains("This ticket targets multiple repositories"));
+        assert!(prompt.contains("navarrotech/seraphim"));
+        assert!(prompt.contains("navarrotech/yearloom"));
+    }
+
+    #[test]
+    fn single_repo_ticket_omits_the_multi_repo_line() {
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+        );
+        assert!(!prompt.contains("targets multiple repositories"));
     }
 
     #[test]

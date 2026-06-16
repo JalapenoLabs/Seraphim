@@ -33,13 +33,12 @@
     setTaskBlocking,
     setTaskHold,
     setTaskNotes,
-    setTaskRepo
+    setTaskRepos
   } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
 
   import { Badge } from '$lib/components/ui/badge'
-  import * as Select from '$lib/components/ui/select'
   import { Switch } from '$lib/components/ui/switch'
   import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
@@ -47,6 +46,7 @@
   import * as Resizable from '$lib/components/ui/resizable'
   import { buttonVariants } from '$lib/components/ui/button'
   import IssueView from '$lib/components/IssueView.svelte'
+  import RepoMultiSelect from '$lib/components/RepoMultiSelect.svelte'
   import SuggestionCreateButton from '$lib/components/SuggestionCreateButton.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
@@ -66,23 +66,26 @@
   let eventSource: EventSource | null = null
 
   // Target-repo picker, shown only for internal tickets (a GitHub task's repo is
-  // its issue's and never reassigned). The sentinel stands in for "no repo".
-  const NO_REPO = '__none__'
+  // its issue's and never reassigned). Internal tickets can target several repos
+  // in priority order; the first is the primary one the agent branches in.
   let repos = $state<Repository[]>([])
-  const taskRepoValue = $derived(task?.repo_id ?? NO_REPO)
-  const taskRepoLabel = $derived(
-    !task?.repo_id
-      ? 'No repo (tracking only)'
-      : (repos.find((repo) => repo.id === task?.repo_id)?.full_name ?? 'Unknown repo')
+  // The edited selection, seeded once from the task and saved on demand so an SSE
+  // reload never clobbers an in-progress edit (mirrors the notepad below).
+  let targetRepoIds = $state<string[]>([])
+  let targetReposInitialized = false
+  const targetReposDirty = $derived(
+    !!task &&
+      (targetRepoIds.length !== (task.target_repo_ids?.length ?? 0) ||
+        targetRepoIds.some((id, index) => id !== task?.target_repo_ids?.[index]))
   )
 
-  async function changeRepo(value: string) {
+  async function saveRepos() {
     if (!task) {
       return
     }
-    const repoId = value === NO_REPO ? null : value
-    task = await setTaskRepo(task.id, repoId)
-    toast.success(repoId ? 'Target repo set' : 'Target repo cleared')
+    task = await setTaskRepos(task.id, targetRepoIds)
+    targetRepoIds = [...task.target_repo_ids]
+    toast.success(targetRepoIds.length ? 'Target repos saved' : 'Target repos cleared')
   }
 
   // A one-word status for a PR row, combining its lifecycle and (while open) its
@@ -321,6 +324,11 @@
       notesOpen = notes.trim().length > 0
       notesInitialized = true
     }
+    // Seed the target-repo selection once, so SSE reloads don't drop an edit.
+    if (!targetReposInitialized) {
+      targetRepoIds = [...detail.task.target_repo_ids]
+      targetReposInitialized = true
+    }
   }
 
   // Hold toggle, behind a confirmation so it's a deliberate action.
@@ -522,24 +530,24 @@
            agent works. Until a repo is set the ticket is tracking-only and is not
            auto-pulled from To Do. -->
       <section class="rounded-lg border border-border bg-card p-3">
-        <h2 class="text-sm font-semibold">Target repository</h2>
+        <h2 class="text-sm font-semibold">Target repositories</h2>
         <p class="mt-0.5 text-xs text-muted-foreground">
-          The repo the agent branches in and opens a PR against. Required before this ticket can be
-          worked from To Do.
+          The repos this ticket affects. The first (primary) is the one the agent branches in and
+          that makes the ticket auto-pullable; the agent gets the whole list as context and opens a
+          PR in each repo it changes. Leave empty to keep the ticket tracking-only.
         </p>
         <div class="mt-2">
-          <Select.Root type="single" value={taskRepoValue} onValueChange={changeRepo}>
-            <Select.Trigger class="w-full">{taskRepoLabel}</Select.Trigger>
-            <Select.Content>
-              <Select.Item value={NO_REPO} label="No repo (tracking only)">
-                No repo (tracking only)
-              </Select.Item>
-              {#each repos as repo (repo.id)}
-                <Select.Item value={repo.id} label={repo.full_name}>{repo.full_name}</Select.Item>
-              {/each}
-            </Select.Content>
-          </Select.Root>
+          <RepoMultiSelect {repos} bind:selected={targetRepoIds} />
         </div>
+        {#if targetReposDirty}
+          <button
+            type="button"
+            onclick={saveRepos}
+            class={buttonVariants({ variant: 'default', size: 'sm' }) + ' mt-2 w-full'}
+          >
+            Save target repos
+          </button>
+        {/if}
       </section>
     {/if}
 
