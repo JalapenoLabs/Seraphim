@@ -186,6 +186,16 @@ async fn provision_on_startup(state: AppState) {
         Err(error) => warn!(error = %error, "failed to reclaim in-progress tasks on startup"),
     }
 
+    // That interrupted turn also left a `running` turn row that never finished;
+    // on a fresh boot no turn is generating, so mark every orphan failed. Left
+    // alone they linger forever and inflate the live worked-time / running-turn
+    // count (which the per-railway stats now sum across lanes).
+    match queries::reclaim_orphaned_turns(&state.db).await {
+        Ok(0) => {}
+        Ok(count) => warn!(count, "marked orphaned running turns as failed on startup"),
+        Err(error) => warn!(error = %error, "failed to reclaim orphaned turns on startup"),
+    }
+
     // Mark provisioning in-progress so the agent halts until the config repo is
     // verified this boot (only matters when a config repo is configured).
     if let Ok(settings) = queries::get_settings(&state.db).await {

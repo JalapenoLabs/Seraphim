@@ -1869,6 +1869,20 @@ pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Marks any turn left `running` by a previous process (killed mid-turn, e.g. an
+/// API restart) as `failed` with a finish time. On a fresh boot no turn is
+/// actually generating, so every `running` row is orphaned; without this they
+/// linger forever and inflate the live worked-time and running-turn count. Returns
+/// how many were cleaned.
+pub async fn reclaim_orphaned_turns(pool: &PgPool) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE turns SET status = 'failed', finished_at = now() WHERE status = 'running'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// The next card the agent should work: top of `To Do`, not on hold.
 ///
 /// Restricted to GitHub tasks for now: the agent codes a ticket by branching and
