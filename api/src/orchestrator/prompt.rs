@@ -10,6 +10,18 @@ use crate::git::{IssueComment, ReviewThread};
 
 use super::provision::repo_dir_name;
 
+/// An open (unmerged) dependency PR branch this ticket should build on top of.
+///
+/// `branch` is the dependency's branch name, `title` its ticket title (for the
+/// brief), and `repos` the full names of the repos where it has an open PR (so
+/// the agent merges it into the right clones). See [`build`] and issue #256.
+#[derive(Debug, Clone)]
+pub struct DependencyBranch {
+    pub title: String,
+    pub branch: String,
+    pub repos: Vec<String>,
+}
+
 /// Builds the instruction text for working `task` fresh on a new `branch`.
 ///
 /// `comments` is the issue's discussion thread (empty when there is none or it
@@ -19,6 +31,9 @@ use super::provision::repo_dir_name;
 /// the first being `repo`, the focus repo). For a multi-repo ticket they are all
 /// named in the working agreement so the agent has the full context up front,
 /// even though it may end up opening a PR in only some of them.
+/// `dependencies` are open dependency PR branches the ticket builds on top of
+/// (issue #256); when present, the agent is told to merge them in first rather
+/// than discovering and re-implementing them.
 pub fn build(
     settings: &Settings,
     repo: &Repository,
@@ -26,6 +41,7 @@ pub fn build(
     branch: &str,
     comments: &[IssueComment],
     target_repos: &[Repository],
+    dependencies: &[DependencyBranch],
 ) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let mut prompt = context_header(settings, repo, task, comments);
@@ -85,8 +101,44 @@ pub fn build(
         ));
     }
 
+    prompt.push_str(&render_dependencies(dependencies, branch));
     prompt.push_str(ASKING_FOR_HELP);
     prompt
+}
+
+/// Renders the stacked-dependency section: each open dependency PR branch the
+/// ticket builds on, and the merge the agent should run before implementing.
+/// Returns an empty string when there are no open dependencies, so a standalone
+/// ticket's brief is unchanged.
+fn render_dependencies(dependencies: &[DependencyBranch], branch: &str) -> String {
+    if dependencies.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from(
+        "# Stacked on unmerged dependencies\n\
+         - This ticket depends on other tickets whose pull requests are still OPEN, so their work \
+         is NOT yet on the default branch your branch was cut from. Before implementing, bring each \
+         dependency branch into your branch so you build on top of it, and do not re-implement work \
+         that already exists on it.\n",
+    );
+    for dependency in dependencies {
+        section.push_str(&format!(
+            "- `{dep_branch}` (from \"{title}\") has an open PR in: {repos}. In each of those \
+             repos, merge it into `{branch}` before you build: \
+             `git fetch origin && git merge origin/{dep_branch}`.\n",
+            dep_branch = dependency.branch,
+            title = dependency.title,
+            repos = dependency.repos.join(", "),
+            branch = branch,
+        ));
+    }
+    section.push_str(
+        "- Resolve any merge conflicts, and keep database migrations and lockfiles linear \
+         (renumber yours onto the dependency's if they collide). Then build and test on top of the \
+         merged result. The dependency's PR will merge on its own; you do not need to merge it.\n",
+    );
+    section
 }
 
 /// Builds the instruction text to re-engage `task` on its PR's failing CI.
@@ -725,6 +777,7 @@ mod tests {
             "seraphim/task-3",
             &[],
             &[],
+            &[],
         );
 
         // An internal ticket has no upstream issue, so the brief and the PR step
@@ -744,6 +797,7 @@ mod tests {
             &sample_repo(),
             &sample_task(),
             "seraphim/issue-57",
+            &[],
             &[],
             &[],
         );
@@ -769,6 +823,7 @@ mod tests {
             "seraphim/task-57",
             &[],
             &targets,
+            &[],
         );
 
         assert!(prompt.contains("This ticket targets multiple repositories"));
@@ -785,8 +840,50 @@ mod tests {
             "seraphim/issue-57",
             &[],
             &[sample_repo()],
+            &[],
         );
         assert!(!prompt.contains("targets multiple repositories"));
+    }
+
+    #[test]
+    fn dependency_branches_are_surfaced_with_a_merge_instruction() {
+        let dependencies = [DependencyBranch {
+            title: "A1: Package scaffold".to_string(),
+            branch: "seraphim/issue-4-package-scaffold".to_string(),
+            repos: vec!["mooreslabaiv1/frontend-core".to_string()],
+        }];
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &dependencies,
+        );
+
+        assert!(prompt.contains("Stacked on unmerged dependencies"));
+        // It names the dependency branch, its ticket, the repo, and the exact merge.
+        assert!(prompt.contains("seraphim/issue-4-package-scaffold"));
+        assert!(prompt.contains("A1: Package scaffold"));
+        assert!(prompt.contains("mooreslabaiv1/frontend-core"));
+        assert!(prompt.contains("git merge origin/seraphim/issue-4-package-scaffold"));
+        // And it tells the agent not to re-implement the dependency's work.
+        assert!(prompt.contains("do not re-implement"));
+    }
+
+    #[test]
+    fn no_dependencies_leaves_the_brief_unchanged() {
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+        );
+        assert!(!prompt.contains("Stacked on unmerged dependencies"));
     }
 
     #[test]

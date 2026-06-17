@@ -12,11 +12,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
-    EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
-    PendingPlacement, PendingQuestion, Question, QuestionOption, QuestionStatus, Railway,
-    RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings, SourceKind,
-    StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
+    AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, DependencyCandidate,
+    EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment,
+    NetworkAccessLevel, PendingPlacement, PendingQuestion, Question, QuestionOption,
+    QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings,
+    SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -2147,6 +2147,28 @@ pub async fn set_task_pr(pool: &PgPool, id: Uuid, pr_url: &str) -> sqlx::Result<
     .bind(id)
     .bind(pr_url)
     .fetch_one(pool)
+    .await
+}
+
+/// In-flight tasks on a railway that have at least one open PR and a branch, as
+/// candidate dependencies for a new ticket (issue #256). Excludes `exclude_id`
+/// (the ticket being started). One row per task (a task with several open PRs
+/// collapses to one). The caller matches the new ticket's `Depends on:`
+/// references against these and resolves the matches to their PR branches.
+pub async fn list_open_dependency_candidates(
+    pool: &PgPool,
+    railway_id: Uuid,
+    exclude_id: Uuid,
+) -> sqlx::Result<Vec<DependencyCandidate>> {
+    sqlx::query_as::<_, DependencyCandidate>(
+        "SELECT DISTINCT t.id, t.source_kind, t.external_id, t.title, t.branch \
+         FROM tasks t \
+         JOIN task_pull_requests p ON p.task_id = t.id AND p.pr_state = 'open' \
+         WHERE t.railway_id = $1 AND t.id <> $2 AND t.branch IS NOT NULL",
+    )
+    .bind(railway_id)
+    .bind(exclude_id)
+    .fetch_all(pool)
     .await
 }
 

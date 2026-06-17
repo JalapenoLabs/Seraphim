@@ -572,6 +572,18 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A candidate dependency task: an in-flight task (same railway) with an open PR
+/// and a branch, against which a new ticket's `Depends on:` references are matched
+/// to surface its unmerged PR branch (issue #256).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DependencyCandidate {
+    pub id: Uuid,
+    pub source_kind: SourceKind,
+    pub external_id: String,
+    pub title: String,
+    pub branch: String,
+}
+
 /// One pull request opened for a task. A multi-repo task has several; the review
 /// loop gates Done on all of them. `ci_state` is `pending`/`passing`/`failing`
 /// (only meaningful while open); `pr_state` is `open`/`merged`/`closed`.
