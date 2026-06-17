@@ -25,6 +25,9 @@ pub struct OpenIssue {
     /// The login and avatar of whoever opened the issue, for the board card.
     pub author_login: String,
     pub author_avatar_url: String,
+    /// The issue's label names, so the automation matcher can test label rules on
+    /// both the poll and webhook paths (issue #229).
+    pub labels: Vec<String>,
 }
 
 /// Lists open issues for a repo (excluding PRs), optionally label-filtered.
@@ -56,6 +59,7 @@ pub async fn list_open_issues(
             url: issue.html_url.to_string(),
             author_login: issue.user.login,
             author_avatar_url: issue.user.avatar_url.to_string(),
+            labels: issue.labels.into_iter().map(|label| label.name).collect(),
         })
         .collect())
 }
