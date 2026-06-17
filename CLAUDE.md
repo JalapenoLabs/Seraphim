@@ -391,9 +391,13 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
      PR, `git::pr_review_status` reads both signals in one GraphQL round trip
      (`reviewThreads { isResolved }` for unresolved threads from the org CI reviewer
      bots `mooreslabai-claude` / `mooreslabai-codex` or humans, plus `reviewDecision`
-     for a standing `CHANGES_REQUESTED`). That collapses to a per-PR `ReviewState`
-     (`Clean` / `Outstanding` / `Unknown`) which `review::decide` gates on before any
-     merge or hold:
+     for a standing `CHANGES_REQUESTED`). It **fails closed** (`pr_review_status` ->
+     `Err` -> `Unknown`): GraphQL returns HTTP 200 even on field errors, so a body
+     carrying `errors` or a null `pullRequest` is treated as "could not read" and is
+     never read as "zero threads" (the hole that let an APPROVED PR with open threads
+     merge, issue #270, locked by unit tests on `review_status_from_response`). That
+     collapses to a per-PR `ReviewState` (`Clean` / `Outstanding` / `Unknown`) which
+     `review::decide` gates on before any merge or hold:
      - **Outstanding** (threads and/or changes-requested) with attempts left → flag
        `addressing_review` (`queries::flag_review_addressing`), emit a `ci`-style
        feed note; the agent loop picks it up (`pick_next_review_address`) and runs an
@@ -409,8 +413,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
        → `handle_review_blocked`, which reuses the `ci_blocked` park with a
        review-specific note). It is **never merged over** open comments; an idle
        revisit later resets `review_fix_attempts` and tries again.
-     - **Unknown** (the review lookup failed) → wait and re-check next tick, never
-       merge on a guess.
+     - **Unknown** (the review lookup failed: a transport error, GraphQL `errors`, or
+       a missing `pullRequest`) → wait and re-check next tick, never merge on a guess.
+       A persistent `Unknown` means the PR sits in review without merging (safe) and
+       the cause is logged (`could not read review status`), so a token/permission
+       gap on the GraphQL `reviewThreads` query surfaces as "stops merging" rather
+       than "merges unreviewed".
 4. **defibrillator** (dead-agent management) — recovers turns that die mid-flight,
    which we call a **"heart attack"**: the agent hangs with no output, its stream
    breaks, or the turn aborts internally, leaving the card stranded `in_progress`
