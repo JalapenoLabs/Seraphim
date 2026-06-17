@@ -474,6 +474,10 @@ fn context_header(
     // Shared by every mode: noticing missing tooling can happen on any run, so
     // the recommend-improvements guidance lives in the common header.
     prompt.push_str(ENVIRONMENT_SUGGESTIONS);
+    // Likewise the visual self-review loop: any turn that touches the UI must look
+    // at it before declaring done, so the standing instruction lives in the header
+    // too (fresh work, CI fixes, revisits all alike).
+    prompt.push_str(VISUAL_SELF_REVIEW);
     prompt
 }
 
@@ -553,6 +557,38 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
     \x20 JSON\n\n\
     Only suggest things that genuinely help; if nothing comes to mind, skip it. \
     This does not replace opening the pull request.\n";
+
+/// Standing instruction (issue #244) to visually self-review any UI change.
+///
+/// Capability without a standing instruction does nothing, so this bakes the
+/// loop into every task prompt (via the shared header) rather than relying on the
+/// operator's global instructions. It uses the Playwright MCP baked into the
+/// workspace (issue #243), prefers cheap computed-style checks over screenshots to
+/// keep token cost down, reads the per-repo dev-server facts from the repo's
+/// `CLAUDE.md`, and degrades gracefully: a repo with no runnable UI is skipped
+/// cleanly rather than failing the task.
+const VISUAL_SELF_REVIEW: &str = "\n\
+    # Visual self-review (UI changes)\n\
+    If your change affects the UI, you are NOT done until you have looked at it in a \
+    real browser, not just reasoned about the code:\n\
+    - Find how to run the repo's UI in its `CLAUDE.md`: the dev-server command, the \
+    base URL/port, and the key routes (e.g. \"dev server: `npm run dev` on :5173; \
+    check /, /login, /dashboard\"). If that is not recorded there, infer it (e.g. \
+    the `dev` script in `package.json`) and add a short note to the repo's \
+    `CLAUDE.md` so the next run has it.\n\
+    - Start the dev server with test/dev data only (never production data) and open \
+    the affected route(s) with the Playwright MCP browser tools (navigate, snapshot, \
+    evaluate, screenshot), headless.\n\
+    - Check layout (centering, spacing, alignment) using computed styles via \
+    `evaluate` and the accessibility snapshot. Prefer these computed-style checks \
+    over screenshots to keep cost down; take a screenshot only to confirm the final \
+    result.\n\
+    - Confirm it renders correctly at both mobile (375px) and desktop (1280px) \
+    widths.\n\
+    - If the repo has no runnable UI (a backend-only or non-web repo, no dev server, \
+    or the browser tools are unavailable), SKIP this review: do not fail the task or \
+    hold the PR for it, just note in your summary that you skipped visual review and \
+    why.\n";
 
 /// Guidance, appended to every fresh task prompt, on escalating to the user.
 const ASKING_FOR_HELP: &str = "\n\
@@ -810,6 +846,29 @@ mod tests {
         );
         assert!(prompt.contains("Work issue #57"));
         assert!(prompt.contains("referencing issue #57"));
+    }
+
+    #[test]
+    fn fresh_prompt_bakes_in_the_visual_self_review_loop() {
+        // The visual self-review (issue #244) is a standing instruction, so a plain
+        // fresh task carries it without the user asking, including the cost-saving
+        // computed-style preference, the responsive widths, and the clean skip.
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[],
+            &[],
+        );
+        assert!(prompt.contains("Visual self-review"));
+        assert!(prompt.contains("Playwright MCP"));
+        assert!(prompt.contains("computed styles"));
+        assert!(prompt.contains("375px") && prompt.contains("1280px"));
+        // It reads per-repo dev facts from the repo's CLAUDE.md and skips cleanly.
+        assert!(prompt.contains("CLAUDE.md"));
+        assert!(prompt.contains("SKIP this review"));
     }
 
     #[test]
