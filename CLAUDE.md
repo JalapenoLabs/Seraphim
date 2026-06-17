@@ -306,6 +306,24 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   pinned to the Playwright version Plunder uses (`PLAYWRIGHT_VERSION` build arg);
   if that drifts, only the browser re-downloads on first run, never the slow apt
   dependency step.
+- **Playwright MCP, the agent's eyes (issue #243):** the headless browser the
+  visual self-review (issues #244-247) drives. `@playwright/mcp` (`PLAYWRIGHT_MCP_VERSION`
+  build arg, pinned `0.0.76`) is installed globally and its `playwright-mcp` bin
+  symlinked onto `/usr/local/bin`. The MCP bundles its OWN Playwright, pinned to a
+  DIFFERENT Chromium than the #215 stable build (alpha -> revision 1226, vs 1228), so
+  the Dockerfile bakes the matching `chromium-headless-shell` (rev 1226) with the
+  MCP's own Playwright into `/ms-playwright`; a turn never downloads a browser at
+  runtime. Only the headless shell is baked (`--headless` uses it), and only its own
+  dir is chmod-ed (a recursive chmod over `/ms-playwright` would copy #215's browsers
+  up into the layer and add ~650MB). Net image delta: **~290MB**. The entrypoint
+  registers the server at **user scope** in `CLAUDE_CONFIG_DIR/.claude.json`
+  (`claude mcp add -s user playwright -- playwright-mcp --headless --browser chromium
+  --no-sandbox --isolated`), idempotently (remove-then-add), so `claude -p
+  --permission-mode bypassPermissions` loads it with NO per-task approval gate (a
+  project `.mcp.json` would sit unapproved). A build-time gate fails the image if the
+  bin or the rev-1226 browser is missing. `docker compose build workspace` needs a
+  populated `.env` (the compose volume interpolation), so a bare checkout builds the
+  image directly with `docker build ./workspace`.
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
    them into the **top** of **Available** (never clobbers human-set

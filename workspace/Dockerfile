@@ -142,6 +142,44 @@ RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
     && chmod -R a+w /ms-playwright \
     && rm -rf /var/lib/apt/lists/*
 
+# --- Playwright MCP: a headless browser for the agent's eyes (issue #243) -----
+# The visual self-review loop (issues #244-247) drives a real headless browser
+# through the Playwright MCP, so a `claude -p` turn can open a dev server, read the
+# DOM, run `evaluate`, and screenshot, with no X server. The entrypoint registers
+# the server at USER scope (it then loads with no per-task approval); this bakes the
+# server binary and the exact browser build it needs.
+#
+# The MCP bundles its OWN Playwright, pinned to a different Chromium than the #215
+# stable build: `@playwright/mcp@0.0.76` -> playwright 1.61.0-alpha -> Chromium
+# revision 1226, NOT the 1228 baked above. The matching headless shell is baked here
+# with the MCP's own Playwright, so a turn never downloads a browser at runtime
+# (offline / network-restricted safe). Only the headless shell is needed: the MCP
+# runs `--headless`, which uses the shell, so the full chromium-1226 build is skipped
+# to keep the image lean. Size delta: ~280MB (262MB browser + ~18MB of packages).
+ARG PLAYWRIGHT_MCP_VERSION=0.0.76
+USER codespace
+RUN bash -lc "npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && npm cache clean --force"
+USER root
+RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
+    && ln -sf "$node_dir/playwright-mcp" /usr/local/bin/playwright-mcp \
+    && groot="$(runuser -l codespace -c 'npm root -g')" \
+    && PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+       node "$groot/@playwright/mcp/node_modules/playwright-core/cli.js" install chromium-headless-shell \
+    # Only the newly-installed browser dir is chmod-ed, NOT all of /ms-playwright:
+    # a recursive chmod over #215's browsers (from an earlier layer) would copy them
+    # up into this layer and add ~650MB of duplicate bloat. The shared path itself is
+    # already world-writable from #215, so a later version bump can still download.
+    && chmod -R a+w /ms-playwright/chromium_headless_shell-1226 \
+    && rm -rf /home/codespace/.npm/_npx /tmp/*
+
+# Fail the build if the MCP bin didn't land on PATH (a dangling symlink) or the
+# matching Chromium 1226 headless shell wasn't baked, so a broken wiring can't ship
+# silently (mirrors the actionlint gate above). The pinned revision is coupled to
+# PLAYWRIGHT_MCP_VERSION; bumping the MCP means updating the revision asserted here.
+RUN test -x /usr/local/bin/playwright-mcp \
+    && runuser -l codespace -c 'command -v playwright-mcp >/dev/null' \
+    && ls -d /ms-playwright/chromium_headless_shell-1226 >/dev/null
+
 # --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest
 COPY seraphim-ask /usr/local/bin/seraphim-ask
