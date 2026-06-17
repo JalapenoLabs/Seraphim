@@ -231,6 +231,17 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   command, base URL/port, and key routes there, e.g. "dev server: `npm run dev` on
   :5173; check /, /login, /dashboard". The loop degrades gracefully: a repo with no
   runnable UI is skipped with a noted reason, never failed.
+  - **Constrain the design space (issue #247):** a sibling build-time standing
+    instruction (`prompt::DESIGN_PRIMITIVES`, also in the shared header) steers UI
+    work to compose from the repo's existing layout primitives (`<Stack gap="md">`
+    and friends) and spacing-scale tokens, and to match neighboring components,
+    instead of hand-rolled `margin`/`padding` (fewer degrees of freedom, fewer ways
+    to be wrong). The fuller guidance plus the optional Figma-spec path (use the
+    Figma MCP to implement against real numbers, then validate with the
+    computed-style checks; opt-in, no Figma MCP is wired by default) lives in
+    `workspace/design-system.md`, baked at
+    `/usr/local/share/seraphim/design-system.md`. The concrete tokens and primitives
+    live in each repo under test, not here.
 - **Two-tier setup:** environment setup (`settings.base_setup_script`) runs once
   per provision/recreate (install CLIs/toolchains); per-repo setup
   (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).

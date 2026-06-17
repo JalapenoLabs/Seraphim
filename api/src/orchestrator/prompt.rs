@@ -476,6 +476,10 @@ fn context_header(
     // Shared by every mode: noticing missing tooling can happen on any run, so
     // the recommend-improvements guidance lives in the common header.
     prompt.push_str(ENVIRONMENT_SUGGESTIONS);
+    // Build-then-verify for UI work: first steer toward the repo's design vocabulary
+    // (issue #247) so spacing is picked from a fixed set, then the self-review loop
+    // checks the result. Both are shared by every mode.
+    prompt.push_str(DESIGN_PRIMITIVES);
     // Likewise the visual self-review loop: any turn that touches the UI must look
     // at it before declaring done, so the standing instruction lives in the header
     // too (fresh work, CI fixes, revisits all alike).
@@ -559,6 +563,33 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
     \x20 JSON\n\n\
     Only suggest things that genuinely help; if nothing comes to mind, skip it. \
     This does not replace opening the pull request.\n";
+
+/// Standing instruction (issue #247) to build UI from the repo's design vocabulary
+/// rather than ad-hoc spacing.
+///
+/// Spacing/alignment go wrong most when every component re-decides them, so this
+/// steers the agent to compose from existing layout primitives and spacing-scale
+/// tokens and to match neighboring components, cutting the degrees of freedom at
+/// the source. The concrete primitives live in each repo, so this points at the
+/// baked `design-system.md` (which also documents the optional Figma-spec path) and
+/// defers the specifics to the repo's own `CLAUDE.md`.
+const DESIGN_PRIMITIVES: &str = "\n\
+    # Build UI from the design system, not ad-hoc spacing\n\
+    Spacing and alignment go wrong most often because every component re-decides them \
+    from scratch. Cut the degrees of freedom: build from the repo's existing \
+    vocabulary instead of inventing values.\n\
+    - Prefer the repo's layout primitives (e.g. a `<Stack gap=\"md\">`, `<Inline>`, \
+    `<Grid>`) and its spacing-scale tokens over hand-rolled `margin`/`padding` with \
+    magic pixel values, and compose from shared components (the repo's own primitives \
+    or its component library, e.g. shadcn/ui) rather than re-implementing one with \
+    bespoke spacing.\n\
+    - Match the surrounding components: before writing layout, look at the sibling \
+    code and reuse the same primitives, token names, and spacing steps it already \
+    uses. Consistency over novelty.\n\
+    - The tokens and primitives live in each repo (its `tailwind.config`, theme/token \
+    files, `components/ui` dir, ideally noted in its `CLAUDE.md`), not here. Fuller \
+    guidance, including the optional path for implementing against a Figma spec when a \
+    Figma MCP is configured, is at `/usr/local/share/seraphim/design-system.md`.\n";
 
 /// Standing instruction (issues #244, #245) to visually self-review any UI change.
 ///
@@ -999,6 +1030,26 @@ mod tests {
         assert!(prompt.contains("375px"));
         assert!(prompt.contains("1280px"));
         assert!(prompt.contains("SKIP this review"));
+    }
+
+    #[test]
+    fn task_prompt_steers_toward_design_primitives() {
+        // Issue #247: the default instructions steer the agent to compose from the
+        // repo's layout primitives and spacing tokens, match the neighbors, and away
+        // from ad-hoc margin/padding, pointing at the baked design-system guidance.
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+        );
+        assert!(prompt.contains("layout primitives"));
+        assert!(prompt.contains("spacing-scale tokens"));
+        assert!(prompt.contains("Match the surrounding components"));
+        assert!(prompt.contains("/usr/local/share/seraphim/design-system.md"));
     }
 
     #[test]
