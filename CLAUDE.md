@@ -263,6 +263,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   pinned to the Playwright version Plunder uses (`PLAYWRIGHT_VERSION` build arg);
   if that drifts, only the browser re-downloads on first run, never the slow apt
   dependency step.
+- **Visual self-review (issue #245):** a documented computed-style check library
+  (`workspace/visual-checks.md`) is baked into the image at
+  `/usr/local/share/seraphim/visual-checks.md`. It is the workhorse for verifying
+  layout: deterministic centering / spacing / overflow / stacking assertions the
+  agent runs through the Playwright MCP `browser_evaluate` (primary signal,
+  screenshots only to confirm), at 375px and 1280px. The agent's default
+  instructions point at this path (`VISUAL_CHECKS` in `orchestrator/prompt.rs`);
+  per-repo dev server URL + routes belong in each repo's `CLAUDE.md`.
 
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts

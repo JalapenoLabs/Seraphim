@@ -474,6 +474,9 @@ fn context_header(
     // Shared by every mode: noticing missing tooling can happen on any run, so
     // the recommend-improvements guidance lives in the common header.
     prompt.push_str(ENVIRONMENT_SUGGESTIONS);
+    // Any mode can produce a visible UI change, so the computed-style review
+    // guidance is shared here too.
+    prompt.push_str(VISUAL_CHECKS);
     prompt
 }
 
@@ -553,6 +556,24 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
     \x20 JSON\n\n\
     Only suggest things that genuinely help; if nothing comes to mind, skip it. \
     This does not replace opening the pull request.\n";
+
+/// Guidance, appended to every task prompt, on verifying a visible UI change
+/// with deterministic computed-style checks before reaching for a screenshot.
+///
+/// Screenshots are ambiguous and token-expensive; a computed-style measurement
+/// turns "does it look right?" into a pass/fail fact. The reusable check library
+/// is baked into the workspace image (issue #245), so this only points at it.
+const VISUAL_CHECKS: &str = "\n\
+    # Verify visible changes with computed-style checks\n\
+    When you change something visible, verify the layout before calling it done. \
+    Deterministic computed-style checks are your primary signal; a screenshot is \
+    a final confirmation, not the first thing you reach for. A reusable library of \
+    checks for centering, spacing, overflow, and stacking lives at \
+    `/usr/local/share/seraphim/visual-checks.md`: read it, then run its checks \
+    through the Playwright MCP `browser_evaluate` tool against the page you \
+    changed, at both 375px (mobile) and 1280px (desktop) widths. The dev server \
+    URL and routes for the repo are in that repo's CLAUDE.md. If the repo has no \
+    runnable UI, skip this review.\n";
 
 /// Guidance, appended to every fresh task prompt, on escalating to the user.
 const ASKING_FOR_HELP: &str = "\n\
@@ -912,6 +933,28 @@ mod tests {
         assert!(prompt.contains("malformed payload is rejected"));
         // The brittle single-quoted-argument example is gone.
         assert!(!prompt.contains("seraphim-ask '{"));
+    }
+
+    #[test]
+    fn task_prompt_points_at_the_computed_style_check_library() {
+        // Issue #245: the default instructions must steer the agent to the baked
+        // computed-style check library as the primary signal, screenshots only to
+        // confirm, at both breakpoints, with a graceful skip when there is no UI.
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+        );
+        assert!(prompt.contains("computed-style checks"));
+        assert!(prompt.contains("/usr/local/share/seraphim/visual-checks.md"));
+        assert!(prompt.contains("browser_evaluate"));
+        assert!(prompt.contains("375px"));
+        assert!(prompt.contains("1280px"));
+        assert!(prompt.contains("skip this review"));
     }
 
     #[test]
