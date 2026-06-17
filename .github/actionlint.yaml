@@ -1,0 +1,10 @@
+# actionlint configuration.
+#
+# Declares the custom labels carried by our self-hosted runner so actionlint does
+# not flag them as unknown. The CI jobs target `runs-on: [self-hosted, Linux, X64,
+# fedora]`; `self-hosted`, `Linux`, and `X64` are GitHub built-ins, but `fedora`
+# is our own label and must be listed here, otherwise every workflow edit recurs
+# with a false positive that buries genuine findings (issue #228).
+self-hosted-runner:
+  labels:
+    - fedora
