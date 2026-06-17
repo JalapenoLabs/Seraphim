@@ -214,7 +214,8 @@
     tool_use: { glyph: '⚙', color: 'text-primary' },
     result: { glyph: '✓', color: 'text-success' },
     rate_limit: { glyph: '◷', color: 'text-info' },
-    ci: { glyph: '●', color: 'text-info' }
+    ci: { glyph: '●', color: 'text-info' },
+    lifecycle: { glyph: '⬢', color: 'text-primary' }
   }
 
   // CI glyph color follows the step status (green pass / red fail / info running),
@@ -227,6 +228,20 @@
       return 'text-success'
     }
     return 'text-info'
+  }
+
+  // Lifecycle glyph color follows the action (#226), since one lifecycle type
+  // covers opened / merged / closed: a merge or an issue closed-on-done is
+  // progress (green), a PR closed without merging is an abandonment (red), and a
+  // freshly opened PR is the neutral primary.
+  function lifecycleGlyphColor(action: string | undefined): string {
+    if (action === 'pr_merged' || action === 'issue_closed') {
+      return 'text-success'
+    }
+    if (action === 'pr_closed') {
+      return 'text-destructive'
+    }
+    return 'text-primary'
   }
 
   function firstLine(text: unknown, max = 120): string {
@@ -263,6 +278,31 @@
         return describeRateLimit(payload)
       case 'ci':
         return firstLine(payload?.text)
+      case 'lifecycle':
+        return lifecycleLine(payload)
+      default:
+        return null
+    }
+  }
+
+  // Formats a PR/issue lifecycle event into its feed line (#226). The repo is
+  // named (`repo#number`) only when the backend marked the task multi-repo (it
+  // sends an empty `repo` otherwise), matching how CI stays untagged for a single
+  // PR. The issue line already carries the number, so it only prefixes the repo.
+  function lifecycleLine(payload: Record<string, unknown>): string | null {
+    const action = String(payload?.action ?? '')
+    const repo = String(payload?.repo ?? '')
+    const number = payload?.number
+    const title = firstLine(payload?.title)
+    switch (action) {
+      case 'pr_opened':
+        return `${repo ? `${repo}#${number} ` : ''}PR opened: ${title}`
+      case 'pr_merged':
+        return `${repo ? `${repo}#${number} ` : ''}PR merged: ${title}`
+      case 'pr_closed':
+        return `${repo ? `${repo}#${number} ` : ''}PR closed: ${title}`
+      case 'issue_closed':
+        return `${repo ? `${repo} ` : ''}Issue closed: #${number}`
       default:
         return null
     }
@@ -271,7 +311,12 @@
   async function pushFeed(taskId: string, type: string, payload: Record<string, unknown>, at: number) {
     const text = summarize(type, payload)
     if (!text) return
-    const status = type === 'ci' ? String(payload?.status ?? '') : undefined
+    const status =
+      type === 'ci'
+        ? String(payload?.status ?? '')
+        : type === 'lifecycle'
+          ? String(payload?.action ?? '')
+          : undefined
     const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at, status }
     feed = [...feed, entry].slice(-MAX_FEED)
     // Keep the newest line in view (terminal-style autoscroll).
@@ -710,7 +755,12 @@
           {/if}
           {#each feed as entry (entry.id)}
             {@const meta = GLYPHS[entry.type] ?? { glyph: '·', color: 'text-muted-foreground' }}
-            {@const glyphColor = entry.type === 'ci' ? ciGlyphColor(entry.status) : meta.color}
+            {@const glyphColor =
+              entry.type === 'ci'
+                ? ciGlyphColor(entry.status)
+                : entry.type === 'lifecycle'
+                  ? lifecycleGlyphColor(entry.status)
+                  : meta.color}
             {@const hue = taskHue(entry.taskId)}
             <div
               class="flex items-center gap-2 py-0.5"
