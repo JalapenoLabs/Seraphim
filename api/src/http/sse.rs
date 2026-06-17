@@ -30,6 +30,7 @@ pub async fn board_stream(
                 Ok(
                     ServerEvent::Task { .. }
                     | ServerEvent::Notification { .. }
+                    | ServerEvent::RepoSyncError { .. }
                     | ServerEvent::HeartAttack { .. }
                     | ServerEvent::TaskFinished { .. }
                     | ServerEvent::Compose { .. }
@@ -80,6 +81,11 @@ pub async fn notification_stream(
                     });
                     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                     yield Ok(Event::default().event("task_finished").data(data));
+                }
+                Ok(ServerEvent::RepoSyncError { repo, message }) => {
+                    let payload = serde_json::json!({ "repo": repo, "message": message });
+                    let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("repo_sync_error").data(data));
                 }
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("refresh").data("{}"));

@@ -13,7 +13,9 @@ use uuid::Uuid;
 use tracing::{info, warn};
 
 use super::ApiResult;
-use crate::db::models::{HeartAttack, Railway, Settings, SourceKind, Task, TaskColumn, TaskStatus};
+use crate::db::models::{
+    HeartAttack, Railway, RepoSyncError, Settings, SourceKind, Task, TaskColumn, TaskStatus,
+};
 use crate::db::queries;
 use crate::git;
 use crate::orchestrator;
@@ -32,6 +34,9 @@ pub struct BoardResponse {
     /// Unacknowledged heart attacks (turns that died), newest first, so the board
     /// can alert the operator with the diagnostic detail until they clear them.
     pub heart_attacks: Vec<HeartAttack>,
+    /// Repos whose last issue sync failed (issue #213), so the board can show a
+    /// persistent banner naming each failing repo and why until it recovers.
+    pub repo_sync_errors: Vec<RepoSyncError>,
 }
 
 /// `GET /api/v1/board` - every card, the org/pause settings, per-card counts of
@@ -47,12 +52,14 @@ pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardRes
         .into_iter()
         .collect();
     let heart_attacks = queries::list_unacknowledged_heart_attacks(&state.db).await?;
+    let repo_sync_errors = queries::list_repo_sync_errors(&state.db).await?;
     Ok(Json(BoardResponse {
         tasks,
         settings,
         railways,
         suggestion_counts,
         heart_attacks,
+        repo_sync_errors,
     }))
 }
 

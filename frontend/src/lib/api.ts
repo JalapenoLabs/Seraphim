@@ -64,6 +64,12 @@ export function getBoard() {
   return apiClient.get('board').json<BoardResponse>()
 }
 
+// The tracked-file list across enabled repos, used to seed the watch page's
+// activity forest so a refresh shows the full repo structure immediately (#216).
+export function getRepoTree() {
+  return apiClient.get('activity/tree').json<{ paths: string[] }>()
+}
+
 // The global scratchpad shown beside the board. Read/saved on its own so the
 // text never rides along with every board poll.
 export function getNotepad() {

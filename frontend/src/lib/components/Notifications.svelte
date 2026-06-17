@@ -25,8 +25,9 @@
     taskId: string | null
     taskTitle: string
     prompt: string
-    // 'question' is the agent asking for input; 'heart_attack' is a dead turn.
-    kind: 'question' | 'heart_attack'
+    // 'question' is the agent asking for input; 'heart_attack' is a dead turn;
+    // 'repo_sync_error' is a repo whose issue sync started failing (issue #213).
+    kind: 'question' | 'heart_attack' | 'repo_sync_error'
   }
 
   function loadIds(key: string): Set<string> {
@@ -203,6 +204,15 @@
     playSound('attention')
   }
 
+  // A repo's issue sync started failing (issue #213). Fires once on the
+  // success-to-error transition; the board's banner persists the ongoing state.
+  function handleRepoSyncError(event: MessageEvent) {
+    const data = JSON.parse(event.data) as { repo: string; message: string }
+    pushToast(null, `Issue sync failed: ${data.repo}`, data.message, 'repo_sync_error')
+    notifyNatively(`Issue sync failed: ${data.repo}`, data.message)
+    playSound('attention')
+  }
+
   // A task finished (auto-merged to Done). Sound-only: the board already reflects
   // it, so no toast, just the completion chime.
   function handleTaskFinished() {
@@ -223,6 +233,7 @@
     eventSource = new EventSource('/api/v1/notifications/stream')
     eventSource.addEventListener('notification', handleNotification)
     eventSource.addEventListener('heart_attack', handleHeartAttack)
+    eventSource.addEventListener('repo_sync_error', handleRepoSyncError)
     eventSource.addEventListener('task_finished', handleTaskFinished)
     eventSource.addEventListener('refresh', () => {
       refresh()
@@ -320,7 +331,7 @@
   {#each toasts as toast (toast.id)}
     <div
       class="pointer-events-auto flex items-start overflow-hidden rounded-lg border bg-card shadow-2xl {toast.kind ===
-      'heart_attack'
+        'heart_attack' || toast.kind === 'repo_sync_error'
         ? 'border-destructive/60'
         : 'border-warning/50'}"
     >
@@ -332,6 +343,10 @@
         {#if toast.kind === 'heart_attack'}
           <span class="text-[10px] font-bold uppercase tracking-wide text-destructive"
             >Agent heart attack</span
+          >
+        {:else if toast.kind === 'repo_sync_error'}
+          <span class="text-[10px] font-bold uppercase tracking-wide text-destructive"
+            >Issue sync failed</span
           >
         {:else}
           <span class="text-[10px] font-bold uppercase tracking-wide text-warning"

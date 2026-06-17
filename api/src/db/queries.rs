@@ -15,8 +15,8 @@ use super::models::{
     AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
     EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
     PendingPlacement, PendingQuestion, Question, QuestionOption, QuestionStatus, Railway,
-    RepoDeletionImpact, Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task,
-    TaskColumn, TaskPullRequest, TaskStatus, Turn,
+    RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings, SourceKind,
+    StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -767,6 +767,47 @@ pub async fn list_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
 pub async fn list_repositories_to_sync(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
     sqlx::query_as::<_, Repository>(
         "SELECT * FROM repositories WHERE sync_issues = TRUE AND enabled = TRUE ORDER BY full_name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Records a repo's issue-sync failure (issue #213), stamping the time so the UI
+/// can show when it began failing.
+pub async fn set_repo_sync_error(pool: &PgPool, id: Uuid, message: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE repositories SET sync_error = $2, sync_error_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(message)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// Clears a repo's recorded issue-sync failure after a successful sync (issue #213).
+pub async fn clear_repo_sync_error(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE repositories SET sync_error = NULL, sync_error_at = NULL WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// Repos whose last issue sync failed, for the board's persistent banner (issue #213).
+pub async fn list_repo_sync_errors(pool: &PgPool) -> sqlx::Result<Vec<RepoSyncError>> {
+    sqlx::query_as::<_, RepoSyncError>(
+        "SELECT full_name, sync_error, sync_error_at FROM repositories \
+         WHERE sync_error IS NOT NULL ORDER BY full_name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Enabled repos, for seeding the activity forest with their tracked files (#216).
+/// Every enabled repo is cloned flat under `/workspace`, so this is the set whose
+/// `git ls-files` makes up the seeded tree.
+pub async fn list_enabled_repositories(pool: &PgPool) -> sqlx::Result<Vec<Repository>> {
+    sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE enabled = TRUE ORDER BY full_name",
     )
     .fetch_all(pool)
     .await

@@ -143,9 +143,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
   `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this
-  repo for issues), `issue_labels` (label filter). There is **no** separate
-  issue-source entity; a repo with `sync_issues` is its own source. Bulk
-  onboarding is the one-shot **Import from org** action (`POST /repos/import-org`).
+  repo for issues), `issue_labels` (label filter), and `sync_error` /
+  `sync_error_at` (issue #213: the last issue-sync failure for the repo, NULL when
+  the most recent sync succeeded; set when listing the repo's issues fails, cleared
+  on the next clean sync). There is **no** separate issue-source entity; a repo
+  with `sync_issues` is its own source. Bulk onboarding is the one-shot **Import
+  from org** action (`POST /repos/import-org`).
 - **`tasks`** — the cards: `source_kind`, `external_id`, `repo_id`, `title`,
   `board_column`, `position` (fractional rank), `status`, `branch`, `pr_url`,
   `error`, `hold`, `session_id`.
@@ -203,6 +206,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `current_session_id`; Claude auto-compacts.
 - **Auth:** `CLAUDE_CODE_OAUTH_TOKEN` (subscription) for Claude; mounted host
   `~/.ssh` for `git@` clones; `GH_TOKEN` for HTTPS + octocrab.
+- **Git identity (issue #214):** the entrypoint writes a SYSTEM-wide
+  `git config --system user.name/email` from `GIT_USER_NAME` / `GIT_USER_EMAIL`
+  (`.env`, with a safe `Seraphim` fallback), so the agent can commit in every flat
+  clone under `/workspace` without per-repo setup. A repo-local `user.*` still
+  overrides it.
 - **Local DB validation:** PostgreSQL 17 (client + server) is baked into the
   workspace image, and `pg-ephemeral` boots a throwaway PG17 on `127.0.0.1` and
   prints a `DATABASE_URL` (`export DATABASE_URL="$(pg-ephemeral)"`), so the agent
@@ -227,6 +235,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    never clobber human curation, and a card the agent is mid-work on
    (`in_progress`) is left alone. The poll also pulls recently-closed issues
    (`git::list_recently_closed_issues`) since the open list can't reveal a closure.
+   A repo whose issue list fails no longer fails silently (issue #213): each repo
+   syncs as its own fallible unit (`sync_repo_issues`), and a failure records a
+   per-repo `sync_error` (with the HTTP status and, for 403/404, a "grant the token
+   access" hint), shows a persistent dismissible board banner + the error on the
+   repos page, and emits a one-time notification on the success->error transition
+   (`ServerEvent::RepoSyncError`). The next clean sync clears it; one repo's failure
+   never stops the others. (The webhook path delivers a single pre-fetched issue, so
+   it has no per-repo listing step to fail.)
 2. **agent** — single-threaded: when not paused, the config repo is healthy, and
    inside the availability schedule, it picks work by priority — (a) **resume** a
    task whose question the user just answered (`waiting_for_input` → deliver the
@@ -304,8 +320,9 @@ docker compose logs api --tail 50
 docker compose down           # stop, keep volumes (scripts/stop.sh)
 ```
 
-`.env` (gitignored) holds the Postgres creds (bootstrap), ports, `SSH_HOME`, and
-`TS_AUTHKEY`. The **Claude OAuth + GitHub tokens are NOT in `.env`** — set them in
+`.env` (gitignored) holds the Postgres creds (bootstrap), ports, `SSH_HOME`,
+`TS_AUTHKEY`, and the agent's git identity (`GIT_USER_NAME` / `GIT_USER_EMAIL`).
+The **Claude OAuth + GitHub tokens are NOT in `.env`** — set them in
 the Settings UI (stored in the DB; a worm scanning `.env` files can't harvest
 them). The Postgres password stays in `.env` because the API needs it to connect
 before it can read anything; for at-rest protection use host disk encryption

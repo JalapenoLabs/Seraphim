@@ -15,7 +15,9 @@ pub mod compose;
 mod network;
 mod placement;
 mod prompt;
-mod provision;
+// `repo_dir_name` (the flat clone-dir convention) is reused by the activity-forest
+// seed endpoint (#216), so this module is crate-visible rather than orchestrator-private.
+pub(crate) mod provision;
 mod railway;
 mod review;
 mod subscription;
@@ -259,40 +261,28 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
     let mut changed = false;
 
     for repo in &repos {
-        let Some((owner, name)) = repo.full_name.split_once('/') else {
-            warn!(repo = %repo.full_name, "repo full name is not owner/repo");
-            continue;
-        };
-
-        let issues = match git::list_open_issues(&github, owner, name, &repo.issue_labels).await {
-            Ok(issues) => issues,
-            Err(error) => {
-                warn!(error = %error, repo = %repo.full_name, "failed to list issues");
-                continue;
-            }
-        };
-
-        // GitHub lists newest first; insert oldest first so the newest issue ends
-        // up at the very top of Available (each new card is placed above the last).
-        for issue in issues.into_iter().rev() {
-            // Sync only ever lists open issues, so any issue we see here is open.
-            upsert_github_issue(state, repo.id, &issue, "open").await?;
-            changed = true;
-        }
-
-        // The open list above can't reveal an issue closed outside Seraphim (it
-        // simply drops out), so reconcile recently-closed issues separately and
-        // move any we still track to Done.
-        match git::list_recently_closed_issues(&github, owner, name, &repo.issue_labels).await {
-            Ok(numbers) => {
-                for number in numbers {
-                    if reflect_closed_github_issue(state, repo.id, &number.to_string()).await? {
-                        changed = true;
-                    }
+        // One repo's failure never stops the others (issue #213): sync each repo as
+        // its own fallible unit, then record or clear its per-repo sync error.
+        match sync_repo_issues(state, &github, repo, &mut changed).await {
+            Ok(()) => {
+                // A clean sync clears any prior failure, so the board banner clears
+                // itself on the next cycle with no restart needed.
+                if repo.sync_error.is_some() {
+                    queries::clear_repo_sync_error(&state.db, repo.id).await?;
+                    changed = true;
                 }
             }
             Err(error) => {
-                warn!(error = %error, repo = %repo.full_name, "failed to list closed issues");
+                let (status, detail) = github_error_parts(&error);
+                let message = format_repo_sync_error(&repo.full_name, status, &detail);
+                warn!(error = %error, repo = %repo.full_name, "failed to sync repo issues");
+                queries::set_repo_sync_error(&state.db, repo.id, &message).await?;
+                // Notify once, only on the success -> error transition, to avoid a
+                // toast every failing cycle; the banner carries the ongoing state.
+                if repo.sync_error.is_none() {
+                    state.notify_repo_sync_error(repo.full_name.clone(), message);
+                }
+                changed = true;
             }
         }
     }
@@ -348,6 +338,71 @@ pub async fn sync_once(state: &AppState) -> Result<()> {
         state.notify_board();
     }
     Ok(())
+}
+
+/// Syncs one repo's issues as a single fallible unit (issue #213): open issues into
+/// Available, then reconcile recently-closed ones to Done. Returning `Err` lets the
+/// caller record a per-repo sync failure (and notify) without aborting the whole
+/// pass; an `Ok` means the repo synced cleanly so any prior failure can be cleared.
+async fn sync_repo_issues(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    repo: &Repository,
+    changed: &mut bool,
+) -> Result<()> {
+    let (owner, name) = repo
+        .full_name
+        .split_once('/')
+        .ok_or_else(|| eyre!("repo full name is not owner/repo: {}", repo.full_name))?;
+
+    let issues = git::list_open_issues(github, owner, name, &repo.issue_labels).await?;
+    // GitHub lists newest first; insert oldest first so the newest issue ends up at
+    // the very top of Available (each new card is placed above the last).
+    for issue in issues.into_iter().rev() {
+        // Sync only ever lists open issues, so any issue we see here is open.
+        upsert_github_issue(state, repo.id, &issue, "open").await?;
+        *changed = true;
+    }
+
+    // The open list can't reveal an issue closed outside Seraphim (it simply drops
+    // out), so reconcile recently-closed issues and move any tracked ones to Done.
+    let numbers = git::list_recently_closed_issues(github, owner, name, &repo.issue_labels).await?;
+    for number in numbers {
+        if reflect_closed_github_issue(state, repo.id, &number.to_string()).await? {
+            *changed = true;
+        }
+    }
+
+    Ok(())
+}
+
+/// Extracts the GitHub HTTP status and message from a sync error's cause chain, or
+/// `(None, the full chain text)` for a non-GitHub error (issue #213).
+fn github_error_parts(error: &eyre::Report) -> (Option<u16>, String) {
+    for cause in error.chain() {
+        if let Some(octocrab::Error::GitHub { source, .. }) =
+            cause.downcast_ref::<octocrab::Error>()
+        {
+            return (Some(source.status_code.as_u16()), source.message.clone());
+        }
+    }
+    (None, format!("{error:#}"))
+}
+
+/// Builds the operator-facing issue-sync error message for a repo (issue #213).
+/// 403/404 get an actionable hint: a fine-grained PAT that cannot see a private repo
+/// gets 404 (not 403) on its issue list, so "grant the token access" is the fix for
+/// both. Other statuses (and non-GitHub errors) carry the underlying detail.
+fn format_repo_sync_error(repo: &str, status: Option<u16>, detail: &str) -> String {
+    match status {
+        Some(status @ (403 | 404)) => format!(
+            "GitHub returned {status} listing issues for {repo}. The token likely lacks access to \
+             this repo: add it to the PAT's selected repositories, or switch the PAT to all \
+             repositories."
+        ),
+        Some(status) => format!("GitHub returned {status} listing issues for {repo}: {detail}"),
+        None => format!("Could not sync issues for {repo}: {detail}"),
+    }
 }
 
 /// The position that places a brand-new card at the top of `column` (just above
@@ -2716,6 +2771,33 @@ mod tests {
     fn slugify_is_branch_safe() {
         assert_eq!(slugify("Fix the Login Bug!"), "fix-the-login-bug");
         assert_eq!(slugify("   spaces   "), "spaces");
+    }
+
+    #[test]
+    fn sync_error_message_hints_on_access_denied() {
+        // The 404 a fine-grained PAT returns for a repo it cannot see, and the 403
+        // for a denied one, both get the same actionable "grant the token access" hint.
+        for status in [403, 404] {
+            let message = format_repo_sync_error("JalapenoLabs/Plunder", Some(status), "Not Found");
+            assert!(message.contains("JalapenoLabs/Plunder"));
+            assert!(message.contains(&status.to_string()));
+            assert!(message.contains("selected repositories"));
+        }
+    }
+
+    #[test]
+    fn sync_error_message_keeps_detail_for_other_failures() {
+        // A non-access status surfaces the underlying GitHub message, not the hint.
+        let other = format_repo_sync_error("o/r", Some(500), "Server Error");
+        assert!(other.contains("500"));
+        assert!(other.contains("Server Error"));
+        assert!(!other.contains("selected repositories"));
+
+        // A non-GitHub error (no status) still names the repo and carries the cause.
+        let none = format_repo_sync_error("o/r", None, "connection reset");
+        assert!(none.contains("o/r"));
+        assert!(none.contains("connection reset"));
+        assert!(!none.contains("selected repositories"));
     }
 
     #[test]

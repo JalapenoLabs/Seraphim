@@ -177,7 +177,14 @@
               {/if}
               {#if repo.setup_script.trim()}<span>setup script</span>{/if}
               {#if !repo.sync_issues}<span class="text-muted-foreground/70">sync off</span>{/if}
+              {#if repo.sync_issues && !repo.sync_error}<span class="text-success">syncing</span>{/if}
             </div>
+            <!-- Issue-sync failure, surfaced inline so it is not hidden (issue #213). -->
+            {#if repo.sync_error}
+              <div class="mt-0.5 text-xs break-words text-destructive">
+                Issue sync failing: {repo.sync_error}
+              </div>
+            {/if}
           </div>
 
           <!-- Actions. -->

@@ -12,7 +12,7 @@
   import { cubicOut } from 'svelte/easing'
   import { fly } from 'svelte/transition'
 
-  import { getBoard, getGlobalStats } from '$lib/api'
+  import { getBoard, getGlobalStats, getRepoTree } from '$lib/api'
   import { STATUS_LABELS } from '$lib/types'
   import { isWithinSchedule } from '$lib/schedule'
   import { describeRateLimit } from '$lib/rateLimit'
@@ -533,6 +533,13 @@
             hoverTip = hit ? { path: hit.path, x: hit.screen.x, y: hit.screen.y } : null
           })
           forestReady = true
+          // Seed the full repo structure so a load/refresh shows the whole forest
+          // immediately as dim nodes, instead of building from empty as live events
+          // arrive (issue #216). runewood queues the seed until its renderer is ready,
+          // and applies the same `exclude` path filter to seeded paths.
+          getRepoTree()
+            .then(({ paths }) => forest?.seed(paths))
+            .catch((error) => console.debug('failed to seed activity forest', error))
           // Any PRs already In Review get lit as soon as their files stream in.
           reconcileHighlights()
         })
