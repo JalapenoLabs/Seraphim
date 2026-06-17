@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Railway, Task, TaskColumn } from '../types'
+  import type { Railway, SourceKind, Task, TaskColumn } from '../types'
 
   import { goto } from '$app/navigation'
   import {
@@ -10,6 +10,9 @@
     SquareArrowOutUpRight,
     Link as LinkIcon,
     GitPullRequestArrow,
+    Hash,
+    GitBranch,
+    Type,
     ArrowRightLeft,
     ArrowUpToLine,
     Columns2,
@@ -18,6 +21,7 @@
     RotateCcw,
     Trash2
   } from '@lucide/svelte'
+  import { toast } from 'svelte-sonner'
 
   import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
   import { Badge } from './ui/badge'
@@ -103,6 +107,19 @@
   // The source ticket's open/closed (GitHub) or workflow (Jira) state, or null.
   const ticketState = $derived(ticketStateBadge(task))
 
+  // The label for the "open the external issue" action, per source. Internal
+  // tasks have no external issue, so the item is disabled regardless of label.
+  const EXTERNAL_OPEN_LABELS = {
+    github: 'Open on GitHub',
+    jira: 'Open in Jira',
+    internal: 'Open issue'
+  } as const satisfies Record<SourceKind, string>
+
+  // A pasteable reference to the source issue: `owner/repo#number` when the task
+  // has a repo (a cross-repo GitHub reference), else `#number`. Matches the card's
+  // own `#{external_id}` convention.
+  const issueReference = $derived(repoName ? `${repoName}#${task.external_id}` : `#${task.external_id}`)
+
   // A click opens the task normally, or toggles its selection in bulk mode.
   function activate() {
     if (selectionMode) {
@@ -123,6 +140,45 @@
     if (task.pr_url) {
       window.open(task.pr_url, '_blank', 'noopener,noreferrer')
     }
+  }
+
+  // Open the linked external issue (GitHub/Jira) in a new tab. Disabled when there
+  // is no external URL (an internal task), so `task.url` is always set here.
+  function openExternalIssue() {
+    if (task.url) {
+      window.open(task.url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  // Write `text` to the clipboard and confirm with a small toast, or surface a
+  // failure (e.g. a denied clipboard permission) rather than failing silently.
+  async function copyToClipboard(text: string, confirmation: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success(confirmation)
+    }
+    catch (error) {
+      console.debug('clipboard write failed', error)
+      toast.error('Could not copy to the clipboard')
+    }
+  }
+
+  function copyLink() {
+    copyToClipboard(`${window.location.origin}/task/${task.id}`, 'Copied link')
+  }
+
+  function copyIssueReference() {
+    copyToClipboard(issueReference, `Copied ${issueReference}`)
+  }
+
+  function copyBranch() {
+    if (task.branch) {
+      copyToClipboard(task.branch, 'Copied branch name')
+    }
+  }
+
+  function copyTitle() {
+    copyToClipboard(task.title, 'Copied title')
   }
 
   // Whether the card's right-click context menu is open. Bound to the bits-ui
@@ -152,18 +208,6 @@
           clientY: rect.top + 16
         })
       )
-    }
-  }
-
-  // Copy a link to the task. A placeholder menu action for this foundation;
-  // real card actions land in follow-up tickets.
-  async function copyTaskLink() {
-    const url = `${window.location.origin}/task/${task.id}`
-    try {
-      await navigator.clipboard.writeText(url)
-    }
-    catch (error) {
-      console.debug('failed to copy task link', error)
     }
   }
 
@@ -310,14 +354,26 @@
   </ContextMenu.Trigger>
 
   <!--
-    Card actions. Closing on Escape / outside click / item select is handled by
-    bits-ui; scroll close is wired in this component (see the `$effect` above).
+    Card actions (issues #232/#233/#234): quick / navigation actions on top, then
+    the copy actions, then "Move to...". Closing on Escape / outside click / item
+    select is handled by bits-ui; scroll close is wired in this component (see the
+    `$effect` above). An action that does not apply (no external URL, no PR, no
+    branch) is disabled or hidden, never shown broken.
   -->
-  <ContextMenu.Content class="min-w-44">
+  <ContextMenu.Content class="min-w-48">
     <ContextMenu.Label class="text-xs">#{task.external_id}</ContextMenu.Label>
+
     <ContextMenu.Item onclick={openTask}>
       <SquareArrowOutUpRight class="size-4" />
       Open task
+    </ContextMenu.Item>
+    <ContextMenu.Item
+      disabled={!task.url}
+      title={task.url ? undefined : 'This task has no linked external issue'}
+      onclick={openExternalIssue}
+    >
+      <SourceIcon source={task.source_kind} class="size-4" />
+      {EXTERNAL_OPEN_LABELS[task.source_kind]}
     </ContextMenu.Item>
     {#if task.pr_url}
       <ContextMenu.Item onclick={openPullRequest}>
@@ -325,6 +381,27 @@
         Open pull request
       </ContextMenu.Item>
     {/if}
+
+    <ContextMenu.Separator />
+
+    <ContextMenu.Item onclick={copyLink}>
+      <LinkIcon class="size-4" />
+      Copy link
+    </ContextMenu.Item>
+    <ContextMenu.Item onclick={copyIssueReference}>
+      <Hash class="size-4" />
+      Copy issue reference
+    </ContextMenu.Item>
+    {#if task.branch}
+      <ContextMenu.Item onclick={copyBranch}>
+        <GitBranch class="size-4" />
+        Copy branch name
+      </ContextMenu.Item>
+    {/if}
+    <ContextMenu.Item onclick={copyTitle}>
+      <Type class="size-4" />
+      Copy title
+    </ContextMenu.Item>
 
     <ContextMenu.Separator />
 
@@ -397,13 +474,6 @@
         {/if}
       </ContextMenu.SubContent>
     </ContextMenu.Sub>
-
-    <ContextMenu.Separator />
-
-    <ContextMenu.Item onclick={copyTaskLink}>
-      <LinkIcon class="size-4" />
-      Copy link
-    </ContextMenu.Item>
 
     <ContextMenu.Separator />
 
