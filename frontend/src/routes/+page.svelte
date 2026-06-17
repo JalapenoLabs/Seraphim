@@ -53,6 +53,7 @@
   import { Label } from '$lib/components/ui/label'
   import { Textarea } from '$lib/components/ui/textarea'
   import * as Alert from '$lib/components/ui/alert'
+  import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import * as Resizable from '$lib/components/ui/resizable'
 
   const FLIP_MS = 150
@@ -486,22 +487,99 @@
     return 1
   }
 
-  // Reassign a card's repo (and all its tasks) to another railway. Cross-lane is a
-  // repo move, not a card drag, so this is the explicit control behind the card's
-  // "move lane" menu. The backend blocks it while a live turn is working the repo
-  // on its current lane and returns the reason, which we surface in a toast.
-  async function moveTaskToRailway(task: Task, railwayId: string) {
-    if (!task.repo_id) {
+  // Move a single card to another column via its context menu (issue #233). "To Do
+  // (top/bottom)" mirrors the server-side automation rank: just above the column's
+  // current minimum, or just below its maximum, within the card's own lane (the
+  // card itself is excluded so re-ranking within To Do works). Other columns place
+  // the card at the top. Reuses the same `moveTask` the drag-and-drop path uses, so
+  // the board reflects it via the existing optimistic/SSE reload.
+  async function moveCardToColumn(task: Task, column: TaskColumn, placement: 'top' | 'bottom') {
+    const positions = (columnsByRailway[task.railway_id]?.[column] ?? [])
+      .filter((other) => other.id !== task.id)
+      .map((other) => other.position)
+    const position =
+      placement === 'bottom'
+        ? positions.length
+          ? Math.max(...positions) + 1
+          : 1
+        : positions.length
+          ? Math.min(...positions) - 1
+          : -1
+    try {
+      await moveTask(task.id, column, position)
+      await load()
+      toast.success(`Moved to ${columnLabel(column)}`)
+    } catch (error) {
+      const message = await extractApiError(error, 'Failed to move the card.')
+      toast.error(message)
+    }
+  }
+
+  function columnLabel(column: TaskColumn): string {
+    return COLUMNS.find((entry) => entry.key === column)?.label ?? column
+  }
+
+  // A lane move awaiting confirmation. Because a railway follows its repo, moving a
+  // card to another lane reassigns the whole REPO (and every one of its tasks), not
+  // just this card, so it is confirmed before it runs.
+  let pendingLaneMove = $state<{ task: Task; railwayId: string } | null>(null)
+  let laneMoveBusy = $state(false)
+
+  // The repo, task count, and target lane behind the pending move, for the
+  // confirmation copy. Null when there is nothing pending or the task has no repo.
+  const pendingLaneDetails = $derived.by(() => {
+    const repoId = pendingLaneMove?.task.repo_id
+    if (!repoId) {
+      return null
+    }
+    return {
+      repoLabel: repoNames[repoId] ?? 'this repo',
+      count: repoTaskCount(repoId),
+      laneName: railwayName(pendingLaneMove?.railwayId)
+    }
+  })
+
+  // How many of a repo's tasks are on the board, to spell out the blast radius of a
+  // lane move (the backend reassigns the repo and ALL its tasks).
+  function repoTaskCount(repoId: string): number {
+    let count = 0
+    for (const buckets of Object.values(columnsByRailway)) {
+      for (const column of COLUMNS) {
+        count += buckets[column.key].filter((task) => task.repo_id === repoId).length
+      }
+    }
+    return count
+  }
+
+  // Open the confirmation for moving a card's repo to another lane. A no-op (no
+  // repo, or already on that lane) is ignored.
+  function requestLaneMove(task: Task, railwayId: string) {
+    if (!task.repo_id || railwayId === task.railway_id) {
       return
     }
-    const repoLabel = repoNames[task.repo_id] ?? 'repo'
+    pendingLaneMove = { task, railwayId }
+  }
+
+  // Reassign the repo (and all its tasks) to the chosen lane. The backend blocks it
+  // while a live turn is working the repo on its current lane and returns the
+  // reason, which we surface as a toast.
+  async function confirmLaneMove() {
+    const move = pendingLaneMove
+    if (!move?.task.repo_id) {
+      return
+    }
+    const repoLabel = repoNames[move.task.repo_id] ?? 'repo'
+    laneMoveBusy = true
     try {
-      await assignRepoToRailway(railwayId, task.repo_id)
+      await assignRepoToRailway(move.railwayId, move.task.repo_id)
       await load()
-      toast.success(`Moved ${repoLabel} to ${railwayName(railwayId)}`)
+      toast.success(`Moved ${repoLabel} to ${railwayName(move.railwayId)}`)
     } catch (error) {
       const message = await extractApiError(error, 'Failed to move the repo to that railway.')
       toast.error(message)
+    } finally {
+      laneMoveBusy = false
+      pendingLaneMove = null
     }
   }
 
@@ -845,7 +923,8 @@
                 selected={selected.has(task.id)}
                 onselect={() => toggleSelected(task.id)}
                 {railways}
-                onMoveToRailway={(targetRailwayId) => moveTaskToRailway(task, targetRailwayId)}
+                onMoveToColumn={(column, placement) => moveCardToColumn(task, column, placement)}
+                onMoveToRailway={(targetRailwayId) => requestLaneMove(task, targetRailwayId)}
               />
             </div>
           {/each}
@@ -943,6 +1022,39 @@
       onDelete={applyBulkDelete}
     />
   {/if}
+
+  <!--
+    Lane-move confirmation (issue #233). A railway follows its repo, so moving a
+    card to another lane reassigns the whole repo and every one of its tasks. The
+    copy names the repo, the task count, and the target lane so the blast radius is
+    explicit. Closing (Cancel / Escape / outside) clears the pending move.
+  -->
+  <AlertDialog.Root
+    open={pendingLaneMove !== null}
+    onOpenChange={(open) => {
+      if (!open) pendingLaneMove = null
+    }}
+  >
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Move repo to the {pendingLaneDetails?.laneName} lane?</AlertDialog.Title>
+        <AlertDialog.Description>
+          A lane follows its repo, so this moves <span class="font-semibold"
+            >{pendingLaneDetails?.repoLabel}</span
+          >
+          and all {pendingLaneDetails?.count}
+          {pendingLaneDetails?.count === 1 ? 'task' : 'tasks'} of it to the
+          {pendingLaneDetails?.laneName} lane, not just this card.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel disabled={laneMoveBusy}>Cancel</AlertDialog.Cancel>
+        <Button onclick={confirmLaneMove} disabled={laneMoveBusy}>
+          {laneMoveBusy ? 'Moving…' : 'Move repo'}
+        </Button>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
 
   {#if filtersOpen}
     <!-- Filters drawer: a right-side modal over a dimmed backdrop. View-only;
