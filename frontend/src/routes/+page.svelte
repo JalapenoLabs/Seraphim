@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DndEvent } from 'svelte-dnd-action'
-  import type { HeartAttack, Railway, Settings, Task, TaskColumn } from '$lib/types'
+  import type { HeartAttack, Railway, RepoSyncError, Settings, Task, TaskColumn } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { SvelteSet } from 'svelte/reactivity'
@@ -61,6 +61,15 @@
   // Unacknowledged heart attacks (dead turns) the defibrillator recorded; shown
   // as a dismissible alert banner so the operator notices and can read the logs.
   let heartAttacks = $state<HeartAttack[]>([])
+  // Repos whose last issue sync failed (issue #213). The banner persists while a
+  // repo is failing; `dismissedSyncRepos` hides one the operator has acknowledged,
+  // and a repo is un-dismissed automatically once it recovers (so a later failure
+  // surfaces again). The one-time toast is driven separately by the SSE transition.
+  let repoSyncErrors = $state<RepoSyncError[]>([])
+  let dismissedSyncRepos = new SvelteSet<string>()
+  const visibleSyncErrors = $derived(
+    repoSyncErrors.filter((repo) => !dismissedSyncRepos.has(repo.full_name))
+  )
   // Every railway (swimlane), already ordered `main` first then by rank.
   let railways = $state<Railway[]>([])
   // The board cards, grouped first by railway id, then by column. One array per
@@ -347,6 +356,15 @@
     railways = board.railways
     suggestionCounts = board.suggestion_counts
     heartAttacks = board.heart_attacks
+    repoSyncErrors = board.repo_sync_errors
+    // Forget a dismissal once its repo is no longer failing, so a fresh failure on
+    // that repo later raises the banner again instead of staying hidden.
+    const failing = new Set(repoSyncErrors.map((repo) => repo.full_name))
+    for (const name of dismissedSyncRepos) {
+      if (!failing.has(name)) {
+        dismissedSyncRepos.delete(name)
+      }
+    }
     repoNames = Object.fromEntries(repos.map((repo) => [repo.id, repo.full_name]))
 
     // Group every card by railway, then by column. A lane with no cards still gets
@@ -594,6 +612,33 @@
       </Button>
     </Alert.Root>
   {/if}
+
+  {#each visibleSyncErrors as repo (repo.full_name)}
+    <!-- A repo's issue sync is failing (issue #213). Persist the reason until it
+         recovers (it clears itself on the next successful sync), with a dismiss for
+         operators who have read it. -->
+    <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <Alert.Title class="flex items-center gap-1.5">
+          <RefreshCw class="size-4 flex-none" />
+          Issue sync failed: {repo.full_name}
+        </Alert.Title>
+        <Alert.Description class="break-words">
+          {repo.sync_error}
+        </Alert.Description>
+      </div>
+      <Button
+        variant="outline"
+        size="icon"
+        class="flex-none"
+        title="Dismiss"
+        aria-label="Dismiss sync error"
+        onclick={() => dismissedSyncRepos.add(repo.full_name)}
+      >
+        <X class="size-4" />
+      </Button>
+    </Alert.Root>
+  {/each}
 
   {#if settings?.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
     <Alert.Root class="mx-6 mt-4 border-warning/40">

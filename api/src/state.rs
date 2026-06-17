@@ -38,6 +38,10 @@ pub enum ServerEvent {
         task_title: String,
         prompt: String,
     },
+    /// A repo's issue sync started failing (success -> error transition, issue
+    /// #213); drives a one-time alert toast and native notification. The ongoing
+    /// state is carried by the persistent board banner, not repeated per cycle.
+    RepoSyncError { repo: String, message: String },
     /// A turn died mid-flight (a "heart attack") and the defibrillator handled it;
     /// drives an alert toast and native notification so the operator notices.
     HeartAttack {
@@ -384,6 +388,15 @@ impl AppState {
             task_title,
             prompt,
         });
+    }
+
+    /// Announces a repo's issue-sync failure (issue #213), so the UI alerts the
+    /// operator once on the success -> error transition. The persistent board
+    /// banner (driven by [`Self::notify_board`]) carries the ongoing state.
+    pub fn notify_repo_sync_error(&self, repo: String, message: String) {
+        let _ = self
+            .events
+            .send(ServerEvent::RepoSyncError { repo, message });
     }
 
     /// Announces a heart attack so the UI alerts the operator immediately, in
