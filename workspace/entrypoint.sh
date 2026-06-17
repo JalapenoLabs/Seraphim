@@ -93,5 +93,23 @@ if [ -S "${DOCKER_SOCK}" ]; then
   usermod -aG "${group_name}" "${AGENT_USER}"
 fi
 
+# --- Playwright MCP: browser tools for the headless agent (issue #243) --------
+# The visual self-review loop (issues #244-247) drives the headless browser baked
+# into this image through the Playwright MCP. Register it at USER scope in
+# CLAUDE_CONFIG_DIR/.claude.json so `claude -p ... --permission-mode
+# bypassPermissions` loads it with NO per-task approval (a project `.mcp.json` would
+# sit unapproved and never connect). The flags keep it headless and sandbox-free for
+# a container with no X server: `--headless --browser chromium --no-sandbox
+# --isolated`. Idempotent (remove-then-add re-asserts the current command on every
+# start) and survives the later config-repo checkout, since `.claude.json` is
+# untracked. Best-effort: a failure here never blocks the container from idling.
+if command -v playwright-mcp >/dev/null 2>&1; then
+  runuser -u "${AGENT_USER}" -- env CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR}" bash -c '
+    claude mcp remove -s user playwright >/dev/null 2>&1 || true
+    claude mcp add -s user playwright -- \
+      playwright-mcp --headless --browser chromium --no-sandbox --isolated >/dev/null 2>&1
+  ' || echo "warning: could not register the Playwright MCP; visual self-review will be unavailable" >&2
+fi
+
 # Hand off to the idle command (tail -f /dev/null).
 exec "$@"
