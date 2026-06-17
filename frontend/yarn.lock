@@ -2202,13 +2202,13 @@ __metadata:
   languageName: node
   linkType: hard
 
-"runewood@npm:^0.1.1":
-  version: 0.1.1
-  resolution: "runewood@npm:0.1.1"
+"runewood@npm:^0.1.2":
+  version: 0.1.2
+  resolution: "runewood@npm:0.1.2"
   dependencies:
     pixi-filters: "npm:^6.1.5"
     pixi.js: "npm:^8.19.0"
-  checksum: 10c0/05c560b985f7f70876176596edbfaa8abea7ac68b369b30a615d35514b098791d5d8756146523037937e2819487f97ce35c87f88cab7697bc970157cebed526a
+  checksum: 10c0/02f6e8e6c2f470159922ba4a23c8647049ba7cafa507d9809b9420e1ac947742401b75bc9ea83754416e48ea28d537c25a18a4d33ea742302a0d1c0080d230a7
   languageName: node
   linkType: hard
 
@@ -2251,7 +2251,7 @@ __metadata:
     marked: "npm:^18.0.5"
     mode-watcher: "npm:^1.1.0"
     paneforge: "npm:^1.0.2"
-    runewood: "npm:^0.1.1"
+    runewood: "npm:^0.1.2"
     svelte: "npm:^5.1.0"
     svelte-check: "npm:^4.0.0"
     svelte-dnd-action: "npm:^0.9.50"
