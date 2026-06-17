@@ -62,11 +62,26 @@ async function main() {
   }
 
   let parsed
+  const trimmedInput = rawInput.trim()
   try {
-    parsed = JSON.parse(rawInput)
-  } catch {
-    // Allow a plain, unquoted recommendation string as a convenience.
-    parsed = rawInput.trim()
+    parsed = JSON.parse(trimmedInput)
+  } catch (error) {
+    // Input that begins with `{` or `[` was meant to be JSON. If it does not
+    // parse, it is malformed; do NOT fall back to recording the whole blob as one
+    // suggestion's title (the same garbled-input class as issue #260). Fail
+    // loudly so the agent re-emits valid JSON.
+    if (trimmedInput.startsWith('{') || trimmedInput.startsWith('[')) {
+      fail(
+        `the input looks like JSON but could not be parsed (${error.message}). ` +
+          'Nothing was sent. Re-run with valid JSON. To avoid shell-quoting problems ' +
+          'with quotes and apostrophes inside the payload, pipe it on stdin via a heredoc:\n' +
+          "  seraphim-suggest <<'JSON'\n" +
+          '  {"suggestions":[{"title":"...","detail":"..."}]}\n' +
+          '  JSON'
+      )
+    }
+    // A genuinely plain, unquoted recommendation string is still allowed.
+    parsed = trimmedInput
   }
 
   const suggestions = normalizeSuggestions(parsed)

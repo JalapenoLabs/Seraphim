@@ -67,11 +67,29 @@ async function main() {
   }
 
   let parsed
+  const trimmedInput = rawInput.trim()
   try {
-    parsed = JSON.parse(rawInput)
-  } catch {
-    // Allow a plain, unquoted question string as a convenience.
-    parsed = rawInput.trim()
+    parsed = JSON.parse(trimmedInput)
+  } catch (error) {
+    // Input that begins with `{` or `[` was meant to be JSON. If it does not
+    // parse, it is malformed (a common model slip: a missing closing brace, a
+    // trailing comma, an unescaped quote, or a truncated payload). Do NOT fall
+    // back to posting the whole blob as one question's text: that is the garbled
+    // "question" with no usable options that users have seen (issue #260). Fail
+    // loudly so the agent re-emits valid JSON instead of asking the user to read
+    // raw JSON.
+    if (trimmedInput.startsWith('{') || trimmedInput.startsWith('[')) {
+      fail(
+        `the input looks like JSON but could not be parsed (${error.message}). ` +
+          'Nothing was sent. Re-run with valid JSON. To avoid shell-quoting problems ' +
+          'with quotes and apostrophes inside the payload, pipe it on stdin via a heredoc:\n' +
+          "  seraphim-ask <<'JSON'\n" +
+          '  {"questions":[{"prompt":"...","options":[{"title":"...","description":"..."}]}]}\n' +
+          '  JSON'
+      )
+    }
+    // A genuinely plain, unquoted question string is still allowed as a shortcut.
+    parsed = trimmedInput
   }
 
   const questions = normalizeQuestions(parsed)
