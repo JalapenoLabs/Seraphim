@@ -217,6 +217,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   can verify migrations / integration tests against the same major as CI and
   prod without a daemon. The entrypoint also aligns the agent to the mounted host
   Docker socket's group, so `docker` / `earthly` work without `sudo` too.
+- **Browser e2e (issue #215):** Playwright's Chromium plus its OS libraries are
+  baked into the workspace image, into a shared world-readable
+  `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` (the official Playwright-in-Docker
+  convention) so any user finds it, so the agent can run Plunder's `yarn test:e2e`
+  immediately with no per-run `playwright install --with-deps`. The browser is
+  pinned to the Playwright version Plunder uses (`PLAYWRIGHT_VERSION` build arg);
+  if that drifts, only the browser re-downloads on first run, never the slow apt
+  dependency step.
 
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
