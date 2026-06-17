@@ -230,6 +230,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   failure it records `settings.config_repo_error`, the board shows a red banner,
   and `next_actionable_task` **halts the agent** (refuses to pull work) until it
   succeeds. A blank `config_repo_url` bypasses the halt (agent runs unconfigured).
+  The workspace entrypoint also symlinks the agent's `~/.claude`
+  (`/home/codespace/.claude`) at `CLAUDE_CONFIG_DIR` so the global instructions'
+  documented home-dir paths (`~/.claude/orgs/*.md`, `~/.claude/docs/*.md`)
+  resolve, since the agent's `$HOME` is `/home/codespace`, not `/workspace`
+  (issue #259). `$HOME` is deliberately **not** moved to `/workspace`: SSH keys
+  (`~/.ssh`) and `gh auth setup-git` credentials live under `/home/codespace`, so
+  relocating `$HOME` would break SSH cloning and git/gh auth; the symlink fixes
+  the path resolution with no such side effects.
 - **Claude invocation** (`api/src/claude/exec.rs`):
   `claude -p <prompt> --output-format stream-json --verbose --permission-mode bypassPermissions --model <model> [--resume <session>]`,
   exec'd as user `codespace`, cwd `/workspace`. All tasks resume the one shared
