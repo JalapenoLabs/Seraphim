@@ -55,14 +55,24 @@ RUN curl -fsSL https://github.com/earthly/earthly/releases/latest/download/earth
 # --- actionlint (GitHub Actions workflow linter) -----------------------------
 # Lets the agent validate `.github/workflows/*.yml` locally (bad `${{ }}`
 # expressions, unknown contexts, shell mistakes) before pushing, instead of
-# fetching the release binary ad hoc each time (issue #220). Pinned, prebuilt
-# release tarball (the binary sits at the archive root), matching the gh/doctl
-# pattern above; no Go toolchain needed.
+# fetching the release binary ad hoc each time (issues #220, #252). Pinned,
+# prebuilt release tarball (the binary sits at the archive root), matching the
+# gh/doctl pattern above; no Go toolchain needed.
 ARG ACTIONLINT_VERSION=1.7.12
 RUN curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o /tmp/actionlint.tgz \
     && tar -xzf /tmp/actionlint.tgz -C /tmp actionlint \
     && install -m 0755 /tmp/actionlint /usr/local/bin/actionlint \
     && rm -rf /tmp/actionlint*
+
+# Verification gate (issue #252): #220 installed actionlint but it was reported
+# unresolvable on PATH in the running container, and the ticket closed without
+# this check. Fail the BUILD here unless `actionlint --version` resolves both for
+# root (the default `docker exec` user) and for the `codespace` agent user in a
+# login shell, the exact context of the acceptance check
+# (`docker exec seraphim-workspace bash -lc 'actionlint --version'`). A binary
+# that lands off PATH can no longer ship silently.
+RUN actionlint --version \
+    && runuser -l codespace -c 'actionlint --version'
 
 # --- Rust / Cargo (not in the universal image) -------------------------------
 # Installed system-wide so every user/shell finds it on PATH; the registry/cache
