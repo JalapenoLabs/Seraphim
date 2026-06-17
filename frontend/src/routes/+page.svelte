@@ -840,9 +840,10 @@
 <!--
   Fill the available height (viewport minus the topbar, supplied by `<main>`) as a
   single flex column: the banners and the env-name/action row size to content,
-  while the swimlane stack takes the remaining space and scrolls. Each lane holds
-  its own kanban columns row; the lanes are stacked vertically (the board scrolls
-  as a whole rather than each column scrolling independently).
+  while the swimlane stack takes the remaining space. On lg each kanban COLUMN
+  scrolls independently within a full-height lane, so a deep card in Available is
+  always next to To Do and the page itself never has to scroll (issue #273). Below
+  lg the columns stack and the page scrolls as before.
 -->
 <svelte:window onkeydown={onWindowKeydown} />
 
@@ -1128,7 +1129,7 @@
        a single lane, so the layout degrades to today's board through one lane. -->
   {#snippet swimlanes()}
     <div
-      class="flex flex-col gap-4 p-4 lg:px-6 lg:pb-6 {bulkMode
+      class="flex flex-col gap-4 p-4 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:px-6 lg:pb-6 {bulkMode
         ? 'rounded-lg ring-1 ring-inset ring-primary/40'
         : ''}"
     >
@@ -1138,7 +1139,7 @@
           taskCount={laneVisibleCount(railway.id)}
           onTogglePause={() => toggleRailwayPause(railway)}
         >
-          <div class="grid grid-cols-1 items-start gap-3 lg:grid-cols-6">
+          <div class="grid grid-cols-1 gap-3 lg:h-full lg:min-h-0 lg:grid-cols-6">
             {@render kanbanColumns(railway.id)}
           </div>
         </RailwayLane>

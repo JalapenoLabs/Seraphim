@@ -37,7 +37,12 @@
   const lifecycle = $derived(stateStyle[railway.lifecycle_state])
 </script>
 
-<section class="flex min-h-0 flex-col rounded-lg border border-border bg-card/40">
+<!-- On lg the lane fills the board's height so its columns scroll individually
+     (issue #273); multiple lanes each take full height and scroll between them via
+     the swimlanes container. Below lg it sizes to content and the page scrolls. -->
+<section
+  class="flex min-h-0 flex-col rounded-lg border border-border bg-card/40 lg:h-full lg:flex-none"
+>
   <header
     class="flex flex-none flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border px-4 py-2.5"
   >
