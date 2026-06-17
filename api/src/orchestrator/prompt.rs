@@ -318,9 +318,10 @@ pub fn build_address_review(
 
     prompt.push_str(&format!(
         "# Addressing pull request review comments\n\
-         - Your pull request for this issue passed CI and was (auto-)approved, but reviewers \
-         (the org CI reviewer bots and/or humans) left review comments that have not been \
-         addressed. Make a best-effort pass to address them before the merge.\n\
+         - Your pull request for this issue passed CI, but reviewers (the org CI reviewer bots \
+         and/or humans) left review comments, or requested changes, that have not been addressed. \
+         The merge is gated on this: it will NOT merge while any review thread is unresolved or a \
+         reviewer's \"changes requested\" stands, no matter the approval state. Address them now.\n\
          - Your cwd is `/workspace`. The focus repo `{repo}` is at `{repo_path}`, already checked \
          out on branch `{branch}` with your earlier commits. If this issue spans several repos, \
          each one with a PR is also checked out on `{branch}` as a sibling directory; each comment \
@@ -338,8 +339,9 @@ pub fn build_address_review(
          automatically. It is fine if a comment needs no code change (a reply and resolve is \
          enough).\n\
          - Do not get stuck: if a thread needs a decision you can't make or is genuinely \
-         unresolvable, leave a brief reply explaining why and move on. The merge proceeds once the \
-         threads are handled or the attempt budget is spent.\n\
+         unresolvable, leave a brief reply explaining why and resolve it anyway, then move on. The \
+         merge proceeds once every thread is resolved; if some are still unresolved after several \
+         attempts the PR is parked for a human rather than merged over open comments.\n\
          - After pushing (or replying where no code change was needed), stop and finish with a short \
          summary. Do not watch or wait for CI; Seraphim re-checks the PR and merges it (or brings \
          you back) automatically.\n\n",

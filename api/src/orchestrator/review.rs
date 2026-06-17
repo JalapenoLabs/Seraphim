@@ -13,16 +13,30 @@ pub enum PrCi {
     Failing,
 }
 
+/// A green PR's review-gate state: whether it still needs the agent's attention
+/// before it may merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+    /// No unresolved review threads and no outstanding "changes requested" review.
+    Clean,
+    /// Unresolved review threads and/or a "changes requested" review (from reviewer
+    /// bots or humans) the agent must address and resolve before the merge.
+    Outstanding,
+    /// The review state could not be determined this tick (a lookup error). The
+    /// gate never merges on a guess, so this re-checks next tick rather than risk
+    /// merging over threads we simply failed to read.
+    Unknown,
+}
+
 /// A pull request as the review decision sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrReview {
     /// Still open, with its current CI verdict; `auto_merge` is its repo's policy.
-    /// `unresolved_review` is whether it still carries unresolved review threads
-    /// (reviewer-bot or human) the agent should address before the merge.
+    /// `review` is the PR's review-gate state, meaningful once CI is green.
     Open {
         ci: PrCi,
         auto_merge: bool,
-        unresolved_review: bool,
+        review: ReviewState,
     },
     Merged,
     /// Closed without merging (the agent or a human abandoned this repo's PR).
@@ -34,10 +48,14 @@ pub enum PrReview {
 pub enum ReviewDecision {
     /// At least one open PR's CI failed: hand the task back to the agent to fix.
     Fix,
-    /// A green PR carries unresolved review threads: hand the task back to the
-    /// agent to address the comments before merging.
+    /// A green PR has unresolved review threads or a "changes requested" review:
+    /// hand the task back to the agent to address and resolve them before merging.
     AddressReview,
-    /// Something is still running (CI pending, or no PR detected yet); wait.
+    /// Review work is still outstanding but the addressing budget is spent: park
+    /// the task for a human rather than merge over unresolved comments.
+    Block,
+    /// Something is still running (CI pending, a review lookup failed, or no PR
+    /// detected yet); wait and re-check.
     Wait,
     /// These open, passing, auto-merge PRs (by index) should be squash-merged now.
     Merge(Vec<usize>),
@@ -48,13 +66,17 @@ pub enum ReviewDecision {
 }
 
 /// Decides the next action for a task given its PRs. Order matters: a failing PR
-/// is fixed first; then we wait on any pending CI; then, once everything is green,
-/// unresolved review comments are addressed (while the budget lasts) before we
-/// merge what we can; then, once nothing is open, finish if anything merged.
+/// is fixed first; then we wait on any pending CI; then the review gate, which a
+/// PR must clear (zero unresolved threads, no "changes requested" review) before
+/// it may merge; then, once nothing is open, finish if anything merged.
 ///
-/// `review_attempts_remaining` is whether the task still has addressing turns left
-/// in its budget. Once it is exhausted, unresolved review threads no longer block
-/// the merge, so a genuinely unresolvable thread can't stall the queue forever.
+/// The review gate is strict: a green PR with outstanding review work is never
+/// merged. While the addressing budget lasts the agent is handed it; once the
+/// budget is spent the task parks for a human (`Block`) instead of merging, so a
+/// genuinely unresolvable thread can't slip an unaddressed PR through. Approval is
+/// not consulted: resolution state is the gate, not approval.
+///
+/// `review_attempts_remaining` is whether the task still has addressing turns left.
 pub fn decide(prs: &[PrReview], review_attempts_remaining: bool) -> ReviewDecision {
     if prs.is_empty() {
         // Detection hasn't found a PR yet (e.g. GitHub indexing lag); re-check.
@@ -85,21 +107,37 @@ pub fn decide(prs: &[PrReview], review_attempts_remaining: bool) -> ReviewDecisi
         return ReviewDecision::Wait;
     }
 
-    // Everything open is green. Before merging (auto policy) or holding for a human
-    // (human-review policy), address any unresolved review threads on a green PR,
-    // for either policy, as long as the attempt budget lasts.
-    if review_attempts_remaining
-        && prs.iter().any(|pr| {
-            matches!(
-                pr,
-                PrReview::Open {
-                    unresolved_review: true,
-                    ..
-                }
-            )
-        })
-    {
-        return ReviewDecision::AddressReview;
+    // Everything open is green. The review gate comes before any merge or hold: a
+    // PR with outstanding review work is addressed while the budget lasts, and
+    // parked for a human once it is spent, but it is never merged over.
+    if prs.iter().any(|pr| {
+        matches!(
+            pr,
+            PrReview::Open {
+                review: ReviewState::Outstanding,
+                ..
+            }
+        )
+    }) {
+        return if review_attempts_remaining {
+            ReviewDecision::AddressReview
+        } else {
+            ReviewDecision::Block
+        };
+    }
+
+    // No known-outstanding review, but if any green PR's review state could not be
+    // read this tick, never merge on that guess; re-check once it is known.
+    if prs.iter().any(|pr| {
+        matches!(
+            pr,
+            PrReview::Open {
+                review: ReviewState::Unknown,
+                ..
+            }
+        )
+    }) {
+        return ReviewDecision::Wait;
     }
 
     let to_merge: Vec<usize> = prs
@@ -143,7 +181,7 @@ mod tests {
         PrReview::Open {
             ci,
             auto_merge,
-            unresolved_review: false,
+            review: ReviewState::Clean,
         }
     }
 
@@ -151,7 +189,15 @@ mod tests {
         PrReview::Open {
             ci,
             auto_merge,
-            unresolved_review: true,
+            review: ReviewState::Outstanding,
+        }
+    }
+
+    fn open_unknown_review(ci: PrCi, auto_merge: bool) -> PrReview {
+        PrReview::Open {
+            ci,
+            auto_merge,
+            review: ReviewState::Unknown,
         }
     }
 
@@ -244,17 +290,34 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_budget_merges_over_unresolved_comments() {
-        // With no addressing turns left, the comments no longer block the merge,
-        // so the queue can't stall on a genuinely unresolvable thread.
+    fn exhausted_budget_parks_for_a_human_over_unresolved_comments() {
+        // With no addressing turns left, an unresolved PR is NEVER merged over: it
+        // parks for a human instead, for either merge policy.
         assert_eq!(
             decide(&[open_with_comments(PrCi::Passing, true)], false),
-            ReviewDecision::Merge(vec![0])
+            ReviewDecision::Block
         );
-        // And a human-review PR just holds for a human.
         assert_eq!(
             decide(&[open_with_comments(PrCi::Passing, false)], false),
-            ReviewDecision::Hold
+            ReviewDecision::Block
+        );
+    }
+
+    #[test]
+    fn an_unreadable_review_state_waits_rather_than_merging() {
+        // A review lookup that failed leaves the state unknown; the gate must not
+        // merge on a guess, so it waits and re-checks instead.
+        assert_eq!(
+            decide_ready(&[open_unknown_review(PrCi::Passing, true)]),
+            ReviewDecision::Wait
+        );
+        // A known-outstanding PR still takes priority over an unknown one.
+        assert_eq!(
+            decide_ready(&[
+                open_unknown_review(PrCi::Passing, true),
+                open_with_comments(PrCi::Passing, true),
+            ]),
+            ReviewDecision::AddressReview
         );
     }
 

@@ -262,30 +262,48 @@ pub struct ReviewThread {
     pub body: String,
 }
 
-/// Lists a pull request's unresolved review threads (inline review comments not
-/// marked resolved), from reviewer bots and humans alike, via the GraphQL API.
+/// A pull request's review gate inputs: its unresolved review threads and whether
+/// a reviewer's standing review currently requests changes.
 ///
-/// REST has no notion of thread resolution, so this uses GraphQL `reviewThreads`.
-/// Only each thread's first (originating) comment is returned, the actionable
-/// item; replies are omitted to keep the brief focused. Resolved threads and
-/// threads with no comment are skipped. Capped at the first 100 threads, which
-/// comfortably covers any real PR.
+/// Both are read together because the merge gate needs them together: a PR may be
+/// squash-merged only with zero unresolved threads AND no outstanding "changes
+/// requested" review. An approval alone is never sufficient.
+#[derive(Debug)]
+pub struct PrReviewStatus {
+    /// Unresolved review threads (inline comments not marked resolved), reduced to
+    /// each thread's originating comment, from reviewer bots and humans alike.
+    pub unresolved_threads: Vec<ReviewThread>,
+    /// Whether GitHub's computed review decision is `CHANGES_REQUESTED`, i.e. a
+    /// reviewer asked for changes and has neither dismissed nor re-approved it.
+    pub changes_requested: bool,
+}
+
+/// Reads a pull request's review gate inputs (its unresolved review threads and
+/// whether a standing review requests changes), from bots and humans alike, in a
+/// single GraphQL round trip.
+///
+/// REST has no notion of thread resolution, so this uses GraphQL `reviewThreads`
+/// plus `reviewDecision`. Only each thread's first (originating) comment is
+/// returned, the actionable item; replies are omitted to keep the brief focused.
+/// Resolved threads and threads with no comment are skipped. Capped at the first
+/// 100 threads, which comfortably covers any real PR.
 ///
 /// # Errors
 /// If the GraphQL request fails or the response can't be parsed.
-pub async fn list_unresolved_review_threads(
+pub async fn pr_review_status(
     octo: &Octocrab,
     owner: &str,
     repo: &str,
     number: u64,
-) -> Result<Vec<ReviewThread>> {
+) -> Result<PrReviewStatus> {
     // First 100 threads, first comment of each: the originating comment carries
     // the file/line/author/body the agent needs to act, plus the handles to reply
-    // and resolve.
+    // and resolve. `reviewDecision` is GitHub's own roll-up of reviewer states.
     const QUERY: &str = "\
         query($owner:String!,$repo:String!,$number:Int!){\
           repository(owner:$owner,name:$repo){\
             pullRequest(number:$number){\
+              reviewDecision\
               reviewThreads(first:100){\
                 nodes{\
                   id isResolved\
@@ -304,16 +322,26 @@ pub async fn list_unresolved_review_threads(
             "variables": { "owner": owner, "repo": repo, "number": number },
         }))
         .await
-        .wrap_err("failed to query pull request review threads")?;
+        .wrap_err("failed to query pull request review status")?;
 
-    let nodes = response
+    let pull = response
         .data
         .and_then(|data| data.repository)
-        .and_then(|repository| repository.pull_request)
+        .and_then(|repository| repository.pull_request);
+
+    // Gate only on an outstanding "changes requested". "Approved" and the
+    // "review required" approval gate are deliberately not merge blockers here:
+    // resolution state, not approval, is what the gate enforces.
+    let changes_requested = pull
+        .as_ref()
+        .and_then(|pull| pull.review_decision.as_deref())
+        == Some("CHANGES_REQUESTED");
+
+    let nodes = pull
         .map(|pull| pull.review_threads.nodes)
         .unwrap_or_default();
 
-    let mut threads = Vec::new();
+    let mut unresolved_threads = Vec::new();
     for node in nodes {
         if node.is_resolved {
             continue;
@@ -321,7 +349,7 @@ pub async fn list_unresolved_review_threads(
         let Some(comment) = node.comments.nodes.into_iter().next() else {
             continue; // A thread with no comment has nothing to address.
         };
-        threads.push(ReviewThread {
+        unresolved_threads.push(ReviewThread {
             repo_full_name: format!("{owner}/{repo}"),
             pr_number: i64::try_from(number).unwrap_or_default(),
             thread_id: node.id,
@@ -336,7 +364,10 @@ pub async fn list_unresolved_review_threads(
             body: comment.body,
         });
     }
-    Ok(threads)
+    Ok(PrReviewStatus {
+        unresolved_threads,
+        changes_requested,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,6 +388,8 @@ struct ReviewRepositoryNode {
 
 #[derive(Debug, Deserialize)]
 struct ReviewPullRequestNode {
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
     #[serde(rename = "reviewThreads")]
     review_threads: ReviewThreadConnection,
 }

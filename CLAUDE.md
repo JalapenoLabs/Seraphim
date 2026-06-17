@@ -339,8 +339,9 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    have all merged. The pure, unit-tested `orchestrator::review::decide` takes the
    tick's action from the set of PRs (`refresh_task_prs` updates each PR's CI +
    lifecycle first): any open PR failing → hand back to the agent; any pending →
-   wait; once every open PR is green, before merging or holding, address any
-   unresolved review comments (see below); then merge the green `auto_squash_merge`
+   wait; once every open PR is green, it must clear the review gate before merging
+   or holding (zero unresolved threads and no "changes requested" review, see
+   below); then merge the green `auto_squash_merge`
    PRs now; once all are settled and at
    least one merged → **Done** (and, for a GitHub-sourced task, close the linked
    issue with `state_reason: "completed"` when `close_issue_on_done` is set, the
@@ -353,25 +354,33 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    pushes nothing (genuinely unresolvable) or the budget is exhausted, it falls
    back to `ci_blocked` for a human. The single-PR case is just a one-row set, so
    its behavior is unchanged.
-   - **Review-comment addressing (issue #255):** a green, (auto-)approved PR can
-     still carry unresolved review threads from the org CI reviewer bots
-     (`mooreslabai-claude`, `mooreslabai-codex`) or humans, which auto-merge would
-     otherwise paper over. Before merging (auto policy) or holding (human-review
-     policy), `review::decide` checks each green open PR for unresolved review
-     threads (octocrab GraphQL `reviewThreads { isResolved }`, via
-     `git::list_unresolved_review_threads`; only inline review threads count, so
-     purely informational or approving comments never block). If any are
-     actionable and the task has attempts left, it flags `addressing_review`
-     (`queries::flag_review_addressing`) and emits a synthetic `ci`-style feed
-     note; the agent loop then picks it up (`pick_next_review_address`) and runs an
-     addressing turn (`build_address_review`) listing each comment tagged with
-     `repo#pr` + `file:line` + author + body, plus the handles to reply and
-     resolve. The turn is best-effort and never blocks on "nothing pushed" (a
-     comment may only warrant a reply or be declined): it always returns to review.
-     Bounded by `MAX_REVIEW_FIX_ATTEMPTS` (3) on a dedicated `review_fix_attempts`
-     counter (separate from `ci_fix_attempts`); once the threads are resolved the
-     loop merges, and once the budget is spent the threads no longer block the
-     merge, so the queue never stalls on a genuinely unresolvable thread.
+   - **Review-comment gate (issues #255, #270):** a green PR is NEVER squash-merged
+     while it carries review work, no matter its approval state. The merge gate is
+     exactly **CI green AND zero unresolved review threads AND no outstanding
+     "changes requested" review** (approval alone never merges). For each green open
+     PR, `git::pr_review_status` reads both signals in one GraphQL round trip
+     (`reviewThreads { isResolved }` for unresolved threads from the org CI reviewer
+     bots `mooreslabai-claude` / `mooreslabai-codex` or humans, plus `reviewDecision`
+     for a standing `CHANGES_REQUESTED`). That collapses to a per-PR `ReviewState`
+     (`Clean` / `Outstanding` / `Unknown`) which `review::decide` gates on before any
+     merge or hold:
+     - **Outstanding** (threads and/or changes-requested) with attempts left → flag
+       `addressing_review` (`queries::flag_review_addressing`), emit a `ci`-style
+       feed note; the agent loop picks it up (`pick_next_review_address`) and runs an
+       addressing turn (`build_address_review`) listing each comment tagged with
+       `repo#pr` + `file:line` + author + body, plus the handles to reply and
+       resolve. The agent implements what it agrees with and, for every thread
+       (including ones it declines, with a brief reason), replies and resolves it via
+       the GraphQL `resolveReviewThread` mutation. The turn is best-effort and never
+       blocks on "nothing pushed": it returns to review, where the loop waits for CI
+       to re-run and re-checks the threads, repeating until clean.
+     - **Outstanding with the budget spent** (`MAX_REVIEW_FIX_ATTEMPTS`, 3, on the
+       dedicated `review_fix_attempts` counter) → **park for a human** (`ReviewDecision::Block`
+       → `handle_review_blocked`, which reuses the `ci_blocked` park with a
+       review-specific note). It is **never merged over** open comments; an idle
+       revisit later resets `review_fix_attempts` and tries again.
+     - **Unknown** (the review lookup failed) → wait and re-check next tick, never
+       merge on a guess.
 4. **defibrillator** (dead-agent management) — recovers turns that die mid-flight,
    which we call a **"heart attack"**: the agent hangs with no output, its stream
    breaks, or the turn aborts internally, leaving the card stranded `in_progress`
