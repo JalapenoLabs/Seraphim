@@ -567,7 +567,9 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
 /// operator's global instructions. It uses the Playwright MCP baked into the
 /// workspace (issue #243); computed-style checks are the workhorse, so it points at
 /// the reusable check library baked into the image (issue #245) and treats a
-/// screenshot as final confirmation only, to keep token cost down. It reads the
+/// screenshot as final confirmation only, to keep token cost down. It also points
+/// at the opt-in, per-repo visual-regression baseline recipe (issue #246) for
+/// locking a confirmed-good screen against future regressions. It reads the
 /// per-repo dev-server facts from the repo's `CLAUDE.md`, and degrades gracefully:
 /// a repo with no runnable UI is skipped cleanly rather than failing the task.
 const VISUAL_SELF_REVIEW: &str = "\n\
@@ -590,6 +592,13 @@ const VISUAL_SELF_REVIEW: &str = "\n\
     the final result.\n\
     - Confirm it renders correctly at both mobile (375px) and desktop (1280px) \
     widths.\n\
+    - To lock a confirmed-good screen against FUTURE regressions, a repo may opt into \
+    committed Playwright visual-regression baselines (a standalone test in the repo's \
+    own suite, not the MCP); the recipe is at \
+    `/usr/local/share/seraphim/visual-regression.md`. This is opt-in per repo: only \
+    establish or run baselines where the repo's `CLAUDE.md` says it is enabled, or the \
+    task is to add it. Treat an unexpected screenshot diff as a regression to \
+    investigate, never reflexively re-baseline to make the check green.\n\
     - If the repo has no runnable UI (a backend-only or non-web repo, no dev server, \
     or the browser tools are unavailable), SKIP this review: do not fail the task or \
     hold the PR for it, just note in your summary that you skipped visual review and \
@@ -998,6 +1007,23 @@ mod tests {
         assert!(prompt.contains("375px"));
         assert!(prompt.contains("1280px"));
         assert!(prompt.contains("SKIP this review"));
+    }
+
+    #[test]
+    fn task_prompt_points_at_the_opt_in_visual_regression_recipe() {
+        // Issue #246: the default instructions surface the opt-in, per-repo visual
+        // regression baseline recipe as the way to lock a confirmed-good screen.
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+        );
+        assert!(prompt.contains("/usr/local/share/seraphim/visual-regression.md"));
+        assert!(prompt.contains("opt-in per repo"));
     }
 
     #[test]

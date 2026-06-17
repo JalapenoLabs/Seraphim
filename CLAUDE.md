@@ -227,6 +227,18 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   command, base URL/port, and key routes there, e.g. "dev server: `npm run dev` on
   :5173; check /, /login, /dashboard". The loop degrades gracefully: a repo with no
   runnable UI is skipped with a noted reason, never failed.
+  - **Visual regression baselines (issue #246):** the long-game complement, for
+    locking a confirmed-good screen against future regressions. An **opt-in,
+    per-repo** recipe (`workspace/visual-regression.md`, baked at
+    `/usr/local/share/seraphim/visual-regression.md`) documents committed Playwright
+    `toHaveScreenshot()` baselines plus anti-flake guidance (fixed viewport,
+    disabled animations, masked dynamic regions, deterministic data, same
+    environment to generate and diff). It runs in the repo's own test suite via the
+    standalone `@playwright/test` runner, NOT the MCP (the MCP has no pixel
+    comparison). Baselines are committed in the repo under test, never in Seraphim;
+    `VISUAL_SELF_REVIEW` points at the recipe but the agent only uses it where a
+    repo's `CLAUDE.md` opts in. An unexpected diff is a regression to investigate,
+    not a baseline to bump.
 - **Two-tier setup:** environment setup (`settings.base_setup_script`) runs once
   per provision/recreate (install CLIs/toolchains); per-repo setup
   (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).
