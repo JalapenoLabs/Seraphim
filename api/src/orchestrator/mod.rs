@@ -95,6 +95,11 @@ const PR_DETECT_GRACE: Duration = Duration::from_secs(15 * 60);
 /// for a human. Bounds thrash when a failure is unfixable or out of scope.
 const MAX_CI_FIX_ATTEMPTS: i32 = 3;
 
+/// How many turns the agent spends addressing a PR's review comments before the
+/// merge proceeds regardless. Bounds thrash when a reviewer thread is one the
+/// agent can't (or won't) resolve, so the queue never stalls on it.
+const MAX_REVIEW_FIX_ATTEMPTS: i32 = 3;
+
 /// How long a blocked PR rests before the idle agent circles back to retry it,
 /// so a genuinely stuck PR is revisited periodically rather than in a tight loop.
 const REVISIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
@@ -150,6 +155,9 @@ enum WorkMode {
     /// A PR whose auto-merge failed on a conflict: re-engage to merge the base in
     /// and resolve it, then let the review loop re-merge.
     ResolveConflict,
+    /// A green, (auto-)approved PR with unresolved review threads: re-engage to
+    /// address the comments (push fixes, reply, resolve) before the merge.
+    AddressReview,
     /// A PR the agent gave up on (CI or merge conflict), retried while idle.
     Revisit,
 }
@@ -1346,6 +1354,13 @@ async fn next_actionable_task(
     if let Some(task) = queries::pick_next_merge_conflict(&state.db, railway.id).await? {
         return Ok(Some((task, WorkMode::ResolveConflict)));
     }
+    // Addressing a green PR's review comments also re-engages an existing PR, so
+    // it takes priority over fresh work (but sits below CI and conflict fixes,
+    // which unblock a red or unmergeable PR). The review loop flagged it once the
+    // PR was green with unresolved threads.
+    if let Some(task) = queries::pick_next_review_address(&state.db, railway.id).await? {
+        return Ok(Some((task, WorkMode::AddressReview)));
+    }
     // A blocking task in progress (being worked or parked waiting for input)
     // serializes this railway's queue: pull no new To Do work until it finishes.
     // Resumes and CI fixes above continue existing in-flight work and are not gated.
@@ -1384,9 +1399,10 @@ async fn work_task(
         WorkMode::Resume => work_fresh(state, handle, task, true).await,
         // Every "re-engage on an existing PR" mode shares one flow; the mode only
         // chooses the prompt and whether the attempt budget is reset.
-        WorkMode::FixCi | WorkMode::ResolveConflict | WorkMode::Revisit => {
-            work_pr_fix(state, handle, task, mode).await
-        }
+        WorkMode::FixCi
+        | WorkMode::ResolveConflict
+        | WorkMode::AddressReview
+        | WorkMode::Revisit => work_pr_fix(state, handle, task, mode).await,
     }
 }
 
@@ -1635,6 +1651,13 @@ async fn work_pr_fix(
             task.error.as_deref().unwrap_or_default(),
             &comments,
         ),
+        WorkMode::AddressReview => {
+            // Gather the unresolved review threads across the task's PRs so the
+            // prompt lists each one (best-effort; an empty list falls back to a
+            // "inspect them yourself" note in the builder).
+            let threads = collect_unresolved_review_threads(state, &github, &task).await;
+            prompt::build_address_review(&settings, &repo, &task, &branch, &threads, &comments)
+        }
         WorkMode::Revisit => prompt::build_revisit(
             &settings,
             &repo,
@@ -1643,12 +1666,18 @@ async fn work_pr_fix(
             task.error.as_deref().unwrap_or_default(),
             &comments,
         ),
-        // work_task only routes the three PR-fix modes here.
+        // work_task only routes the PR-fix modes here.
         WorkMode::Fresh | WorkMode::Resume => {
             unreachable!("work_pr_fix is only called for PR-fix modes")
         }
     };
-    let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
+    // Review addressing has its own attempt budget; the CI/conflict/revisit modes
+    // share the CI-fix counter.
+    let attempt = if mode == WorkMode::AddressReview {
+        queries::bump_review_fix_attempt(&state.db, task.id).await?
+    } else {
+        queries::bump_ci_fix_attempt(&state.db, task.id).await?
+    };
     let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
     persist_session(state, handle, &outcome).await?;
     // A hard reset during the turn owns this task now; yield to it.
@@ -1667,6 +1696,18 @@ async fn work_pr_fix(
     }
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
+    }
+
+    // Review addressing is best-effort and must never stall the queue: whether or
+    // not the agent pushed a commit (a comment may only warrant a reply, or be one
+    // it declines), return to review. The review loop re-checks the threads and,
+    // once they are resolved or the budget is spent, proceeds to merge.
+    if mode == WorkMode::AddressReview {
+        queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
+        queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
+        state.notify_board();
+        info!(task_id = %task.id, attempt, "addressed review comments; awaiting re-check");
+        return Ok(());
     }
 
     // A pushed commit moves a tip in some repo; nothing pushed in any means the
@@ -2158,10 +2199,21 @@ async fn review_task(
     for pr in &prs {
         let auto_merge =
             pr_repo_policy(state, settings, pr).await? == ReviewPolicy::AutoSquashMerge;
-        views.push(pr_review_of(pr, auto_merge));
+        // Only a green, open PR is a candidate for addressing review comments. For
+        // any other state CI handling or the merge takes priority anyway, so skip
+        // the extra GraphQL lookup.
+        let unresolved_review = if pr.pr_state == "open" && pr.ci_state == "passing" {
+            pr_has_unresolved_review_threads(github, pr).await
+        } else {
+            false
+        };
+        views.push(pr_review_of(pr, auto_merge, unresolved_review));
     }
 
-    match review::decide(&views) {
+    // Once the attempt budget is spent, unresolved threads no longer block the
+    // merge, so a thread the agent can't resolve can't stall the task forever.
+    let review_attempts_remaining = task.review_fix_attempts < MAX_REVIEW_FIX_ATTEMPTS;
+    match review::decide(&views, review_attempts_remaining) {
         // Still settling (CI pending, or no actionable PR this tick): re-check next.
         ReviewDecision::Wait => {}
         // Open, passing PRs remain that need a human to merge; keep awaiting. Only
@@ -2175,6 +2227,9 @@ async fn review_task(
         }
         // A failing PR: hand back to the agent (or block once the cap is hit).
         ReviewDecision::Fix => handle_ci_failing(state, github, task, &prs).await?,
+        // A green PR with unresolved review threads: hand back to the agent to
+        // address the comments before the merge.
+        ReviewDecision::AddressReview => handle_review_addressing(state, task).await?,
         // Merge the green, auto-merge PRs now; the next tick finishes once all are.
         ReviewDecision::Merge(indices) => {
             merge_task_prs(state, github, task, &prs, &indices).await?;
@@ -2530,8 +2585,10 @@ async fn pr_repo_policy(
     Ok(policy.unwrap_or(settings.default_review_policy))
 }
 
-/// Maps a stored PR row to the pure review view.
-fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool) -> PrReview {
+/// Maps a stored PR row to the pure review view. `unresolved_review` is whether
+/// the open PR still carries unresolved review threads to address (only computed,
+/// and only meaningful, for a green open PR).
+fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool, unresolved_review: bool) -> PrReview {
     match pr.pr_state.as_str() {
         "merged" => PrReview::Merged,
         "closed" => PrReview::Closed,
@@ -2542,8 +2599,83 @@ fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool) -> PrReview {
                 _ => PrCi::Pending,
             },
             auto_merge,
+            unresolved_review,
         },
     }
+}
+
+/// Whether a tracked PR has any unresolved review threads (reviewer-bot or human).
+/// Best-effort: a malformed repo name or a GraphQL failure is logged and treated
+/// as "none", so a transient lookup error never blocks an otherwise-ready merge.
+async fn pr_has_unresolved_review_threads(
+    github: &octocrab::Octocrab,
+    pr: &TaskPullRequest,
+) -> bool {
+    let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+        return false;
+    };
+    let number = u64::try_from(pr.pr_number).unwrap_or_default();
+    match git::list_unresolved_review_threads(github, owner, name, number).await {
+        Ok(threads) => !threads.is_empty(),
+        Err(error) => {
+            warn!(error = %error, pr = %pr.pr_url, "could not list review threads; treating as none");
+            false
+        }
+    }
+}
+
+/// Gathers the unresolved review threads across all of a task's open PRs, for the
+/// addressing prompt. Best-effort: a lookup that fails for one PR is logged and
+/// skipped rather than failing the whole turn.
+async fn collect_unresolved_review_threads(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+) -> Vec<git::ReviewThread> {
+    let mut threads = Vec::new();
+    let prs = match queries::list_task_prs(&state.db, task.id).await {
+        Ok(prs) => prs,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not list task PRs for review threads");
+            return threads;
+        }
+    };
+    for pr in prs {
+        if pr.pr_state != "open" {
+            continue;
+        }
+        let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+            continue;
+        };
+        let number = u64::try_from(pr.pr_number).unwrap_or_default();
+        match git::list_unresolved_review_threads(github, owner, name, number).await {
+            Ok(mut found) => threads.append(&mut found),
+            Err(error) => {
+                warn!(error = %error, pr = %pr.pr_url, "could not list review threads for the prompt");
+            }
+        }
+    }
+    threads
+}
+
+/// Hands a task back to the agent to address its PR review comments: flags it
+/// `addressing_review` (the agent loop picks it up via `pick_next_review_address`)
+/// and emits a feed line so the addressing pass is visible.
+async fn handle_review_addressing(state: &AppState, task: &Task) -> Result<()> {
+    // Only act on the transition; a steady-state re-detect each tick stays quiet.
+    if task.status != TaskStatus::AddressingReview {
+        queries::flag_review_addressing(&state.db, task.id).await?;
+        emit_ci_note(
+            state,
+            task.id,
+            "Addressing PR review comments before merge",
+            "review-address",
+        )
+        .await?;
+        state.notify_board();
+        info!(task_id = %task.id, "green PR has unresolved review comments; handing back to the agent");
+    }
+    Ok(())
 }
 
 /// The repos whose branch the CI-fix turn should check out: the focus repo (so
@@ -2714,6 +2846,23 @@ async fn emit_lifecycle_event(
     state.notify_task(
         task_id,
         serde_json::json!({ "type": "lifecycle", "payload": payload, "created_at": Utc::now() }),
+    );
+    Ok(())
+}
+
+/// Emits a synthetic, informational `ci`-style event onto a task's feed and
+/// history (`status: "info"`, which renders neutral). Used for orchestration
+/// moments that aren't a Claude or PR-lifecycle event, e.g. starting the
+/// review-comment addressing pass. Reuses the synthetic CI turn like the CI-step
+/// watcher and the lifecycle events, so it renders with no special transport.
+async fn emit_ci_note(state: &AppState, task_id: uuid::Uuid, text: &str, key: &str) -> Result<()> {
+    let turn = queries::get_or_create_ci_turn(&state.db, task_id).await?;
+    let seq = queries::next_event_seq(&state.db, turn.id).await?;
+    let payload = serde_json::json!({ "status": "info", "text": text, "key": key });
+    queries::append_event(&state.db, turn.id, seq, "ci", payload.clone()).await?;
+    state.notify_task(
+        task_id,
+        serde_json::json!({ "type": "ci", "payload": payload, "created_at": Utc::now() }),
     );
     Ok(())
 }
@@ -3146,6 +3295,7 @@ mod tests {
             pr_url: None,
             error: None,
             ci_fix_attempts: 0,
+            review_fix_attempts: 0,
             hold: false,
             blocking: false,
             notes: String::new(),

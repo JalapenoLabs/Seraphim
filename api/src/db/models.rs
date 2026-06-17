@@ -127,6 +127,10 @@ pub enum TaskStatus {
     /// Auto-merge failed (typically a conflict with the base because another PR
     /// landed first); queued for the agent to resolve and push, then re-merge.
     MergeConflict,
+    /// The PR is green and (auto-)approved but has unresolved review threads
+    /// (reviewer bots or humans); queued for the agent to address them before the
+    /// merge proceeds.
+    AddressingReview,
     Merging,
     Done,
     Failed,
@@ -547,6 +551,9 @@ pub struct Task {
     pub error: Option<String>,
     /// Fix turns already spent on this task's failing CI (bounds retry thrash).
     pub ci_fix_attempts: i32,
+    /// Addressing turns already spent on this task's PR review comments (bounds
+    /// retry thrash, independent of `ci_fix_attempts`).
+    pub review_fix_attempts: i32,
     pub hold: bool,
     /// When true, while this task is in progress the agent pulls no new work, so
     /// dependent tasks wait until it finishes (queue serialization).
