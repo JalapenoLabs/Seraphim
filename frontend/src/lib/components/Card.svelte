@@ -2,11 +2,19 @@
   import type { Railway, Task } from '../types'
 
   import { goto } from '$app/navigation'
-  import { Pause, Ban, TrainFront } from '@lucide/svelte'
+  import {
+    Pause,
+    Ban,
+    TrainFront,
+    SquareArrowOutUpRight,
+    Link as LinkIcon,
+    GitPullRequestArrow
+  } from '@lucide/svelte'
 
   import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
   import { Badge } from './ui/badge'
   import { buttonVariants } from './ui/button'
+  import * as ContextMenu from './ui/context-menu'
   import * as DropdownMenu from './ui/dropdown-menu'
   import SourceIcon from './SourceIcon.svelte'
 
@@ -59,116 +67,226 @@
     }
     goto(`/task/${task.id}`)
   }
+
+  // The "Open task" menu item always navigates, even in bulk-select mode (a left
+  // click there toggles selection instead, so the menu needs its own opener).
+  function openTask() {
+    goto(`/task/${task.id}`)
+  }
+
+  // Open the task's pull request in a new tab. Only shown when the task has one.
+  function openPullRequest() {
+    if (task.pr_url) {
+      window.open(task.pr_url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  // Whether the card's right-click context menu is open. Bound to the bits-ui
+  // root so we can also close it on scroll (the board scrolls, and the menu is
+  // anchored to a fixed viewport point, so it would otherwise float orphaned).
+  let menuOpen = $state(false)
+
+  // Right-click and touch long-press are handled natively by the bits-ui
+  // ContextMenu trigger. This adds the keyboard path: the Menu/Apps key, or
+  // Shift+F10, opens the menu when the card is focused. We synthesize a
+  // `contextmenu` event near the card's top-left so the same trigger logic
+  // positions and opens the menu, with no pointer required.
+  function onCardKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      activate()
+      return
+    }
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+      event.preventDefault()
+      const card = event.currentTarget as HTMLElement
+      const rect = card.getBoundingClientRect()
+      card.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + 16,
+          clientY: rect.top + 16
+        })
+      )
+    }
+  }
+
+  // Copy a link to the task. A placeholder menu action for this foundation;
+  // real card actions land in follow-up tickets.
+  async function copyTaskLink() {
+    const url = `${window.location.origin}/task/${task.id}`
+    try {
+      await navigator.clipboard.writeText(url)
+    }
+    catch (error) {
+      console.debug('failed to copy task link', error)
+    }
+  }
+
+  // Close the menu when anything other than the menu itself scrolls. The menu is
+  // anchored to a fixed viewport point, so a board scroll would leave it floating
+  // over the wrong card; closing is simpler and clearer than repositioning.
+  // Scroll events do not bubble, so we listen in the capture phase.
+  $effect(() => {
+    if (!menuOpen) {
+      return
+    }
+    function onScroll(event: Event) {
+      const target = event.target
+      if (target instanceof Element && target.closest('[data-slot="context-menu-content"]')) {
+        return
+      }
+      menuOpen = false
+    }
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true })
+    return () => window.removeEventListener('scroll', onScroll, { capture: true })
+  })
 </script>
 
-<div
-  role="button"
-  tabindex="0"
-  aria-pressed={selectionMode ? selected : undefined}
-  onclick={activate}
-  onkeydown={(event) => event.key === 'Enter' && activate()}
-  class="rounded-lg border bg-secondary p-3 transition-all {selectionMode
-    ? 'cursor-pointer'
-    : 'cursor-grab'} {selected
-    ? 'border-primary ring-2 ring-primary bg-primary/10'
-    : selectionMode
-      ? 'border-border opacity-50 hover:opacity-100 hover:border-primary'
-      : task.hold
-        ? 'border-dashed border-border opacity-60 hover:border-primary'
-        : task.blocking
-          ? 'border-warning hover:border-primary'
-          : 'border-border hover:border-primary'}"
->
-  <div class="flex items-center justify-between gap-2">
-    <span class="flex min-w-0 items-center gap-1 text-xs tabular-nums text-muted-foreground">
-      {#if task.hold}<Pause class="size-3 flex-none" aria-label="On hold" />{/if}
-      {#if task.blocking}<Ban
-          class="size-3 flex-none text-warning"
-          aria-label="Blocking: holds the queue until finished"
-        />{/if}
-      <SourceIcon source={task.source_kind} class="size-3.5 flex-none" />
-      {#if repoShort}<span class="truncate font-semibold text-primary" title={repoName}>{repoShort}</span>{/if}
-      <span class="flex-none">{#if repoShort} · {/if}#{task.external_id}</span>
-      {#if ticketState}
-        <Badge variant="outline" class="flex-none px-1.5 py-0 text-[10px] {ticketState.class}">
-          {ticketState.label}
-        </Badge>
-      {/if}
-    </span>
-    <Badge variant="outline" class={STATUS_BADGE[task.status]}>
-      {STATUS_LABELS[task.status] ?? task.status}
-    </Badge>
-  </div>
+<!--
+  The whole card is the context-menu trigger: right-click opens the menu at the
+  cursor, touch long-press opens it (both handled natively by bits-ui), and the
+  keyboard Menu key / Shift+F10 open it via `onCardKeydown`. The trigger renders
+  this div itself (not a wrapper), so it stays the focusable card and focus
+  returns here when the menu closes. right-click and a stationary long-press do
+  not start a `svelte-dnd-action` drag (it ignores non-left buttons and only
+  drags on movement).
+-->
+<ContextMenu.Root bind:open={menuOpen}>
+  <ContextMenu.Trigger
+    role="button"
+    tabindex={0}
+    aria-pressed={selectionMode ? selected : undefined}
+    onclick={activate}
+    onkeydown={onCardKeydown}
+    class="rounded-lg border bg-secondary p-3 transition-all {selectionMode
+      ? 'cursor-pointer'
+      : 'cursor-grab'} {selected
+      ? 'border-primary ring-2 ring-primary bg-primary/10'
+      : selectionMode
+        ? 'border-border opacity-50 hover:opacity-100 hover:border-primary'
+        : task.hold
+          ? 'border-dashed border-border opacity-60 hover:border-primary'
+          : task.blocking
+            ? 'border-warning hover:border-primary'
+            : 'border-border hover:border-primary'}"
+  >
+    <div class="flex items-center justify-between gap-2">
+      <span class="flex min-w-0 items-center gap-1 text-xs tabular-nums text-muted-foreground">
+        {#if task.hold}<Pause class="size-3 flex-none" aria-label="On hold" />{/if}
+        {#if task.blocking}<Ban
+            class="size-3 flex-none text-warning"
+            aria-label="Blocking: holds the queue until finished"
+          />{/if}
+        <SourceIcon source={task.source_kind} class="size-3.5 flex-none" />
+        {#if repoShort}<span class="truncate font-semibold text-primary" title={repoName}>{repoShort}</span>{/if}
+        <span class="flex-none">{#if repoShort} · {/if}#{task.external_id}</span>
+        {#if ticketState}
+          <Badge variant="outline" class="flex-none px-1.5 py-0 text-[10px] {ticketState.class}">
+            {ticketState.label}
+          </Badge>
+        {/if}
+      </span>
+      <Badge variant="outline" class={STATUS_BADGE[task.status]}>
+        {STATUS_LABELS[task.status] ?? task.status}
+      </Badge>
+    </div>
 
-  <div class="mt-2 flex items-start gap-2">
-    {#if task.author_avatar_url}
-      <img
-        src={task.author_avatar_url}
-        alt={task.author_login ?? 'issue author'}
-        title={task.author_login ? `Opened by ${task.author_login}` : 'Issue author'}
-        class="mt-0.5 size-5 flex-none rounded-full"
-        onerror={(event) => ((event.currentTarget as HTMLImageElement).style.display = 'none')}
-      />
+    <div class="mt-2 flex items-start gap-2">
+      {#if task.author_avatar_url}
+        <img
+          src={task.author_avatar_url}
+          alt={task.author_login ?? 'issue author'}
+          title={task.author_login ? `Opened by ${task.author_login}` : 'Issue author'}
+          class="mt-0.5 size-5 flex-none rounded-full"
+          onerror={(event) => ((event.currentTarget as HTMLImageElement).style.display = 'none')}
+        />
+      {/if}
+      <div class="min-w-0 text-sm leading-snug">{task.title}</div>
+    </div>
+
+    <!-- Loud on purpose: pulses until the user acknowledges the suggestions on the task. -->
+    {#if suggestionCount > 0}
+      <div
+        class="mt-2 animate-pulse rounded-md bg-warning px-2 py-1 text-center text-xs font-bold text-background motion-reduce:animate-none"
+        title="The agent recommended environment changes"
+      >
+        💡 {suggestionCount} setup {suggestionCount === 1 ? 'suggestion' : 'suggestions'}
+      </div>
     {/if}
-    <div class="min-w-0 text-sm leading-snug">{task.title}</div>
-  </div>
 
-  <!-- Loud on purpose: pulses until the user acknowledges the suggestions on the task. -->
-  {#if suggestionCount > 0}
-    <div
-      class="mt-2 animate-pulse rounded-md bg-warning px-2 py-1 text-center text-xs font-bold text-background motion-reduce:animate-none"
-      title="The agent recommended environment changes"
-    >
-      💡 {suggestionCount} setup {suggestionCount === 1 ? 'suggestion' : 'suggestions'}
-    </div>
-  {/if}
-
-  {#if (otherRailways.length > 0 && !selectionMode) || task.pr_url}
-    <div class="mt-2 flex items-center justify-end gap-3">
-      {#if otherRailways.length > 0 && !selectionMode}
-        <!-- Reassign the card's repo to another swimlane. This moves the repo (and
-             all its tasks), so it is a repo action, not a single-card drag. The
-             backend blocks it while a live turn is working the repo. -->
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger
-            onclick={(event: MouseEvent) => event.stopPropagation()}
-            class={buttonVariants({ variant: 'ghost', size: 'sm' }) +
-              ' h-6 gap-1 px-1.5 text-xs text-muted-foreground'}
-            title="Move this repo to another railway"
+    {#if (otherRailways.length > 0 && !selectionMode) || task.pr_url}
+      <div class="mt-2 flex items-center justify-end gap-3">
+        {#if otherRailways.length > 0 && !selectionMode}
+          <!-- Reassign the card's repo to another swimlane. This moves the repo (and
+               all its tasks), so it is a repo action, not a single-card drag. The
+               backend blocks it while a live turn is working the repo. -->
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger
+              onclick={(event: MouseEvent) => event.stopPropagation()}
+              class={buttonVariants({ variant: 'ghost', size: 'sm' }) +
+                ' h-6 gap-1 px-1.5 text-xs text-muted-foreground'}
+              title="Move this repo to another railway"
+            >
+              <TrainFront class="size-3.5" />
+              Move lane
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content align="end" class="min-w-44">
+              <DropdownMenu.Label class="text-xs">Move repo to railway</DropdownMenu.Label>
+              {#each otherRailways as railway (railway.id)}
+                <DropdownMenu.Item
+                  onclick={(event: MouseEvent) => {
+                    event.stopPropagation()
+                    onMoveToRailway?.(railway.id)
+                  }}
+                >
+                  {railway.name}
+                </DropdownMenu.Item>
+              {/each}
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
+        {/if}
+        {#if task.pr_url}
+          <a
+            href={task.pr_url}
+            target="_blank"
+            rel="noreferrer"
+            onclick={(event) => event.stopPropagation()}
+            class="text-xs text-primary hover:underline"
           >
-            <TrainFront class="size-3.5" />
-            Move lane
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Content align="end" class="min-w-44">
-            <DropdownMenu.Label class="text-xs">Move repo to railway</DropdownMenu.Label>
-            {#each otherRailways as railway (railway.id)}
-              <DropdownMenu.Item
-                onclick={(event: MouseEvent) => {
-                  event.stopPropagation()
-                  onMoveToRailway?.(railway.id)
-                }}
-              >
-                {railway.name}
-              </DropdownMenu.Item>
-            {/each}
-          </DropdownMenu.Content>
-        </DropdownMenu.Root>
-      {/if}
-      {#if task.pr_url}
-        <a
-          href={task.pr_url}
-          target="_blank"
-          rel="noreferrer"
-          onclick={(event) => event.stopPropagation()}
-          class="text-xs text-primary hover:underline"
-        >
-          PR ↗
-        </a>
-      {/if}
-    </div>
-  {/if}
+            PR ↗
+          </a>
+        {/if}
+      </div>
+    {/if}
 
-  {#if task.error}
-    <div class="mt-2 border-t border-border pt-1.5 text-xs text-destructive">{task.error}</div>
-  {/if}
-</div>
+    {#if task.error}
+      <div class="mt-2 border-t border-border pt-1.5 text-xs text-destructive">{task.error}</div>
+    {/if}
+  </ContextMenu.Trigger>
+
+  <!--
+    Placeholder menu for this foundation ticket: "Open task" is the working item;
+    real card actions (move column, hold, reset, etc.) land in follow-up tickets.
+    Closing on Escape / outside click / item select is handled by bits-ui; scroll
+    close is wired in this component (see the `$effect` above).
+  -->
+  <ContextMenu.Content class="min-w-44">
+    <ContextMenu.Label class="text-xs">#{task.external_id}</ContextMenu.Label>
+    <ContextMenu.Item onclick={openTask}>
+      <SquareArrowOutUpRight class="size-4" />
+      Open task
+    </ContextMenu.Item>
+    {#if task.pr_url}
+      <ContextMenu.Item onclick={openPullRequest}>
+        <GitPullRequestArrow class="size-4" />
+        Open pull request
+      </ContextMenu.Item>
+    {/if}
+    <ContextMenu.Separator />
+    <ContextMenu.Item onclick={copyTaskLink}>
+      <LinkIcon class="size-4" />
+      Copy link
+    </ContextMenu.Item>
+  </ContextMenu.Content>
+</ContextMenu.Root>
