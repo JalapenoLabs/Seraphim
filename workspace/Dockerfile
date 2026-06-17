@@ -159,6 +159,14 @@ RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask \
 # agent's default instructions can point at it no matter which repo it is on.
 COPY visual-checks.md /usr/local/share/seraphim/visual-checks.md
 
+# --- Visual regression baseline recipe (issue #246) ---------------------------
+# The opt-in, per-repo recipe for committed Playwright `toHaveScreenshot()`
+# baselines (standalone runner, not the MCP) plus anti-flake guidance, so the
+# agent can lock a confirmed-good screen against future regressions. Baked at the
+# same fixed path the default instructions point at; baselines themselves live in
+# each opted-in repo, never here.
+COPY visual-regression.md /usr/local/share/seraphim/visual-regression.md
+
 # --- Throwaway PostgreSQL 17 helper (boots a local cluster for DB validation) -
 COPY pg-ephemeral /usr/local/bin/pg-ephemeral
 RUN chmod +x /usr/local/bin/pg-ephemeral
