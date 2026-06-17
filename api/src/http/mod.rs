@@ -14,6 +14,7 @@ mod notepad;
 mod questions;
 mod railways;
 mod repos;
+mod screenshots;
 mod settings;
 mod sse;
 mod stats;
@@ -104,6 +105,15 @@ pub fn router(state: AppState) -> Router {
         .route("/agent/suggestions", post(suggestions::create))
         .route("/suggestions/:id/ack", post(suggestions::acknowledge))
         .route("/suggestions/:id/create", post(suggestions::create_issue))
+        // Agent screenshots (issue #248): the raw image is the request body, so the
+        // upload route raises axum's 2MB default body limit to the screenshot cap.
+        .route(
+            "/agent/screenshots",
+            post(screenshots::create).layer(axum::extract::DefaultBodyLimit::max(
+                screenshots::MAX_SCREENSHOT_BYTES,
+            )),
+        )
+        .route("/screenshots/:id", get(screenshots::serve))
         .route("/agent/questions", post(questions::ask))
         .route("/questions/pending", get(questions::pending))
         .route("/questions/:id/answer", post(questions::answer))

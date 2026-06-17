@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::ApiResult;
 use crate::db::models::{
-    EnvSuggestion, Event, Question, SourceKind, Task, TaskColumn, TaskPullRequest,
+    EnvSuggestion, Event, Question, SourceKind, Task, TaskColumn, TaskPullRequest, TaskScreenshot,
 };
 use crate::db::queries;
 use crate::git;
@@ -59,10 +59,13 @@ pub struct TaskDetail {
     /// Every pull request the task has opened, across all repos it spans. The
     /// review loop gates Done on all of them passing CI and merging.
     pub pull_requests: Vec<TaskPullRequest>,
+    /// Screenshots the agent captured during the task (issue #248), newest first,
+    /// metadata only; the bytes stream from `/screenshots/:id`.
+    pub screenshots: Vec<TaskScreenshot>,
 }
 
 /// `GET /api/v1/tasks/:id` - the card, its conversation events, its environment
-/// suggestions, its escalated questions, and its pull requests.
+/// suggestions, its escalated questions, its pull requests, and its screenshots.
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -78,12 +81,14 @@ pub async fn get_task(
     let suggestions = queries::list_suggestions_for_task(&state.db, id).await?;
     let questions = queries::list_questions_for_task(&state.db, id).await?;
     let pull_requests = queries::list_task_prs(&state.db, id).await?;
+    let screenshots = queries::list_screenshots_for_task(&state.db, id).await?;
     Ok(Json(TaskDetail {
         task,
         events,
         suggestions,
         questions,
         pull_requests,
+        screenshots,
     })
     .into_response())
 }

@@ -6,7 +6,8 @@
     Question,
     Repository,
     Task,
-    TaskPullRequest
+    TaskPullRequest,
+    TaskScreenshot
   } from '$lib/types'
 
   import { onMount, onDestroy, tick } from 'svelte'
@@ -15,6 +16,7 @@
   import { goto } from '$app/navigation'
   import {
     Ban,
+    Camera,
     ChevronDown,
     ExternalLink,
     GitPullRequest,
@@ -65,6 +67,7 @@
   let suggestions = $state<EnvSuggestion[]>([])
   let questions = $state<Question[]>([])
   let pullRequests = $state<TaskPullRequest[]>([])
+  let screenshots = $state<TaskScreenshot[]>([])
   let eventSource: EventSource | null = null
 
   // Target-repo picker, shown only for internal tickets (a GitHub task's repo is
@@ -320,6 +323,7 @@
     suggestions = detail.suggestions
     questions = detail.questions
     pullRequests = detail.pull_requests
+    screenshots = detail.screenshots
     // Seed the notepad once, and open it if there is already something to read.
     if (!notesInitialized) {
       notes = detail.task.notes
@@ -610,6 +614,54 @@
             </li>
           {/each}
         </ul>
+      </section>
+    {/if}
+
+    {#if screenshots.length}
+      <!-- Screenshots the agent captured during the task (issue #248), newest
+           first. The bytes stream from a dedicated endpoint and are lazy-loaded,
+           so a long gallery stays cheap; the metadata rides in the task payload but
+           the bytes only load when a thumbnail scrolls into view. Click one to open
+           the full image. -->
+      <section class="rounded-lg border border-border bg-card p-3">
+        <h2 class="flex items-center gap-1.5 text-sm font-semibold">
+          <Camera class="size-4 text-muted-foreground" />
+          Screenshots
+          <span class="text-xs font-normal text-muted-foreground">({screenshots.length})</span>
+        </h2>
+        <div class="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {#each screenshots as shot (shot.id)}
+            <figure class="min-w-0">
+              <a
+                href={`/api/v1/screenshots/${shot.id}`}
+                target="_blank"
+                rel="noreferrer"
+                class="block overflow-hidden rounded border border-border hover:border-primary"
+                title="Open full screenshot"
+              >
+                <img
+                  src={`/api/v1/screenshots/${shot.id}`}
+                  alt={shot.caption || shot.route || 'agent screenshot'}
+                  loading="lazy"
+                  class="h-32 w-full bg-muted object-cover"
+                />
+              </a>
+              <figcaption class="mt-1 flex flex-col gap-0.5">
+                {#if shot.caption}
+                  <span class="truncate text-xs font-medium" title={shot.caption}>
+                    {shot.caption}
+                  </span>
+                {/if}
+                <span class="truncate text-[11px] text-muted-foreground">
+                  {#if shot.route}{shot.route}{/if}
+                  {#if shot.width && shot.height}
+                    <span>{shot.route ? ' · ' : ''}{shot.width}×{shot.height}</span>
+                  {/if}
+                </span>
+              </figcaption>
+            </figure>
+          {/each}
+        </div>
       </section>
     {/if}
 
