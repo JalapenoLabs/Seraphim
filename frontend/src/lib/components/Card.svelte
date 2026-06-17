@@ -19,7 +19,8 @@
     Check,
     CircleSlash,
     RotateCcw,
-    Trash2
+    Trash2,
+    Search
   } from '@lucide/svelte'
   import { toast } from 'svelte-sonner'
 
@@ -37,8 +38,10 @@
     suggestionCount = 0,
     selectionMode = false,
     selected = false,
+    selectedCount = 0,
     onselect,
     railways = [],
+    recentLaneIds = [],
     onMoveToRailway,
     onMoveToColumn,
     onToggleHold,
@@ -54,12 +57,18 @@
     // cards dim so it is obvious which are picked.
     selectionMode?: boolean
     selected?: boolean
+    // How many cards are currently selected board-wide. When this card is part of a
+    // multi-selection (issue #236) the context menu acts on the whole selection.
+    selectedCount?: number
     onselect?: () => void
     // The full set of railways (swimlanes). When more than one exists and the card
     // has a repo, a "move to lane" control reassigns the card's repo's railway
     // (cross-lane is a repo move, never a card drag). Omitted when there is only
     // the single `main` lane, where the control is meaningless.
     railways?: Railway[]
+    // Recently used lane move targets (railway ids), newest first, for the lane
+    // submenu's shortlist (issue #236). The board owns this and persists it.
+    recentLaneIds?: string[]
     onMoveToRailway?: (railwayId: string) => void
     // Move this card to another board column (context menu). "To Do" carries a
     // placement so the agent's "do this next" (top) vs "later" (bottom) intent is
@@ -71,6 +80,36 @@
     onReset?: () => void
     onDelete?: () => void
   } = $props()
+
+  // Multi-select awareness (issue #236): when this card is part of a multi-card
+  // selection, the menu acts on the whole selection. The board routes each action
+  // to all selected cards; here it drives the header and which items are shown
+  // (per-card-only actions are hidden in multi mode; bulk-capable ones stay).
+  const multi = $derived(selected && selectedCount > 1)
+
+  // Above this many lanes, the lane submenu shows a filter box (issue #236). Below
+  // it the list is short enough to scan, and bits-ui's type-ahead already covers
+  // keyboard jumping.
+  const LANE_FILTER_THRESHOLD = 7
+  let laneFilter = $state('')
+
+  // Recently used lanes still on the board, excluding the card's current lane in
+  // single-card mode (in multi mode the selection may span lanes, so keep them).
+  const recentRailways = $derived(
+    recentLaneIds
+      .map((id) => railways.find((railway) => railway.id === id))
+      .filter((railway): railway is Railway => !!railway)
+      .filter((railway) => multi || railway.id !== task.railway_id)
+  )
+
+  // The lane list narrowed by the filter box (case-insensitive name match).
+  const filteredRailways = $derived(
+    laneFilter.trim()
+      ? railways.filter((railway) =>
+          railway.name.toLowerCase().includes(laneFilter.trim().toLowerCase())
+        )
+      : railways
+  )
 
   // Whether this task has actually started an attempt: it has a branch or PR, or
   // it has moved past the queue. A task that never started has nothing to reset,
@@ -208,7 +247,31 @@
           clientY: rect.top + 16
         })
       )
+      return
     }
+    // Power-user shortcuts on a focused card (issue #236): W = work this now,
+    // H = toggle hold. The menu shows these hints. Skipped when a modifier is held
+    // so a browser/OS shortcut is never clobbered. (When the menu is open, focus is
+    // in the menu, not the card, so these never fire there.)
+    if (event.ctrlKey || event.metaKey || event.altKey) {
+      return
+    }
+    if (event.key === 'w' || event.key === 'W') {
+      event.preventDefault()
+      onMoveToColumn?.('todo', 'top')
+    } else if (event.key === 'h' || event.key === 'H') {
+      event.preventDefault()
+      onToggleHold?.()
+    }
+  }
+
+  // Keep typing in the lane filter box from triggering the menu's type-ahead, while
+  // still letting the menu's own navigation/dismiss keys through.
+  function onLaneFilterKeydown(event: KeyboardEvent) {
+    if (['Escape', 'ArrowDown', 'ArrowUp', 'Enter', 'Tab'].includes(event.key)) {
+      return
+    }
+    event.stopPropagation()
   }
 
   // Close the menu when anything other than the menu itself scrolls. The menu is
@@ -217,6 +280,8 @@
   // Scroll events do not bubble, so we listen in the capture phase.
   $effect(() => {
     if (!menuOpen) {
+      // Reset the lane filter so the next open starts fresh.
+      laneFilter = ''
       return
     }
     function onScroll(event: Event) {
@@ -360,56 +425,71 @@
     `$effect` above). An action that does not apply (no external URL, no PR, no
     branch) is disabled or hidden, never shown broken.
   -->
-  <ContextMenu.Content class="min-w-48">
-    <ContextMenu.Label class="text-xs">#{task.external_id}</ContextMenu.Label>
-
-    <ContextMenu.Item onclick={openTask}>
-      <SquareArrowOutUpRight class="size-4" />
-      Open task
-    </ContextMenu.Item>
-    <ContextMenu.Item
-      disabled={!task.url}
-      title={task.url ? undefined : 'This task has no linked external issue'}
-      onclick={openExternalIssue}
-    >
-      <SourceIcon source={task.source_kind} class="size-4" />
-      {EXTERNAL_OPEN_LABELS[task.source_kind]}
-    </ContextMenu.Item>
-    {#if task.pr_url}
-      <ContextMenu.Item onclick={openPullRequest}>
-        <GitPullRequestArrow class="size-4" />
-        Open pull request
-      </ContextMenu.Item>
+  <ContextMenu.Content class="min-w-52">
+    <!--
+      Header: the single card's issue ref, or the selection count when the menu
+      acts on a multi-selection (issue #236).
+    -->
+    {#if multi}
+      <ContextMenu.Label class="text-xs">{selectedCount} cards selected</ContextMenu.Label>
+    {:else}
+      <ContextMenu.Label class="text-xs">#{task.external_id}</ContextMenu.Label>
     {/if}
-
-    <ContextMenu.Separator />
-
-    <ContextMenu.Item onclick={copyLink}>
-      <LinkIcon class="size-4" />
-      Copy link
-    </ContextMenu.Item>
-    <ContextMenu.Item onclick={copyIssueReference}>
-      <Hash class="size-4" />
-      Copy issue reference
-    </ContextMenu.Item>
-    {#if task.branch}
-      <ContextMenu.Item onclick={copyBranch}>
-        <GitBranch class="size-4" />
-        Copy branch name
-      </ContextMenu.Item>
-    {/if}
-    <ContextMenu.Item onclick={copyTitle}>
-      <Type class="size-4" />
-      Copy title
-    </ContextMenu.Item>
-
-    <ContextMenu.Separator />
 
     <!--
-      Move to > Column / Lane (issue #233). A column move re-ranks/relocates just
-      this card; a lane move reassigns the card's REPO (and all its tasks), so it
-      is confirmed and toasted by the board. The current column/lane is checked,
-      and a no-op destination is disabled.
+      Per-card-only actions (open / copy): meaningless across a selection, so they
+      are hidden in multi mode (issue #236).
+    -->
+    {#if !multi}
+      <ContextMenu.Item onclick={openTask}>
+        <SquareArrowOutUpRight class="size-4" />
+        Open task
+      </ContextMenu.Item>
+      <ContextMenu.Item
+        disabled={!task.url}
+        title={task.url ? undefined : 'This task has no linked external issue'}
+        onclick={openExternalIssue}
+      >
+        <SourceIcon source={task.source_kind} class="size-4" />
+        {EXTERNAL_OPEN_LABELS[task.source_kind]}
+      </ContextMenu.Item>
+      {#if task.pr_url}
+        <ContextMenu.Item onclick={openPullRequest}>
+          <GitPullRequestArrow class="size-4" />
+          Open pull request
+        </ContextMenu.Item>
+      {/if}
+
+      <ContextMenu.Separator />
+
+      <ContextMenu.Item onclick={copyLink}>
+        <LinkIcon class="size-4" />
+        Copy link
+      </ContextMenu.Item>
+      <ContextMenu.Item onclick={copyIssueReference}>
+        <Hash class="size-4" />
+        Copy issue reference
+      </ContextMenu.Item>
+      {#if task.branch}
+        <ContextMenu.Item onclick={copyBranch}>
+          <GitBranch class="size-4" />
+          Copy branch name
+        </ContextMenu.Item>
+      {/if}
+      <ContextMenu.Item onclick={copyTitle}>
+        <Type class="size-4" />
+        Copy title
+      </ContextMenu.Item>
+
+      <ContextMenu.Separator />
+    {/if}
+
+    <!--
+      Bulk-capable actions (issues #233/#235/#236): Move to column/lane, Work this
+      now, Hold/Unhold, Send to Ignored. The board applies each to the whole
+      selection when one is active, otherwise just this card. A column move
+      re-ranks/relocates; a lane move reassigns the REPO(s) (confirmed + toasted by
+      the board). Current column/lane is checked only in single-card mode.
     -->
     <ContextMenu.Sub>
       <ContextMenu.SubTrigger>
@@ -424,7 +504,7 @@
           </ContextMenu.SubTrigger>
           <ContextMenu.SubContent class="min-w-40">
             {#each COLUMN_MOVES as move (move.label)}
-              {@const isCurrent = move.column === task.board_column}
+              {@const isCurrent = !multi && move.column === task.board_column}
               <ContextMenu.Item
                 disabled={isCurrent && move.column !== 'todo'}
                 onclick={() => onMoveToColumn?.(move.column, move.placement)}
@@ -441,15 +521,42 @@
         </ContextMenu.Sub>
 
         {#if railways.length > 1}
-          {#if task.repo_id}
+          {#if multi || task.repo_id}
             <ContextMenu.Sub>
               <ContextMenu.SubTrigger>
                 <TrainFront class="size-4" />
                 Lane
               </ContextMenu.SubTrigger>
-              <ContextMenu.SubContent class="min-w-40">
-                {#each railways as railway (railway.id)}
-                  {@const isCurrent = railway.id === task.railway_id}
+              <ContextMenu.SubContent class="min-w-44">
+                {#if railways.length > LANE_FILTER_THRESHOLD}
+                  <!-- Filter box for boards with many lanes (issue #236). It keeps
+                       its own keystrokes from the menu's type-ahead. -->
+                  <div class="flex items-center gap-1.5 px-1.5 py-1">
+                    <Search class="size-3.5 flex-none text-muted-foreground" />
+                    <input
+                      type="text"
+                      placeholder="Filter lanes…"
+                      bind:value={laneFilter}
+                      onkeydown={onLaneFilterKeydown}
+                      class="h-6 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                    />
+                  </div>
+                  <ContextMenu.Separator />
+                {/if}
+
+                {#if recentRailways.length > 0 && !laneFilter.trim()}
+                  <ContextMenu.Label class="text-xs">Recent</ContextMenu.Label>
+                  {#each recentRailways as railway (railway.id)}
+                    <ContextMenu.Item onclick={() => onMoveToRailway?.(railway.id)}>
+                      <TrainFront class="size-4" />
+                      {railway.name}
+                    </ContextMenu.Item>
+                  {/each}
+                  <ContextMenu.Separator />
+                {/if}
+
+                {#each filteredRailways as railway (railway.id)}
+                  {@const isCurrent = !multi && railway.id === task.railway_id}
                   <ContextMenu.Item
                     disabled={isCurrent}
                     onclick={() => onMoveToRailway?.(railway.id)}
@@ -462,6 +569,11 @@
                     {railway.name}
                   </ContextMenu.Item>
                 {/each}
+                {#if filteredRailways.length === 0}
+                  <ContextMenu.Label class="text-xs text-muted-foreground">
+                    No lanes match
+                  </ContextMenu.Label>
+                {/if}
               </ContextMenu.SubContent>
             </ContextMenu.Sub>
           {:else}
@@ -477,14 +589,10 @@
 
     <ContextMenu.Separator />
 
-    <!--
-      Lifecycle actions (issue #235). "Work this now" / "Send to Ignored" are just
-      column moves, so they reuse onMoveToColumn; Hold toggles the flag (the label
-      shows the opposite of the current state).
-    -->
     <ContextMenu.Item onclick={() => onMoveToColumn?.('todo', 'top')}>
       <ArrowUpToLine class="size-4" />
       Work this now
+      <ContextMenu.Shortcut>W</ContextMenu.Shortcut>
     </ContextMenu.Item>
     <ContextMenu.Item onclick={() => onToggleHold?.()}>
       {#if task.hold}
@@ -494,36 +602,41 @@
         <Pause class="size-4" />
         Hold
       {/if}
+      <ContextMenu.Shortcut>H</ContextMenu.Shortcut>
     </ContextMenu.Item>
     <ContextMenu.Item
-      disabled={task.board_column === 'ignored'}
+      disabled={!multi && task.board_column === 'ignored'}
       onclick={() => onMoveToColumn?.('ignored', 'top')}
     >
       <CircleSlash class="size-4" />
       Send to Ignored
     </ContextMenu.Item>
 
-    <ContextMenu.Separator />
-
     <!--
-      Destructive actions: visually separated, styled destructive, and confirmed by
-      the board before they run. Reset is disabled when the task never started;
-      Delete is internal-only (source-driven tasks are managed from their source).
+      Destructive actions (issue #235): per-card only, so hidden in multi mode
+      (bulk reset/delete are not offered here). Visually separated, styled
+      destructive, confirmed by the board. Reset is disabled when the task never
+      started; Delete is internal-only (source-driven tasks are managed from their
+      source).
     -->
-    <ContextMenu.Item
-      variant="destructive"
-      disabled={!hasStarted}
-      title={hasStarted ? undefined : "This task hasn't started yet, so there is nothing to reset"}
-      onclick={() => onReset?.()}
-    >
-      <RotateCcw class="size-4" />
-      Reset task…
-    </ContextMenu.Item>
-    {#if task.source_kind === 'internal'}
-      <ContextMenu.Item variant="destructive" onclick={() => onDelete?.()}>
-        <Trash2 class="size-4" />
-        Delete…
+    {#if !multi}
+      <ContextMenu.Separator />
+
+      <ContextMenu.Item
+        variant="destructive"
+        disabled={!hasStarted}
+        title={hasStarted ? undefined : "This task hasn't started yet, so there is nothing to reset"}
+        onclick={() => onReset?.()}
+      >
+        <RotateCcw class="size-4" />
+        Reset task…
       </ContextMenu.Item>
+      {#if task.source_kind === 'internal'}
+        <ContextMenu.Item variant="destructive" onclick={() => onDelete?.()}>
+          <Trash2 class="size-4" />
+          Delete…
+        </ContextMenu.Item>
+      {/if}
     {/if}
   </ContextMenu.Content>
 </ContextMenu.Root>

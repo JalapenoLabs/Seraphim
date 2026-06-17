@@ -489,13 +489,50 @@
     return 1
   }
 
-  // Move a single card to another column via its context menu (issue #233). "To Do
-  // (top/bottom)" mirrors the server-side automation rank: just above the column's
-  // current minimum, or just below its maximum, within the card's own lane (the
-  // card itself is excluded so re-ranking within To Do works). Other columns place
-  // the card at the top. Reuses the same `moveTask` the drag-and-drop path uses, so
-  // the board reflects it via the existing optimistic/SSE reload.
+  // The tasks a context-menu action should apply to (issue #236): the whole
+  // multi-selection when the right-clicked card is part of it, otherwise just that
+  // card. Keeps single-card behavior identical while making the menu act on the
+  // selection when one is active.
+  function actionTasks(task: Task): Task[] {
+    if (!(selected.has(task.id) && selected.size > 1)) {
+      return [task]
+    }
+    const all: Task[] = []
+    for (const buckets of Object.values(columnsByRailway)) {
+      for (const column of COLUMNS) {
+        for (const candidate of buckets[column.key]) {
+          if (selected.has(candidate.id)) {
+            all.push(candidate)
+          }
+        }
+      }
+    }
+    return all
+  }
+
+  // Move a card (or the whole selection) to another column via the context menu
+  // (issues #233/#236). For a single card, "To Do (top/bottom)" mirrors the
+  // server-side automation rank: just above the column's current minimum, or just
+  // below its maximum, within the card's own lane (the card itself is excluded so
+  // re-ranking within To Do works). For a multi-selection, every selected card is
+  // moved to the column in one bulk call (precise top/bottom ranking is a
+  // single-card nicety). Both reuse the board's existing reload/SSE path.
   async function moveCardToColumn(task: Task, column: TaskColumn, placement: 'top' | 'bottom') {
+    const targets = actionTasks(task)
+    if (targets.length > 1) {
+      try {
+        await bulkSetTaskStatus(
+          targets.map((target) => target.id),
+          column
+        )
+        await load()
+        toast.success(`Moved ${targets.length} cards to ${columnLabel(column)}`)
+      } catch (error) {
+        toast.error(await extractApiError(error, 'Failed to move the cards.'))
+      }
+      return
+    }
+
     const positions = (columnsByRailway[task.railway_id]?.[column] ?? [])
       .filter((other) => other.id !== task.id)
       .map((other) => other.position)
@@ -521,23 +558,25 @@
     return COLUMNS.find((entry) => entry.key === column)?.label ?? column
   }
 
-  // A lane move awaiting confirmation. Because a railway follows its repo, moving a
-  // card to another lane reassigns the whole REPO (and every one of its tasks), not
-  // just this card, so it is confirmed before it runs.
-  let pendingLaneMove = $state<{ task: Task; railwayId: string } | null>(null)
+  // A lane move awaiting confirmation (issues #233/#236). Because a railway follows
+  // its repo, moving a card to another lane reassigns the whole REPO (and every one
+  // of its tasks). For a multi-selection we operate per unique repo across the
+  // selection, so the pending move carries the deduped repo ids, not a single task.
+  let pendingLaneMove = $state<{ railwayId: string; repoIds: string[] } | null>(null)
   let laneMoveBusy = $state(false)
 
-  // The repo, task count, and target lane behind the pending move, for the
-  // confirmation copy. Null when there is nothing pending or the task has no repo.
+  // The repo count, total task count, and target lane behind the pending move, for
+  // the confirmation copy. Null when nothing is pending.
   const pendingLaneDetails = $derived.by(() => {
-    const repoId = pendingLaneMove?.task.repo_id
-    if (!repoId) {
+    if (!pendingLaneMove) {
       return null
     }
+    const { railwayId, repoIds } = pendingLaneMove
     return {
-      repoLabel: repoNames[repoId] ?? 'this repo',
-      count: repoTaskCount(repoId),
-      laneName: railwayName(pendingLaneMove?.railwayId)
+      repoCount: repoIds.length,
+      repoLabel: repoIds.length === 1 ? (repoNames[repoIds[0]] ?? 'this repo') : `${repoIds.length} repos`,
+      taskCount: repoIds.reduce((sum, repoId) => sum + repoTaskCount(repoId), 0),
+      laneName: railwayName(railwayId)
     }
   })
 
@@ -553,46 +592,110 @@
     return count
   }
 
-  // Open the confirmation for moving a card's repo to another lane. A no-op (no
-  // repo, or already on that lane) is ignored.
+  // Open the confirmation for moving a card's (or the selection's) repo(s) to
+  // another lane. Dedupes the repos across the selection and drops tasks with no
+  // repo; a no-op (nothing to move) is ignored.
   function requestLaneMove(task: Task, railwayId: string) {
-    if (!task.repo_id || railwayId === task.railway_id) {
+    const repoIds = [
+      ...new Set(
+        actionTasks(task)
+          .map((target) => target.repo_id)
+          .filter((repoId): repoId is string => !!repoId)
+      )
+    ]
+    if (repoIds.length === 0) {
       return
     }
-    pendingLaneMove = { task, railwayId }
+    pendingLaneMove = { railwayId, repoIds }
   }
 
-  // Reassign the repo (and all its tasks) to the chosen lane. The backend blocks it
-  // while a live turn is working the repo on its current lane and returns the
-  // reason, which we surface as a toast.
+  // Reassign each repo (and all its tasks) to the chosen lane, then report a single
+  // summary toast. The backend blocks a repo while a live turn is working it on its
+  // current lane and returns the reason, which we fold into the summary.
   async function confirmLaneMove() {
     const move = pendingLaneMove
-    if (!move?.task.repo_id) {
+    if (!move) {
       return
     }
-    const repoLabel = repoNames[move.task.repo_id] ?? 'repo'
+    const laneName = railwayName(move.railwayId)
     laneMoveBusy = true
+    const moved: string[] = []
+    const blocked: string[] = []
+    for (const repoId of move.repoIds) {
+      const label = repoNames[repoId] ?? 'a repo'
+      try {
+        await assignRepoToRailway(move.railwayId, repoId)
+        moved.push(label)
+      } catch (error) {
+        blocked.push(`${label} (${await extractApiError(error, 'blocked')})`)
+      }
+    }
+    await load()
+    if (moved.length > 0) {
+      rememberLane(move.railwayId)
+    }
+    const movedLabel = moved.length === 1 ? moved[0] : `${moved.length} repos`
+    if (blocked.length === 0) {
+      toast.success(`Moved ${movedLabel} to ${laneName}`)
+    } else if (moved.length === 0) {
+      toast.error(`Could not move to ${laneName}: ${blocked.join('; ')}`)
+    } else {
+      toast.error(`Moved ${movedLabel} to ${laneName}; ${blocked.length} blocked: ${blocked.join('; ')}`)
+    }
+    laneMoveBusy = false
+    pendingLaneMove = null
+  }
+
+  // The most recently used lane move targets, newest first, persisted so repeat
+  // moves are one click (issue #236). Hydrated from localStorage on mount.
+  const RECENT_LANES_KEY = 'seraphim:recent-lane-moves'
+  const RECENT_LANES_MAX = 3
+  let recentLaneIds = $state<string[]>([])
+
+  function loadRecentLanes() {
     try {
-      await assignRepoToRailway(move.railwayId, move.task.repo_id)
-      await load()
-      toast.success(`Moved ${repoLabel} to ${railwayName(move.railwayId)}`)
+      const raw = localStorage.getItem(RECENT_LANES_KEY)
+      const parsed: unknown = raw ? JSON.parse(raw) : []
+      if (Array.isArray(parsed)) {
+        recentLaneIds = parsed.filter((id): id is string => typeof id === 'string')
+      }
     } catch (error) {
-      const message = await extractApiError(error, 'Failed to move the repo to that railway.')
-      toast.error(message)
-    } finally {
-      laneMoveBusy = false
-      pendingLaneMove = null
+      console.debug('failed to load recent lanes', error)
+    }
+  }
+
+  function rememberLane(railwayId: string) {
+    recentLaneIds = [railwayId, ...recentLaneIds.filter((id) => id !== railwayId)].slice(
+      0,
+      RECENT_LANES_MAX
+    )
+    try {
+      localStorage.setItem(RECENT_LANES_KEY, JSON.stringify(recentLaneIds))
+    } catch (error) {
+      console.debug('failed to save recent lanes', error)
     }
   }
 
   // --- Card lifecycle actions (issue #235) -----------------------------------
-  // Toggle a card's hold flag from its context menu. A reversible flag, so no
-  // confirmation (unlike the destructive actions below); just toast the result.
+  // Toggle the hold flag from the context menu, for one card or the whole selection
+  // (issue #236). The new value follows the right-clicked card's current state, and
+  // is applied to every target. A reversible flag, so no confirmation.
   async function toggleHold(task: Task) {
+    const targets = actionTasks(task)
+    const hold = !task.hold
     try {
-      await setTaskHold(task.id, !task.hold)
-      await load()
-      toast.success(task.hold ? 'Hold released' : 'Task held — the agent will skip it')
+      if (targets.length > 1) {
+        await bulkSetTaskFields(
+          targets.map((target) => target.id),
+          { hold }
+        )
+        await load()
+        toast.success(hold ? `Held ${targets.length} cards` : `Released ${targets.length} cards`)
+      } else {
+        await setTaskHold(task.id, hold)
+        await load()
+        toast.success(hold ? 'Task held — the agent will skip it' : 'Hold released')
+      }
     } catch (error) {
       const message = await extractApiError(error, 'Failed to update the hold.')
       toast.error(message)
@@ -713,6 +816,7 @@
     for (const column of COLUMNS) {
       sortState[column.key] = loadSort(column.key)
     }
+    loadRecentLanes()
     load()
     // The notepad loads once, separately from the board: the board stream below
     // reloads on every change, which must never clobber an in-progress edit.
@@ -994,8 +1098,10 @@
                 suggestionCount={suggestionCounts[task.id] ?? 0}
                 selectionMode={bulkMode}
                 selected={selected.has(task.id)}
+                selectedCount={selected.size}
                 onselect={() => toggleSelected(task.id)}
                 {railways}
+                {recentLaneIds}
                 onMoveToColumn={(column, placement) => moveCardToColumn(task, column, placement)}
                 onMoveToRailway={(targetRailwayId) => requestLaneMove(task, targetRailwayId)}
                 onToggleHold={() => toggleHold(task)}
@@ -1113,20 +1219,26 @@
   >
     <AlertDialog.Content>
       <AlertDialog.Header>
-        <AlertDialog.Title>Move repo to the {pendingLaneDetails?.laneName} lane?</AlertDialog.Title>
+        <AlertDialog.Title>
+          Move {pendingLaneDetails?.repoCount === 1 ? 'repo' : 'repos'} to the
+          {pendingLaneDetails?.laneName} lane?
+        </AlertDialog.Title>
         <AlertDialog.Description>
           A lane follows its repo, so this moves <span class="font-semibold"
             >{pendingLaneDetails?.repoLabel}</span
           >
-          and all {pendingLaneDetails?.count}
-          {pendingLaneDetails?.count === 1 ? 'task' : 'tasks'} of it to the
-          {pendingLaneDetails?.laneName} lane, not just this card.
+          and all {pendingLaneDetails?.taskCount}
+          {pendingLaneDetails?.taskCount === 1 ? 'task' : 'tasks'} of
+          {pendingLaneDetails?.repoCount === 1 ? 'it' : 'them'} to the
+          {pendingLaneDetails?.laneName} lane, not just the card{pendingLaneDetails?.repoCount === 1
+            ? ''
+            : 's'} you clicked.
         </AlertDialog.Description>
       </AlertDialog.Header>
       <AlertDialog.Footer>
         <AlertDialog.Cancel disabled={laneMoveBusy}>Cancel</AlertDialog.Cancel>
         <Button onclick={confirmLaneMove} disabled={laneMoveBusy}>
-          {laneMoveBusy ? 'Moving…' : 'Move repo'}
+          {laneMoveBusy ? 'Moving…' : pendingLaneDetails?.repoCount === 1 ? 'Move repo' : 'Move repos'}
         </Button>
       </AlertDialog.Footer>
     </AlertDialog.Content>
