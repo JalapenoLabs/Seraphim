@@ -15,11 +15,12 @@
   import type { RuleRequest } from '$lib/api'
 
   import { onMount } from 'svelte'
-  import { Plus, Trash2, Zap } from '@lucide/svelte'
+  import { Info, Plus, Trash2, X, Zap } from '@lucide/svelte'
 
   import {
     createAutomationRule,
     deleteAutomationRule,
+    getSettings,
     listAutomationRules,
     updateAutomationRule
   } from '$lib/api'
@@ -47,6 +48,17 @@
 
   let rules = $state<RuleDraft[]>([])
   let loading = $state(true)
+
+  // Whether a GitHub webhook secret is configured. Without one, `Updated` /
+  // `Comment` rules never fire (only the realtime webhook path evaluates them);
+  // `Created` rules still fire from the poll sync (issue #229). Drives the notice
+  // below so an enabled rule never sits silently inert.
+  let githubWebhookConfigured = $state(true)
+  let webhookNoticeDismissed = $state(false)
+  const hasEnabledRules = $derived(rules.some((rule) => rule.enabled))
+  const showWebhookNotice = $derived(
+    hasEnabledRules && !githubWebhookConfigured && !webhookNoticeDismissed
+  )
 
   const FIELDS: { value: RuleField; label: string; placeholder: string; list: boolean }[] = [
     { value: 'labels', label: 'Labels', placeholder: 'automation, bug', list: true },
@@ -145,8 +157,9 @@
   async function load() {
     loading = true
     try {
-      const fetched = await listAutomationRules()
+      const [fetched, settings] = await Promise.all([listAutomationRules(), getSettings()])
       rules = fetched.map(toDraft)
+      githubWebhookConfigured = settings.github_webhook_secret_set
     } finally {
       loading = false
     }
@@ -208,14 +221,45 @@
         <Zap class="size-6 text-primary" /> Automation
       </h1>
       <p class="mt-1 max-w-2xl text-sm text-muted-foreground">
-        Rules react to issue events from the realtime webhooks. When an issue is created, updated, or
-        commented on and a rule's conditions match, its action runs, for example moving the card to
-        the top of To Do. Try: <em>labels has one of "automation, bug" AND author is exactly
+        Rules react to issue events and, on a match, run their action (for example moving the card to
+        the top of To Do). Try: <em>labels has one of "automation, bug" AND author is exactly
         navarrotech</em>, or a comment that contains "Jarvis, can you take this on?".
+        <strong>Created</strong> rules fire as issues sync onto the board, with or without a webhook;
+        <strong>Updated</strong> and <strong>Comment</strong> rules fire only from a configured GitHub
+        webhook.
       </p>
     </div>
     <Button onclick={addRule}><Plus class="size-4" /> New rule</Button>
   </header>
+
+  {#if showWebhookNotice}
+    <!-- Don't fail silently (issue #229): an enabled rule with no webhook secret
+         would leave Updated/Comment triggers inert. Created still works via the
+         poll, so this is informational, not alarming, and dismissible. -->
+    <div class="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+      <Info class="mt-0.5 size-5 flex-none text-amber-500" />
+      <div class="min-w-0 flex-1 space-y-1">
+        <p class="font-medium">No GitHub webhook is configured.</p>
+        <p class="text-muted-foreground">
+          <strong>Created</strong> rules still fire as issues sync onto the board, so they work now.
+          But <strong>Updated</strong> and <strong>Comment</strong> rules need a webhook: set a GitHub
+          webhook secret in <a class="underline" href="/settings">Settings</a>, then add a repo (or
+          org) webhook for the <em>Issues</em> and <em>Issue comments</em> events with that secret,
+          pointing at <code class="rounded bg-muted px-1">POST /api/v1/webhooks/github</code> on this
+          instance's Tailscale URL.
+        </p>
+      </div>
+      <button
+        type="button"
+        onclick={() => (webhookNoticeDismissed = true)}
+        title="Dismiss"
+        aria-label="Dismiss notice"
+        class="rounded-md p-1 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+      >
+        <X class="size-4" />
+      </button>
+    </div>
+  {/if}
 
   {#if loading}
     <p class="text-muted-foreground">Loading…</p>

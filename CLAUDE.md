@@ -191,9 +191,17 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   title/body/comment/state) matches, its action runs (move the card to top/bottom
   of To Do). The rule shape + the pure matcher live in `src/automation/`
   (unit-tested, I/O-free); firing lives in `orchestrator::run_github_automation`
-  (called from `http/webhooks.rs`). Source-agnostic (rules can target `any`), but
-  only GitHub events are wired so far; it's webhook-driven (the poll sync does not
-  fire rules, to avoid re-firing every cycle).
+  (called from `http/webhooks.rs` and the poll sync). Source-agnostic (rules can
+  target `any`), but only GitHub events are wired so far. The webhook is the
+  realtime path for all triggers; the poll sync is the reliable fallback for
+  `Created` rules (issue #229): when `upsert_github_issue` first inserts an issue
+  (it returns whether the issue was brand-new), `sync_repo_issues` fires `Created`
+  automation for it, exactly once on that first-insert transition, never re-firing
+  as the same issue is re-listed each poll. So `Created` rules work without any
+  webhook; `Updated` / `Comment` triggers remain webhook-only (poll-firing those
+  needs change detection). When an enabled rule exists but no GitHub webhook secret
+  is set, the Automation page shows a dismissible notice so a rule never sits
+  silently inert.
 
 ## How the agent runtime works (the workspace)
 

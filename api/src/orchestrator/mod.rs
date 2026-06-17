@@ -361,8 +361,29 @@ async fn sync_repo_issues(
     // the very top of Available (each new card is placed above the last).
     for issue in issues.into_iter().rev() {
         // Sync only ever lists open issues, so any issue we see here is open.
-        upsert_github_issue(state, repo.id, &issue, "open").await?;
+        let is_new = upsert_github_issue(state, repo.id, &issue, "open").await?;
         *changed = true;
+
+        // Fire `Created` automation on the poll path too, but only on the first
+        // insert of an issue (issue #229): without a webhook this is the only way a
+        // "created" rule ever runs, and the is-new guard keeps it to exactly once,
+        // never re-firing as the same issue is re-listed every poll. `Updated` /
+        // `Comment` triggers stay webhook-only (poll-firing those needs change
+        // detection), so this passes `Created` explicitly.
+        if is_new
+            && run_github_automation(
+                state,
+                repo,
+                &issue,
+                "open",
+                automation::Trigger::Created,
+                "",
+                "",
+            )
+            .await?
+        {
+            *changed = true;
+        }
     }
 
     // The open list can't reveal an issue closed outside Seraphim (it simply drops
@@ -462,7 +483,6 @@ pub async fn run_github_automation(
     state: &AppState,
     repo: &Repository,
     issue: &git::OpenIssue,
-    labels: &[String],
     issue_state: &str,
     trigger: automation::Trigger,
     comment: &str,
@@ -477,7 +497,7 @@ pub async fn run_github_automation(
         trigger,
         repo: &repo.full_name,
         author: &issue.author_login,
-        labels,
+        labels: &issue.labels,
         title: &issue.title,
         body: &issue.body,
         state: issue_state,
@@ -510,12 +530,16 @@ pub async fn run_github_automation(
 /// Available; an existing one only refreshes its cached fields, keeping its
 /// human-curated column and position. Shared by the poll sync and the realtime
 /// webhook so both place and dedupe issues identically.
+///
+/// Returns whether the issue was brand-new to the board (no task existed yet), so
+/// the poll path can fire `Created` automation exactly once, on first insert
+/// (issue #229).
 pub async fn upsert_github_issue(
     state: &AppState,
     repo_id: uuid::Uuid,
     issue: &git::OpenIssue,
     external_state: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let external_id = issue.number.to_string();
     let position = top_of_column_position(state, TaskColumn::Available).await?;
 
@@ -534,26 +558,20 @@ pub async fn upsert_github_issue(
     )
     .await?;
 
-    // Honor a route-planner placement, but only the first time the issue is brought
-    // in: an already-tracked card is curated by the operator and must not be moved,
-    // so we only consume the placement when no task exists yet. With no placement
-    // (the common case) this is one cheap query and the default upsert runs exactly
-    // as before. See `placement::resolve`.
-    let pending =
-        match queries::find_issue_task(&state.db, SourceKind::Github, Some(repo_id), &external_id)
+    // Whether the issue is brand-new to the board (no task yet). This both drives
+    // the route-planner placement below (an already-tracked card is operator-curated
+    // and must not be moved, so a placement is consumed only on first insert) and is
+    // returned so the poll path fires `Created` automation exactly once.
+    let is_new =
+        queries::find_issue_task(&state.db, SourceKind::Github, Some(repo_id), &external_id)
             .await?
-        {
-            Some(_) => None,
-            None => {
-                queries::take_pending_placement(
-                    &state.db,
-                    SourceKind::Github,
-                    Some(repo_id),
-                    &external_id,
-                )
-                .await?
-            }
-        };
+            .is_none();
+    let pending = if is_new {
+        queries::take_pending_placement(&state.db, SourceKind::Github, Some(repo_id), &external_id)
+            .await?
+    } else {
+        None
+    };
 
     match placement::resolve(pending.as_ref()) {
         placement::Placement::Default => {
@@ -597,7 +615,7 @@ pub async fn upsert_github_issue(
             .await?;
         }
     }
-    Ok(())
+    Ok(is_new)
 }
 
 /// Reflects an issue closed outside Seraphim by moving its tracked task to Done.
