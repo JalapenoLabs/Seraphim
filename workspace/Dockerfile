@@ -3,9 +3,9 @@
 # Based on Microsoft's universal devcontainer image: Python, Node (via nvm), Go,
 # Java, .NET, PHP, Ruby, plus version managers, out of the box. On top we add the
 # tools the agents need that it doesn't ship: Rust/Cargo, the Claude Code CLI, the
-# GitHub CLI, a Docker client, Earthly, and the org cloud CLIs (jira, doctl,
-# gcloud, wrangler, bunny). Work runs as the image's non-root `codespace` user;
-# the API drives it via `docker exec`, the container itself just idles.
+# GitHub CLI, a Docker client, Earthly, actionlint, and the org cloud CLIs (jira,
+# doctl, gcloud, wrangler, bunny). Work runs as the image's non-root `codespace`
+# user; the API drives it via `docker exec`, the container itself just idles.
 
 FROM mcr.microsoft.com/devcontainers/universal:latest
 
@@ -50,6 +50,18 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${
 RUN curl -fsSL https://github.com/earthly/earthly/releases/latest/download/earthly-linux-amd64 \
         -o /usr/local/bin/earthly \
     && chmod +x /usr/local/bin/earthly
+
+# --- actionlint (GitHub Actions workflow linter) -----------------------------
+# Lets the agent validate `.github/workflows/*.yml` locally (bad `${{ }}`
+# expressions, unknown contexts, shell mistakes) before pushing, instead of
+# fetching the release binary ad hoc each time (issue #220). Pinned, prebuilt
+# release tarball (the binary sits at the archive root), matching the gh/doctl
+# pattern above; no Go toolchain needed.
+ARG ACTIONLINT_VERSION=1.7.12
+RUN curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o /tmp/actionlint.tgz \
+    && tar -xzf /tmp/actionlint.tgz -C /tmp actionlint \
+    && install -m 0755 /tmp/actionlint /usr/local/bin/actionlint \
+    && rm -rf /tmp/actionlint*
 
 # --- Rust / Cargo (not in the universal image) -------------------------------
 # Installed system-wide so every user/shell finds it on PATH; the registry/cache
