@@ -3,9 +3,10 @@
 # Based on Microsoft's universal devcontainer image: Python, Node (via nvm), Go,
 # Java, .NET, PHP, Ruby, plus version managers, out of the box. On top we add the
 # tools the agents need that it doesn't ship: Rust/Cargo, the Claude Code CLI, the
-# GitHub CLI, a Docker client, Earthly, actionlint, and the org cloud CLIs (jira,
-# doctl, gcloud, wrangler, bunny). Work runs as the image's non-root `codespace`
-# user; the API drives it via `docker exec`, the container itself just idles.
+# GitHub CLI, a Docker client, Earthly, actionlint, the org cloud CLIs (jira,
+# doctl, gcloud, wrangler, bunny), and Playwright's Chromium for Plunder's e2e
+# suite. Work runs as the image's non-root `codespace` user; the API drives it
+# via `docker exec`, the container itself just idles.
 
 FROM mcr.microsoft.com/devcontainers/universal:latest
 
@@ -110,6 +111,26 @@ RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
     && for b in node npm npx corepack yarn pnpm claude wrangler bunny; do \
          [ -x "$node_dir/$b" ] && ln -sf "$node_dir/$b" "/usr/local/bin/$b"; \
        done; true
+
+# --- Playwright Chromium for Plunder's e2e suite (issue #215) -----------------
+# Plunder's `yarn test:e2e` drives headless Chromium through Playwright. Baking
+# the browser plus its OS libraries into the image lets an agent reproduce and fix
+# e2e failures on a fresh workspace immediately, instead of spending minutes on
+# `playwright install --with-deps chromium` every run (a ~114MB browser plus the
+# apt libs headless-shell needs, e.g. libatk-1.0.so.0, which otherwise fails to
+# launch with "error while loading shared libraries").
+#
+# Browsers live in a shared, world-readable path (the official Playwright-in-Docker
+# convention) and the matching env var is baked in, so Plunder's own Playwright
+# finds the baked build no matter which user runs it. Chromium builds are pinned to
+# a Playwright version, so we track the version Plunder uses; if Plunder later bumps
+# Playwright, only the small browser re-downloads on first run (into this writable
+# path), while the slow, root-only apt dependency step here always applies.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG PLAYWRIGHT_VERSION=1.61.0
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+    && chmod -R a+w /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 # --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest
