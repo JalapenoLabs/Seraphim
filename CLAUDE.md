@@ -296,6 +296,20 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    `POST /agent/questions` and `POST /agent/suggestions`; the exec injects
    `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL`. One task awaited to completion before
    the next (no overlap).
+   - **Stacked dependencies (issue #256):** a fresh ticket that depends on another
+     ticket whose PR is still open builds on a default branch that lacks that work.
+     A `Depends on:` marker in the ticket body (e.g. `Depends on: A1 (package
+     scaffold), #5`) is parsed (pure, unit-tested `orchestrator::dependencies`) and
+     each reference matched, by GitHub issue number or a title word-set match,
+     against the railway's in-flight tasks that have an open PR
+     (`queries::list_open_dependency_candidates`). Each matched dependency's PR
+     branch and its repos are surfaced in the fresh-work prompt
+     (`prompt::build` → "Stacked on unmerged dependencies"), which tells the agent
+     to `git merge origin/<dep-branch>` first and NOT re-implement that work. The
+     branch is still cut from the default branch (issue #256 option 2); merging the
+     dependency in is robust across a chain (A3 → A2 → A1, since A2's branch already
+     carries A1). When the dependency has merged it is no longer an open-PR
+     candidate, so the ticket builds from the default branch as before.
 3. **review** — gates each task on **all** of its pull requests. A task can span
    several repos (the agent opens a same-named branch + PR in each); every PR is
    tracked in `task_pull_requests` and the task only reaches **Done** once they

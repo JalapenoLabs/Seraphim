@@ -12,6 +12,7 @@
 mod availability;
 mod ci_watch;
 pub mod compose;
+mod dependencies;
 mod network;
 mod placement;
 mod prompt;
@@ -1408,6 +1409,78 @@ async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
     repos
 }
 
+/// Resolves the open (unmerged) dependency PR branches a fresh ticket should build
+/// on top of (issue #256).
+///
+/// Parses a `Depends on:` marker in the ticket body and matches each reference
+/// against the railway's in-flight tasks that have an open PR, returning each
+/// matched dependency's branch and the repos where it has an open PR (so the agent
+/// merges it into the right clones). A dependency that has since merged is no
+/// longer an open-PR candidate, so it drops out and the ticket builds from the
+/// default branch as before. Best-effort: a query failure is logged and yields no
+/// dependencies rather than failing the turn.
+async fn resolve_dependency_branches(
+    state: &AppState,
+    task: &Task,
+) -> Vec<prompt::DependencyBranch> {
+    let references = dependencies::parse_dependency_refs(&task.body_snapshot);
+    if references.is_empty() {
+        return Vec::new();
+    }
+    let candidates =
+        match queries::list_open_dependency_candidates(&state.db, task.railway_id, task.id).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "could not list dependency candidates");
+                return Vec::new();
+            }
+        };
+
+    let mut resolved = Vec::new();
+    for candidate in candidates {
+        let is_github = candidate.source_kind == SourceKind::Github;
+        let matched = references.iter().any(|reference| {
+            dependencies::reference_matches(
+                reference,
+                &candidate.title,
+                &candidate.external_id,
+                is_github,
+            )
+        });
+        if !matched {
+            continue;
+        }
+        // The repos where this dependency has an open PR, so the agent merges its
+        // branch into the right clones. Skip a candidate whose PRs can't be read,
+        // or that has no open PR left (it merged between the two queries).
+        let repos = match queries::list_task_prs(&state.db, candidate.id).await {
+            Ok(prs) => prs
+                .into_iter()
+                .filter(|pr| pr.pr_state == "open")
+                .map(|pr| pr.repo_full_name)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                warn!(error = %error, dep_task_id = %candidate.id, "could not list a dependency's PRs");
+                continue;
+            }
+        };
+        if repos.is_empty() {
+            continue;
+        }
+        info!(
+            task_id = %task.id,
+            dependency = %candidate.branch,
+            "stacking fresh ticket on an open dependency branch"
+        );
+        resolved.push(prompt::DependencyBranch {
+            title: candidate.title,
+            branch: candidate.branch,
+            repos,
+        });
+    }
+    resolved
+}
+
 /// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR. All execs
 /// target `handle`'s railway (its container + session).
 async fn work_fresh(
@@ -1471,7 +1544,19 @@ async fn work_fresh(
     } else {
         let comments = fetch_issue_comments(state, &repo, &task).await;
         let target_repos = load_target_repos(state, &task).await;
-        prompt::build(&settings, &repo, &task, &branch, &comments, &target_repos)
+        // Stack the ticket on any open (unmerged) dependency PR branches it names,
+        // so the agent merges them in rather than rediscovering and re-implementing
+        // them (issue #256).
+        let dependencies = resolve_dependency_branches(state, &task).await;
+        prompt::build(
+            &settings,
+            &repo,
+            &task,
+            &branch,
+            &comments,
+            &target_repos,
+            &dependencies,
+        )
     };
     let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
     persist_session(state, handle, &outcome).await?;
