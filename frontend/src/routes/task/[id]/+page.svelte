@@ -447,6 +447,9 @@
     if (event.type === 'ci') {
       return String(payload?.text ?? '')
     }
+    if (event.type === 'lifecycle') {
+      return lifecycleText(payload)
+    }
     return JSON.stringify(event.payload)
   }
 
@@ -461,6 +464,43 @@
         return 'text-success'
       default:
         return 'text-info'
+    }
+  }
+
+  // A deterministic PR/issue lifecycle line (#226). The repo is named
+  // (`repo#number`) only when the backend marked the task multi-repo (empty
+  // `repo` otherwise); the issue line already carries its number.
+  function lifecycleText(payload: Record<string, unknown>): string {
+    const action = String(payload?.action ?? '')
+    const repo = String(payload?.repo ?? '')
+    const number = payload?.number
+    const title = String(payload?.title ?? '')
+    switch (action) {
+      case 'pr_opened':
+        return `${repo ? `${repo}#${number} ` : ''}PR opened: ${title}`
+      case 'pr_merged':
+        return `${repo ? `${repo}#${number} ` : ''}PR merged: ${title}`
+      case 'pr_closed':
+        return `${repo ? `${repo}#${number} ` : ''}PR closed: ${title}`
+      case 'issue_closed':
+        return `${repo ? `${repo} ` : ''}Issue closed: #${number}`
+      default:
+        return JSON.stringify(payload)
+    }
+  }
+
+  // Lifecycle dot color follows the action: merge / issue-closed-on-done is
+  // progress (green), a PR closed without merging is an abandonment (red), and an
+  // opened PR is the neutral primary.
+  function lifecycleColor(payload: Record<string, unknown>): string {
+    switch (payload?.action) {
+      case 'pr_merged':
+      case 'issue_closed':
+        return 'text-success'
+      case 'pr_closed':
+        return 'text-destructive'
+      default:
+        return 'text-primary'
     }
   }
 
@@ -845,6 +885,16 @@
                         <div class="min-w-0 flex-1"><AnsiLog text={ciPayload.log} isError /></div>
                       </div>
                     {/if}
+                  </div>
+                {:else if event.type === 'lifecycle'}
+                  <!-- A deterministic PR/issue lifecycle moment (#226): a colored
+                       dot (green merged / red closed / primary opened) + the line. -->
+                  {@const lifecyclePayload = event.payload as Record<string, unknown>}
+                  <div class="flex items-start gap-2 py-0.5">
+                    <span class="w-[1ch] flex-none {lifecycleColor(lifecyclePayload)}">⬢</span>
+                    <span class="min-w-0 flex-1 whitespace-pre-wrap break-words {lifecycleColor(lifecyclePayload)}"
+                      >{describe(event)}</span
+                    >
                   </div>
                 {:else if collapsible}
                   <button

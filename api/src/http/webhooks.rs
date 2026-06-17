@@ -123,7 +123,6 @@ async fn apply_github_event(state: &AppState, event: GithubIssueEvent) -> Result
         });
 
     let open_issue = event.issue.to_open_issue();
-    let labels = event.issue.label_names();
     let mut changed = false;
 
     if event.issue.state == "open" && matches_labels {
@@ -155,17 +154,8 @@ async fn apply_github_event(state: &AppState, event: GithubIssueEvent) -> Result
         } else {
             automation::Trigger::Updated
         };
-        if orchestrator::run_github_automation(
-            state,
-            &repo,
-            &open_issue,
-            &labels,
-            "open",
-            trigger,
-            "",
-            "",
-        )
-        .await?
+        if orchestrator::run_github_automation(state, &repo, &open_issue, "open", trigger, "", "")
+            .await?
         {
             changed = true;
         }
@@ -191,12 +181,10 @@ async fn apply_github_comment_event(state: &AppState, event: GithubCommentEvent)
     }
 
     let open_issue = event.issue.to_open_issue();
-    let labels = event.issue.label_names();
     orchestrator::run_github_automation(
         state,
         &repo,
         &open_issue,
-        &labels,
         "open",
         automation::Trigger::Comment,
         event.comment.body.as_deref().unwrap_or(""),
@@ -235,11 +223,8 @@ impl GithubIssue {
             url: self.html_url.clone(),
             author_login: self.user.login.clone(),
             author_avatar_url: self.user.avatar_url.clone(),
+            labels: self.labels.iter().map(|label| label.name.clone()).collect(),
         }
-    }
-
-    fn label_names(&self) -> Vec<String> {
-        self.labels.iter().map(|label| label.name.clone()).collect()
     }
 }
 

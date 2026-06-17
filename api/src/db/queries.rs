@@ -12,11 +12,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, EnvSuggestion, EnvVar,
-    EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel,
-    PendingPlacement, PendingQuestion, Question, QuestionOption, QuestionStatus, Railway,
-    RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings, SourceKind,
-    StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
+    AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, DependencyCandidate,
+    EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment,
+    NetworkAccessLevel, PendingPlacement, PendingQuestion, Question, QuestionOption,
+    QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings,
+    SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -1903,7 +1903,8 @@ pub async fn set_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> sql
 pub async fn reclaim_orphaned_tasks(pool: &PgPool) -> sqlx::Result<u64> {
     let result = sqlx::query(
         "UPDATE tasks SET board_column = 'todo', status = 'queued', error = NULL, \
-         ci_fix_attempts = 0, updated_at = now() WHERE board_column = 'in_progress'",
+         ci_fix_attempts = 0, review_fix_attempts = 0, updated_at = now() \
+         WHERE board_column = 'in_progress'",
     )
     .execute(pool)
     .await?;
@@ -1998,11 +1999,41 @@ pub async fn pick_next_merge_conflict(
     .await
 }
 
+/// The next PR whose unresolved review comments the agent should address: top of
+/// `In Review` flagged `addressing_review`, not on hold.
+///
+/// Like [`pick_next_ci_fix`] this re-engages an existing PR, so it takes priority
+/// over fresh To Do work; placed after CI fixes and conflict resolution since a
+/// red or unmergeable PR is the more urgent block.
+pub async fn pick_next_review_address(
+    pool: &PgPool,
+    railway_id: Uuid,
+) -> sqlx::Result<Option<Task>> {
+    sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE board_column = 'in_review' AND status = 'addressing_review' \
+         AND hold = FALSE AND railway_id = $1 ORDER BY position ASC LIMIT 1",
+    )
+    .bind(railway_id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Increments a task's CI-fix attempt counter, returning the new count.
 pub async fn bump_ci_fix_attempt(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {
     sqlx::query_scalar(
         "UPDATE tasks SET ci_fix_attempts = ci_fix_attempts + 1, last_activity_at = now(), \
          updated_at = now() WHERE id = $1 RETURNING ci_fix_attempts",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Increments a task's review-address attempt counter, returning the new count.
+pub async fn bump_review_fix_attempt(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {
+    sqlx::query_scalar(
+        "UPDATE tasks SET review_fix_attempts = review_fix_attempts + 1, last_activity_at = now(), \
+         updated_at = now() WHERE id = $1 RETURNING review_fix_attempts",
     )
     .bind(id)
     .fetch_one(pool)
@@ -2072,6 +2103,24 @@ pub async fn flag_merge_conflict(pool: &PgPool, id: Uuid, note: &str) -> sqlx::R
     .await
 }
 
+/// Flags a green, (auto-)approved PR that still has unresolved review threads for
+/// the agent to address before the merge. The card keeps its `in_review` lane and
+/// PR; only the status changes so the agent picks it up proactively.
+///
+/// Like [`flag_merge_conflict`] this does not set `finished_at` (the task is not
+/// finished, just handed back). It clears `error` because this is a normal step,
+/// not a failure, so a stale CI/conflict note doesn't linger on the card.
+pub async fn flag_review_addressing(pool: &PgPool, id: Uuid) -> sqlx::Result<Task> {
+    sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET status = $2, error = NULL, last_activity_at = now(), updated_at = now() \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(TaskStatus::AddressingReview)
+    .fetch_one(pool)
+    .await
+}
+
 /// Records the branch and session a task is being worked under, and stamps it
 /// as started.
 pub async fn mark_task_started(
@@ -2098,6 +2147,28 @@ pub async fn set_task_pr(pool: &PgPool, id: Uuid, pr_url: &str) -> sqlx::Result<
     .bind(id)
     .bind(pr_url)
     .fetch_one(pool)
+    .await
+}
+
+/// In-flight tasks on a railway that have at least one open PR and a branch, as
+/// candidate dependencies for a new ticket (issue #256). Excludes `exclude_id`
+/// (the ticket being started). One row per task (a task with several open PRs
+/// collapses to one). The caller matches the new ticket's `Depends on:`
+/// references against these and resolves the matches to their PR branches.
+pub async fn list_open_dependency_candidates(
+    pool: &PgPool,
+    railway_id: Uuid,
+    exclude_id: Uuid,
+) -> sqlx::Result<Vec<DependencyCandidate>> {
+    sqlx::query_as::<_, DependencyCandidate>(
+        "SELECT DISTINCT t.id, t.source_kind, t.external_id, t.title, t.branch \
+         FROM tasks t \
+         JOIN task_pull_requests p ON p.task_id = t.id AND p.pr_state = 'open' \
+         WHERE t.railway_id = $1 AND t.id <> $2 AND t.branch IS NOT NULL",
+    )
+    .bind(railway_id)
+    .bind(exclude_id)
+    .fetch_all(pool)
     .await
 }
 

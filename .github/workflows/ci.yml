@@ -115,6 +115,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: yarn check
 
+      # Vitest unit tests (issue #212): pure-logic regressions (e.g. the runewood
+      # event mapper) are gated in CI, not just the type-check + build.
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: yarn test
+
       - name: Build
         if: ${{ !cancelled() }}
         run: yarn build

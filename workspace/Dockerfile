@@ -3,9 +3,10 @@
 # Based on Microsoft's universal devcontainer image: Python, Node (via nvm), Go,
 # Java, .NET, PHP, Ruby, plus version managers, out of the box. On top we add the
 # tools the agents need that it doesn't ship: Rust/Cargo, the Claude Code CLI, the
-# GitHub CLI, a Docker client, Earthly, and the org cloud CLIs (jira, doctl,
-# gcloud, wrangler, bunny). Work runs as the image's non-root `codespace` user;
-# the API drives it via `docker exec`, the container itself just idles.
+# GitHub CLI, a Docker client, Earthly, actionlint, the org cloud CLIs (jira,
+# doctl, gcloud, wrangler, bunny), and Playwright's Chromium for Plunder's e2e
+# suite. Work runs as the image's non-root `codespace` user; the API drives it
+# via `docker exec`, the container itself just idles.
 
 FROM mcr.microsoft.com/devcontainers/universal:latest
 
@@ -50,6 +51,28 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${
 RUN curl -fsSL https://github.com/earthly/earthly/releases/latest/download/earthly-linux-amd64 \
         -o /usr/local/bin/earthly \
     && chmod +x /usr/local/bin/earthly
+
+# --- actionlint (GitHub Actions workflow linter) -----------------------------
+# Lets the agent validate `.github/workflows/*.yml` locally (bad `${{ }}`
+# expressions, unknown contexts, shell mistakes) before pushing, instead of
+# fetching the release binary ad hoc each time (issues #220, #252). Pinned,
+# prebuilt release tarball (the binary sits at the archive root), matching the
+# gh/doctl pattern above; no Go toolchain needed.
+ARG ACTIONLINT_VERSION=1.7.12
+RUN curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o /tmp/actionlint.tgz \
+    && tar -xzf /tmp/actionlint.tgz -C /tmp actionlint \
+    && install -m 0755 /tmp/actionlint /usr/local/bin/actionlint \
+    && rm -rf /tmp/actionlint*
+
+# Verification gate (issue #252): #220 installed actionlint but it was reported
+# unresolvable on PATH in the running container, and the ticket closed without
+# this check. Fail the BUILD here unless `actionlint --version` resolves both for
+# root (the default `docker exec` user) and for the `codespace` agent user in a
+# login shell, the exact context of the acceptance check
+# (`docker exec seraphim-workspace bash -lc 'actionlint --version'`). A binary
+# that lands off PATH can no longer ship silently.
+RUN actionlint --version \
+    && runuser -l codespace -c 'actionlint --version'
 
 # --- Rust / Cargo (not in the universal image) -------------------------------
 # Installed system-wide so every user/shell finds it on PATH; the registry/cache
@@ -98,6 +121,26 @@ RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
     && for b in node npm npx corepack yarn pnpm claude wrangler bunny; do \
          [ -x "$node_dir/$b" ] && ln -sf "$node_dir/$b" "/usr/local/bin/$b"; \
        done; true
+
+# --- Playwright Chromium for Plunder's e2e suite (issue #215) -----------------
+# Plunder's `yarn test:e2e` drives headless Chromium through Playwright. Baking
+# the browser plus its OS libraries into the image lets an agent reproduce and fix
+# e2e failures on a fresh workspace immediately, instead of spending minutes on
+# `playwright install --with-deps chromium` every run (a ~114MB browser plus the
+# apt libs headless-shell needs, e.g. libatk-1.0.so.0, which otherwise fails to
+# launch with "error while loading shared libraries").
+#
+# Browsers live in a shared, world-readable path (the official Playwright-in-Docker
+# convention) and the matching env var is baked in, so Plunder's own Playwright
+# finds the baked build no matter which user runs it. Chromium builds are pinned to
+# a Playwright version, so we track the version Plunder uses; if Plunder later bumps
+# Playwright, only the small browser re-downloads on first run (into this writable
+# path), while the slow, root-only apt dependency step here always applies.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG PLAYWRIGHT_VERSION=1.61.0
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+    && chmod -R a+w /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 # --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest

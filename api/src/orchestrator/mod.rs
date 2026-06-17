@@ -12,6 +12,7 @@
 mod availability;
 mod ci_watch;
 pub mod compose;
+mod dependencies;
 mod network;
 mod placement;
 mod prompt;
@@ -35,6 +36,7 @@ pub async fn provision_workspace(state: &AppState) -> Result<()> {
     provision::provision_workspace(state, &main).await
 }
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -94,6 +96,11 @@ const PR_DETECT_GRACE: Duration = Duration::from_secs(15 * 60);
 /// for a human. Bounds thrash when a failure is unfixable or out of scope.
 const MAX_CI_FIX_ATTEMPTS: i32 = 3;
 
+/// How many turns the agent spends addressing a PR's review comments before the
+/// merge proceeds regardless. Bounds thrash when a reviewer thread is one the
+/// agent can't (or won't) resolve, so the queue never stalls on it.
+const MAX_REVIEW_FIX_ATTEMPTS: i32 = 3;
+
 /// How long a blocked PR rests before the idle agent circles back to retry it,
 /// so a genuinely stuck PR is revisited periodically rather than in a tight loop.
 const REVISIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
@@ -149,6 +156,9 @@ enum WorkMode {
     /// A PR whose auto-merge failed on a conflict: re-engage to merge the base in
     /// and resolve it, then let the review loop re-merge.
     ResolveConflict,
+    /// A green, (auto-)approved PR with unresolved review threads: re-engage to
+    /// address the comments (push fixes, reply, resolve) before the merge.
+    AddressReview,
     /// A PR the agent gave up on (CI or merge conflict), retried while idle.
     Revisit,
 }
@@ -360,8 +370,29 @@ async fn sync_repo_issues(
     // the very top of Available (each new card is placed above the last).
     for issue in issues.into_iter().rev() {
         // Sync only ever lists open issues, so any issue we see here is open.
-        upsert_github_issue(state, repo.id, &issue, "open").await?;
+        let is_new = upsert_github_issue(state, repo.id, &issue, "open").await?;
         *changed = true;
+
+        // Fire `Created` automation on the poll path too, but only on the first
+        // insert of an issue (issue #229): without a webhook this is the only way a
+        // "created" rule ever runs, and the is-new guard keeps it to exactly once,
+        // never re-firing as the same issue is re-listed every poll. `Updated` /
+        // `Comment` triggers stay webhook-only (poll-firing those needs change
+        // detection), so this passes `Created` explicitly.
+        if is_new
+            && run_github_automation(
+                state,
+                repo,
+                &issue,
+                "open",
+                automation::Trigger::Created,
+                "",
+                "",
+            )
+            .await?
+        {
+            *changed = true;
+        }
     }
 
     // The open list can't reveal an issue closed outside Seraphim (it simply drops
@@ -461,7 +492,6 @@ pub async fn run_github_automation(
     state: &AppState,
     repo: &Repository,
     issue: &git::OpenIssue,
-    labels: &[String],
     issue_state: &str,
     trigger: automation::Trigger,
     comment: &str,
@@ -476,7 +506,7 @@ pub async fn run_github_automation(
         trigger,
         repo: &repo.full_name,
         author: &issue.author_login,
-        labels,
+        labels: &issue.labels,
         title: &issue.title,
         body: &issue.body,
         state: issue_state,
@@ -509,12 +539,16 @@ pub async fn run_github_automation(
 /// Available; an existing one only refreshes its cached fields, keeping its
 /// human-curated column and position. Shared by the poll sync and the realtime
 /// webhook so both place and dedupe issues identically.
+///
+/// Returns whether the issue was brand-new to the board (no task existed yet), so
+/// the poll path can fire `Created` automation exactly once, on first insert
+/// (issue #229).
 pub async fn upsert_github_issue(
     state: &AppState,
     repo_id: uuid::Uuid,
     issue: &git::OpenIssue,
     external_state: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let external_id = issue.number.to_string();
     let position = top_of_column_position(state, TaskColumn::Available).await?;
 
@@ -533,26 +567,20 @@ pub async fn upsert_github_issue(
     )
     .await?;
 
-    // Honor a route-planner placement, but only the first time the issue is brought
-    // in: an already-tracked card is curated by the operator and must not be moved,
-    // so we only consume the placement when no task exists yet. With no placement
-    // (the common case) this is one cheap query and the default upsert runs exactly
-    // as before. See `placement::resolve`.
-    let pending =
-        match queries::find_issue_task(&state.db, SourceKind::Github, Some(repo_id), &external_id)
+    // Whether the issue is brand-new to the board (no task yet). This both drives
+    // the route-planner placement below (an already-tracked card is operator-curated
+    // and must not be moved, so a placement is consumed only on first insert) and is
+    // returned so the poll path fires `Created` automation exactly once.
+    let is_new =
+        queries::find_issue_task(&state.db, SourceKind::Github, Some(repo_id), &external_id)
             .await?
-        {
-            Some(_) => None,
-            None => {
-                queries::take_pending_placement(
-                    &state.db,
-                    SourceKind::Github,
-                    Some(repo_id),
-                    &external_id,
-                )
-                .await?
-            }
-        };
+            .is_none();
+    let pending = if is_new {
+        queries::take_pending_placement(&state.db, SourceKind::Github, Some(repo_id), &external_id)
+            .await?
+    } else {
+        None
+    };
 
     match placement::resolve(pending.as_ref()) {
         placement::Placement::Default => {
@@ -596,7 +624,7 @@ pub async fn upsert_github_issue(
             .await?;
         }
     }
-    Ok(())
+    Ok(is_new)
 }
 
 /// Reflects an issue closed outside Seraphim by moving its tracked task to Done.
@@ -1121,6 +1149,41 @@ async fn reset_github_side(
                     Ok(()) => {
                         summary.pr_closed = true;
                         info!(task_id = %task.id, pr = pull.number, "reset: closed the pull request");
+
+                        // Surface the close once (#226) and consume the tracked row by
+                        // marking it closed, so the review loop's refresh never
+                        // re-announces this same closure if the task is re-worked later.
+                        let multi = task_is_multi_repo(state, task.id).await;
+                        let number = i64::try_from(pull.number).unwrap_or_default();
+                        if let Err(error) = queries::upsert_task_pr(
+                            &state.db,
+                            task.id,
+                            Some(repo.id),
+                            &repo.full_name,
+                            number,
+                            &pull.html_url,
+                            &pull.head_sha,
+                            "",
+                            "closed",
+                        )
+                        .await
+                        {
+                            warn!(error = %error, task_id = %task.id, "reset: failed to mark the PR closed");
+                        }
+                        if let Err(error) = emit_lifecycle_event(
+                            state,
+                            task.id,
+                            "pr_closed",
+                            &pull.title,
+                            &pull.html_url,
+                            short_repo_name(&repo.full_name),
+                            number,
+                            multi,
+                        )
+                        .await
+                        {
+                            warn!(error = %error, task_id = %task.id, "reset: failed to emit pr_closed lifecycle event");
+                        }
                     }
                     Err(error) => {
                         warn!(error = %error, task_id = %task.id, "reset: failed to close the pull request");
@@ -1292,6 +1355,13 @@ async fn next_actionable_task(
     if let Some(task) = queries::pick_next_merge_conflict(&state.db, railway.id).await? {
         return Ok(Some((task, WorkMode::ResolveConflict)));
     }
+    // Addressing a green PR's review comments also re-engages an existing PR, so
+    // it takes priority over fresh work (but sits below CI and conflict fixes,
+    // which unblock a red or unmergeable PR). The review loop flagged it once the
+    // PR was green with unresolved threads.
+    if let Some(task) = queries::pick_next_review_address(&state.db, railway.id).await? {
+        return Ok(Some((task, WorkMode::AddressReview)));
+    }
     // A blocking task in progress (being worked or parked waiting for input)
     // serializes this railway's queue: pull no new To Do work until it finishes.
     // Resumes and CI fixes above continue existing in-flight work and are not gated.
@@ -1330,9 +1400,10 @@ async fn work_task(
         WorkMode::Resume => work_fresh(state, handle, task, true).await,
         // Every "re-engage on an existing PR" mode shares one flow; the mode only
         // chooses the prompt and whether the attempt budget is reset.
-        WorkMode::FixCi | WorkMode::ResolveConflict | WorkMode::Revisit => {
-            work_pr_fix(state, handle, task, mode).await
-        }
+        WorkMode::FixCi
+        | WorkMode::ResolveConflict
+        | WorkMode::AddressReview
+        | WorkMode::Revisit => work_pr_fix(state, handle, task, mode).await,
     }
 }
 
@@ -1352,6 +1423,78 @@ async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
         }
     }
     repos
+}
+
+/// Resolves the open (unmerged) dependency PR branches a fresh ticket should build
+/// on top of (issue #256).
+///
+/// Parses a `Depends on:` marker in the ticket body and matches each reference
+/// against the railway's in-flight tasks that have an open PR, returning each
+/// matched dependency's branch and the repos where it has an open PR (so the agent
+/// merges it into the right clones). A dependency that has since merged is no
+/// longer an open-PR candidate, so it drops out and the ticket builds from the
+/// default branch as before. Best-effort: a query failure is logged and yields no
+/// dependencies rather than failing the turn.
+async fn resolve_dependency_branches(
+    state: &AppState,
+    task: &Task,
+) -> Vec<prompt::DependencyBranch> {
+    let references = dependencies::parse_dependency_refs(&task.body_snapshot);
+    if references.is_empty() {
+        return Vec::new();
+    }
+    let candidates =
+        match queries::list_open_dependency_candidates(&state.db, task.railway_id, task.id).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "could not list dependency candidates");
+                return Vec::new();
+            }
+        };
+
+    let mut resolved = Vec::new();
+    for candidate in candidates {
+        let is_github = candidate.source_kind == SourceKind::Github;
+        let matched = references.iter().any(|reference| {
+            dependencies::reference_matches(
+                reference,
+                &candidate.title,
+                &candidate.external_id,
+                is_github,
+            )
+        });
+        if !matched {
+            continue;
+        }
+        // The repos where this dependency has an open PR, so the agent merges its
+        // branch into the right clones. Skip a candidate whose PRs can't be read,
+        // or that has no open PR left (it merged between the two queries).
+        let repos = match queries::list_task_prs(&state.db, candidate.id).await {
+            Ok(prs) => prs
+                .into_iter()
+                .filter(|pr| pr.pr_state == "open")
+                .map(|pr| pr.repo_full_name)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                warn!(error = %error, dep_task_id = %candidate.id, "could not list a dependency's PRs");
+                continue;
+            }
+        };
+        if repos.is_empty() {
+            continue;
+        }
+        info!(
+            task_id = %task.id,
+            dependency = %candidate.branch,
+            "stacking fresh ticket on an open dependency branch"
+        );
+        resolved.push(prompt::DependencyBranch {
+            title: candidate.title,
+            branch: candidate.branch,
+            repos,
+        });
+    }
+    resolved
 }
 
 /// Runs a fresh issue end to end: prepare repo, drive Claude, detect PR. All execs
@@ -1417,7 +1560,19 @@ async fn work_fresh(
     } else {
         let comments = fetch_issue_comments(state, &repo, &task).await;
         let target_repos = load_target_repos(state, &task).await;
-        prompt::build(&settings, &repo, &task, &branch, &comments, &target_repos)
+        // Stack the ticket on any open (unmerged) dependency PR branches it names,
+        // so the agent merges them in rather than rediscovering and re-implementing
+        // them (issue #256).
+        let dependencies = resolve_dependency_branches(state, &task).await;
+        prompt::build(
+            &settings,
+            &repo,
+            &task,
+            &branch,
+            &comments,
+            &target_repos,
+            &dependencies,
+        )
     };
     let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
     persist_session(state, handle, &outcome).await?;
@@ -1581,6 +1736,13 @@ async fn work_pr_fix(
             task.error.as_deref().unwrap_or_default(),
             &comments,
         ),
+        WorkMode::AddressReview => {
+            // Gather the unresolved review threads across the task's PRs so the
+            // prompt lists each one (best-effort; an empty list falls back to a
+            // "inspect them yourself" note in the builder).
+            let threads = collect_unresolved_review_threads(state, &github, &task).await;
+            prompt::build_address_review(&settings, &repo, &task, &branch, &threads, &comments)
+        }
         WorkMode::Revisit => prompt::build_revisit(
             &settings,
             &repo,
@@ -1589,12 +1751,18 @@ async fn work_pr_fix(
             task.error.as_deref().unwrap_or_default(),
             &comments,
         ),
-        // work_task only routes the three PR-fix modes here.
+        // work_task only routes the PR-fix modes here.
         WorkMode::Fresh | WorkMode::Resume => {
             unreachable!("work_pr_fix is only called for PR-fix modes")
         }
     };
-    let attempt = queries::bump_ci_fix_attempt(&state.db, task.id).await?;
+    // Review addressing has its own attempt budget; the CI/conflict/revisit modes
+    // share the CI-fix counter.
+    let attempt = if mode == WorkMode::AddressReview {
+        queries::bump_review_fix_attempt(&state.db, task.id).await?
+    } else {
+        queries::bump_ci_fix_attempt(&state.db, task.id).await?
+    };
     let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
     persist_session(state, handle, &outcome).await?;
     // A hard reset during the turn owns this task now; yield to it.
@@ -1613,6 +1781,18 @@ async fn work_pr_fix(
     }
     if let Some(message) = outcome.error {
         return fail(state, &task, &message).await;
+    }
+
+    // Review addressing is best-effort and must never stall the queue: whether or
+    // not the agent pushed a commit (a comment may only warrant a reply, or be one
+    // it declines), return to review. The review loop re-checks the threads and,
+    // once they are resolved or the budget is spent, proceeds to merge.
+    if mode == WorkMode::AddressReview {
+        queries::move_task(&state.db, task.id, TaskColumn::InReview, task.position).await?;
+        queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview).await?;
+        state.notify_board();
+        info!(task_id = %task.id, attempt, "addressed review comments; awaiting re-check");
+        return Ok(());
     }
 
     // A pushed commit moves a tip in some repo; nothing pushed in any means the
@@ -2104,10 +2284,21 @@ async fn review_task(
     for pr in &prs {
         let auto_merge =
             pr_repo_policy(state, settings, pr).await? == ReviewPolicy::AutoSquashMerge;
-        views.push(pr_review_of(pr, auto_merge));
+        // Only a green, open PR is a candidate for addressing review comments. For
+        // any other state CI handling or the merge takes priority anyway, so skip
+        // the extra GraphQL lookup.
+        let unresolved_review = if pr.pr_state == "open" && pr.ci_state == "passing" {
+            pr_has_unresolved_review_threads(github, pr).await
+        } else {
+            false
+        };
+        views.push(pr_review_of(pr, auto_merge, unresolved_review));
     }
 
-    match review::decide(&views) {
+    // Once the attempt budget is spent, unresolved threads no longer block the
+    // merge, so a thread the agent can't resolve can't stall the task forever.
+    let review_attempts_remaining = task.review_fix_attempts < MAX_REVIEW_FIX_ATTEMPTS;
+    match review::decide(&views, review_attempts_remaining) {
         // Still settling (CI pending, or no actionable PR this tick): re-check next.
         ReviewDecision::Wait => {}
         // Open, passing PRs remain that need a human to merge; keep awaiting. Only
@@ -2121,6 +2312,9 @@ async fn review_task(
         }
         // A failing PR: hand back to the agent (or block once the cap is hit).
         ReviewDecision::Fix => handle_ci_failing(state, github, task, &prs).await?,
+        // A green PR with unresolved review threads: hand back to the agent to
+        // address the comments before the merge.
+        ReviewDecision::AddressReview => handle_review_addressing(state, task).await?,
         // Merge the green, auto-merge PRs now; the next tick finishes once all are.
         ReviewDecision::Merge(indices) => {
             merge_task_prs(state, github, task, &prs, &indices).await?;
@@ -2137,7 +2331,7 @@ async fn review_task(
             if let Some(repo_id) = task.repo_id {
                 if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
                     if let Ok((owner, name)) = split_full_name(&repo.full_name) {
-                        close_linked_issue(github, settings, task, owner, name).await;
+                        close_linked_issue(state, github, settings, task, owner, name).await;
                     }
                 }
             }
@@ -2185,6 +2379,31 @@ async fn merge_task_prs(
                 )
                 .await?;
                 info!(task_id = %task.id, pr = %pr.pr_url, "auto-merged a PR");
+
+                // Surface the merge in the activity feed and the task's history (#226).
+                // The PR title is not stored on the row, so read it back (a rare path,
+                // one GET per merged PR); a lookup failure just drops the title.
+                let multi = prs
+                    .iter()
+                    .map(|other| other.repo_full_name.as_str())
+                    .collect::<HashSet<_>>()
+                    .len()
+                    > 1;
+                let title = git::pr_status(github, owner, name, number)
+                    .await
+                    .map(|status| status.title)
+                    .unwrap_or_default();
+                emit_lifecycle_event(
+                    state,
+                    task.id,
+                    "pr_merged",
+                    &title,
+                    &pr.pr_url,
+                    short_repo_name(&pr.repo_full_name),
+                    pr.pr_number,
+                    multi,
+                )
+                .await?;
             }
             Err(error) => {
                 if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
@@ -2284,7 +2503,19 @@ async fn detect_task_prs(
     let Some(branch) = task.branch.as_deref() else {
         return Ok(0);
     };
+
+    // The PRs already tracked before this pass, so we announce "PR opened" only for
+    // genuinely new ones (#226). Detection runs repeatedly (the In Review transition
+    // plus the review loop's re-detect while awaiting), so the existing-row guard is
+    // what keeps each PR's opened line to exactly once, surviving process restarts.
+    let known: HashSet<(String, i64)> = queries::list_task_prs(&state.db, task.id)
+        .await?
+        .into_iter()
+        .map(|pr| (pr.repo_full_name, pr.pr_number))
+        .collect();
+
     let mut found = 0;
+    let mut opened: Vec<(String, String, i64, String)> = Vec::new();
     for repo in queries::list_repositories(&state.db)
         .await?
         .into_iter()
@@ -2296,13 +2527,14 @@ async fn detect_task_prs(
         let Some(pull) = git::find_open_pr_for_branch(github, owner, name, branch).await? else {
             continue;
         };
+        let number = i64::try_from(pull.number).unwrap_or_default();
         let ci = ci_state_label(&git::ci_status(github, owner, name, &pull.head_sha).await?);
         queries::upsert_task_pr(
             &state.db,
             task.id,
             Some(repo.id),
             &repo.full_name,
-            i64::try_from(pull.number).unwrap_or_default(),
+            number,
             &pull.html_url,
             &pull.head_sha,
             ci,
@@ -2310,6 +2542,33 @@ async fn detect_task_prs(
         )
         .await?;
         found += 1;
+        if !known.contains(&(repo.full_name.clone(), number)) {
+            opened.push((
+                repo.full_name.clone(),
+                pull.title.clone(),
+                number,
+                pull.html_url,
+            ));
+        }
+    }
+
+    // Announce each newly detected PR once the full set is known, so the multi-repo
+    // tag reflects the whole task rather than detection order.
+    if !opened.is_empty() {
+        let multi = task_is_multi_repo(state, task.id).await;
+        for (full_name, title, number, url) in opened {
+            emit_lifecycle_event(
+                state,
+                task.id,
+                "pr_opened",
+                &title,
+                &url,
+                short_repo_name(&full_name),
+                number,
+                multi,
+            )
+            .await?;
+        }
     }
     Ok(found)
 }
@@ -2336,6 +2595,9 @@ async fn refresh_task_prs(
     github: &octocrab::Octocrab,
     task: &Task,
 ) -> Result<Vec<TaskPullRequest>> {
+    // Whether this task spans more than one repo, so a settled-PR line names the
+    // repo (#226). Computed once; the PR set is stable across this refresh.
+    let multi = task_is_multi_repo(state, task.id).await;
     for pr in queries::list_task_prs(&state.db, task.id).await? {
         if pr.pr_state != "open" {
             continue; // merged/closed PRs are settled.
@@ -2366,6 +2628,28 @@ async fn refresh_task_prs(
             pr_state,
         )
         .await?;
+
+        // A PR that settled outside Seraphim (it was open in our DB until this poll)
+        // gets one lifecycle line on the transition. Our own squash-merge marks the
+        // row "merged" before this runs, so it is skipped above and never doubled.
+        let action = match status.lifecycle {
+            git::PrLifecycle::Merged => Some("pr_merged"),
+            git::PrLifecycle::Closed => Some("pr_closed"),
+            git::PrLifecycle::Open => None,
+        };
+        if let Some(action) = action {
+            emit_lifecycle_event(
+                state,
+                task.id,
+                action,
+                &status.title,
+                &pr.pr_url,
+                short_repo_name(&pr.repo_full_name),
+                pr.pr_number,
+                multi,
+            )
+            .await?;
+        }
     }
     Ok(queries::list_task_prs(&state.db, task.id).await?)
 }
@@ -2386,8 +2670,10 @@ async fn pr_repo_policy(
     Ok(policy.unwrap_or(settings.default_review_policy))
 }
 
-/// Maps a stored PR row to the pure review view.
-fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool) -> PrReview {
+/// Maps a stored PR row to the pure review view. `unresolved_review` is whether
+/// the open PR still carries unresolved review threads to address (only computed,
+/// and only meaningful, for a green open PR).
+fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool, unresolved_review: bool) -> PrReview {
     match pr.pr_state.as_str() {
         "merged" => PrReview::Merged,
         "closed" => PrReview::Closed,
@@ -2398,8 +2684,83 @@ fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool) -> PrReview {
                 _ => PrCi::Pending,
             },
             auto_merge,
+            unresolved_review,
         },
     }
+}
+
+/// Whether a tracked PR has any unresolved review threads (reviewer-bot or human).
+/// Best-effort: a malformed repo name or a GraphQL failure is logged and treated
+/// as "none", so a transient lookup error never blocks an otherwise-ready merge.
+async fn pr_has_unresolved_review_threads(
+    github: &octocrab::Octocrab,
+    pr: &TaskPullRequest,
+) -> bool {
+    let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+        return false;
+    };
+    let number = u64::try_from(pr.pr_number).unwrap_or_default();
+    match git::list_unresolved_review_threads(github, owner, name, number).await {
+        Ok(threads) => !threads.is_empty(),
+        Err(error) => {
+            warn!(error = %error, pr = %pr.pr_url, "could not list review threads; treating as none");
+            false
+        }
+    }
+}
+
+/// Gathers the unresolved review threads across all of a task's open PRs, for the
+/// addressing prompt. Best-effort: a lookup that fails for one PR is logged and
+/// skipped rather than failing the whole turn.
+async fn collect_unresolved_review_threads(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+) -> Vec<git::ReviewThread> {
+    let mut threads = Vec::new();
+    let prs = match queries::list_task_prs(&state.db, task.id).await {
+        Ok(prs) => prs,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not list task PRs for review threads");
+            return threads;
+        }
+    };
+    for pr in prs {
+        if pr.pr_state != "open" {
+            continue;
+        }
+        let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
+            continue;
+        };
+        let number = u64::try_from(pr.pr_number).unwrap_or_default();
+        match git::list_unresolved_review_threads(github, owner, name, number).await {
+            Ok(mut found) => threads.append(&mut found),
+            Err(error) => {
+                warn!(error = %error, pr = %pr.pr_url, "could not list review threads for the prompt");
+            }
+        }
+    }
+    threads
+}
+
+/// Hands a task back to the agent to address its PR review comments: flags it
+/// `addressing_review` (the agent loop picks it up via `pick_next_review_address`)
+/// and emits a feed line so the addressing pass is visible.
+async fn handle_review_addressing(state: &AppState, task: &Task) -> Result<()> {
+    // Only act on the transition; a steady-state re-detect each tick stays quiet.
+    if task.status != TaskStatus::AddressingReview {
+        queries::flag_review_addressing(&state.db, task.id).await?;
+        emit_ci_note(
+            state,
+            task.id,
+            "Addressing PR review comments before merge",
+            "review-address",
+        )
+        .await?;
+        state.notify_board();
+        info!(task_id = %task.id, "green PR has unresolved review comments; handing back to the agent");
+    }
+    Ok(())
 }
 
 /// The repos whose branch the CI-fix turn should check out: the focus repo (so
@@ -2467,6 +2828,7 @@ async fn collect_failing_checks(
 /// is logged and swallowed so it never affects the completed task. Closing an
 /// already-closed issue is harmless.
 async fn close_linked_issue(
+    state: &AppState,
     github: &octocrab::Octocrab,
     settings: &crate::db::models::Settings,
     task: &Task,
@@ -2490,11 +2852,104 @@ async fn close_linked_issue(
     )
     .await
     {
-        Ok(_) => info!(task_id = %task.id, issue = %task.external_id, "closed the linked issue"),
+        Ok(_) => {
+            info!(task_id = %task.id, issue = %task.external_id, "closed the linked issue");
+            // Surface the closure in the activity feed and the task's history (#226).
+            let number = task.external_id.trim().parse::<i64>().unwrap_or_default();
+            let url = format!("https://github.com/{owner}/{repo_name}/issues/{number}");
+            let multi = task_is_multi_repo(state, task.id).await;
+            if let Err(error) = emit_lifecycle_event(
+                state,
+                task.id,
+                "issue_closed",
+                &task.title,
+                &url,
+                short_repo_name(repo_name),
+                number,
+                multi,
+            )
+            .await
+            {
+                warn!(error = %error, task_id = %task.id, "failed to emit issue_closed lifecycle event");
+            }
+        }
         Err(error) => {
             warn!(error = %error, task_id = %task.id, "failed to close the linked issue");
         }
     }
+}
+
+/// The short repo name (the part after the owner), e.g. `Plunder` from
+/// `JalapenoLabs/Plunder`. Used to tag a lifecycle line for a multi-repo task.
+fn short_repo_name(repo_full_name: &str) -> &str {
+    repo_full_name.rsplit('/').next().unwrap_or(repo_full_name)
+}
+
+/// Whether the task's tracked PRs span more than one repo, so a lifecycle line
+/// should name the repo (`repo#number`) to disambiguate. Single-repo tasks read
+/// cleanly without the tag, matching how the CI events stay untagged when there
+/// is only one PR. Any lookup failure degrades to "not multi-repo" (no tag).
+async fn task_is_multi_repo(state: &AppState, task_id: uuid::Uuid) -> bool {
+    let prs = queries::list_task_prs(&state.db, task_id)
+        .await
+        .unwrap_or_default();
+    let repos: HashSet<&str> = prs.iter().map(|pr| pr.repo_full_name.as_str()).collect();
+    repos.len() > 1
+}
+
+/// Persists and broadcasts a deterministic PR/issue lifecycle event (#226): the
+/// open/merge/close moments the orchestrator drives via octocrab, which otherwise
+/// never reach the activity feed. It mirrors the CI watcher's `emit_persisted`
+/// exactly: the event lands in the synthetic CI turn (so it flows through the same
+/// `events` table + task SSE stream as agent and CI events) and is streamed live.
+///
+/// The payload is kept source-agnostic so a future Jira source (transition,
+/// comment) can reuse this same `lifecycle` type. `repo` is the short repo name,
+/// included only when the task spans more than one repo (empty otherwise), so the
+/// frontend shows a `repo#number` tag exactly when it disambiguates.
+#[allow(clippy::too_many_arguments)]
+async fn emit_lifecycle_event(
+    state: &AppState,
+    task_id: uuid::Uuid,
+    action: &str,
+    title: &str,
+    url: &str,
+    repo: &str,
+    number: i64,
+    multi_repo: bool,
+) -> Result<()> {
+    let turn = queries::get_or_create_ci_turn(&state.db, task_id).await?;
+    let seq = queries::next_event_seq(&state.db, turn.id).await?;
+    let payload = serde_json::json!({
+        "action": action,
+        "title": title,
+        "url": url,
+        "repo": if multi_repo { repo } else { "" },
+        "number": number,
+    });
+    queries::append_event(&state.db, turn.id, seq, "lifecycle", payload.clone()).await?;
+    state.notify_task(
+        task_id,
+        serde_json::json!({ "type": "lifecycle", "payload": payload, "created_at": Utc::now() }),
+    );
+    Ok(())
+}
+
+/// Emits a synthetic, informational `ci`-style event onto a task's feed and
+/// history (`status: "info"`, which renders neutral). Used for orchestration
+/// moments that aren't a Claude or PR-lifecycle event, e.g. starting the
+/// review-comment addressing pass. Reuses the synthetic CI turn like the CI-step
+/// watcher and the lifecycle events, so it renders with no special transport.
+async fn emit_ci_note(state: &AppState, task_id: uuid::Uuid, text: &str, key: &str) -> Result<()> {
+    let turn = queries::get_or_create_ci_turn(&state.db, task_id).await?;
+    let seq = queries::next_event_seq(&state.db, turn.id).await?;
+    let payload = serde_json::json!({ "status": "info", "text": text, "key": key });
+    queries::append_event(&state.db, turn.id, seq, "ci", payload.clone()).await?;
+    state.notify_task(
+        task_id,
+        serde_json::json!({ "type": "ci", "payload": payload, "created_at": Utc::now() }),
+    );
+    Ok(())
 }
 
 /// Records a task failure: captures the message and surfaces it in `In Review`.
@@ -2925,6 +3380,7 @@ mod tests {
             pr_url: None,
             error: None,
             ci_fix_attempts: 0,
+            review_fix_attempts: 0,
             hold: false,
             blocking: false,
             notes: String::new(),
