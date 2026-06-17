@@ -606,6 +606,24 @@ pub struct TaskPullRequest {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A screenshot the agent captured during a task (issue #248), as the API exposes
+/// it: metadata only. The `image` bytea column is deliberately NOT a field here, so
+/// it never rides along in a task/board payload; a dedicated endpoint streams the
+/// bytes by id. `width`/`height` are `None` when the uploader could not determine
+/// them, and `turn_id` is `None` once the capturing turn has been pruned.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct TaskScreenshot {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub turn_id: Option<Uuid>,
+    pub mime: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub route: String,
+    pub caption: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// One Claude Code invocation against a task.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Turn {

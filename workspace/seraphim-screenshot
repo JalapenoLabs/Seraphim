@@ -1,0 +1,134 @@
+#!/usr/bin/env node
+// seraphim-screenshot: the agent stores a screenshot it captured during a task.
+//
+// During visual self-review (issues #243-247) the agent drives a real browser
+// through the Playwright MCP and writes screenshots to disk. This uploads one to
+// Seraphim so the operator can see what the agent saw, on the task view, without
+// rebuilding the workspace state. The image bytes are stored in Postgres and
+// streamed back by id; they never ride along in board/task JSON.
+//
+// Usage:
+//   seraphim-screenshot <image-file> [--caption "..."] [--route "/dashboard"]
+//
+// Only dev/test-data screenshots, please: the bytes persist in the database.
+
+const fs = require('fs')
+const path = require('path')
+
+const API_URL = process.env.SERAPHIM_API_URL
+const TASK_ID = process.env.SERAPHIM_TASK_ID
+
+function fail(message) {
+  console.error(`seraphim-screenshot: ${message}`)
+  process.exit(1)
+}
+
+// Parses `<file> [--caption text] [--route text]` into its pieces. The first
+// non-flag argument is the image path.
+function parseArgs(argv) {
+  const result = { file: null, caption: '', route: '' }
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]
+    if (arg === '--caption') {
+      result.caption = argv[++index] ?? ''
+    } else if (arg === '--route') {
+      result.route = argv[++index] ?? ''
+    } else if (!result.file) {
+      result.file = arg
+    }
+  }
+  return result
+}
+
+// The image MIME, from the file's magic bytes first (most reliable), then its
+// extension. Returns null for something that is not a recognized image.
+function detectMime(buffer, file) {
+  if (buffer.length >= 8 && buffer.toString('latin1', 0, 8) === '\x89PNG\r\n\x1a\n') {
+    return 'image/png'
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (buffer.length >= 12 && buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') {
+    return 'image/webp'
+  }
+  if (buffer.length >= 6 && buffer.toString('latin1', 0, 6).startsWith('GIF8')) {
+    return 'image/gif'
+  }
+  const byExtension = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif'
+  }
+  return byExtension[path.extname(file).toLowerCase()] ?? null
+}
+
+// PNG width/height live in the IHDR chunk at fixed offsets, so they are cheap to
+// read without an image library. Returns {} for anything that is not a PNG.
+function pngDimensions(buffer, mime) {
+  if (mime !== 'image/png' || buffer.length < 24) {
+    return {}
+  }
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
+}
+
+async function main() {
+  if (!API_URL || !TASK_ID) {
+    fail('SERAPHIM_API_URL and SERAPHIM_TASK_ID must be set (they are injected by the orchestrator)')
+  }
+
+  const { file, caption, route } = parseArgs(process.argv.slice(2))
+  if (!file) {
+    fail('no image file given (usage: seraphim-screenshot <image-file> [--caption "..."] [--route "/path"])')
+  }
+
+  let buffer
+  try {
+    buffer = fs.readFileSync(file)
+  } catch (error) {
+    fail(`could not read ${file}: ${error.message}`)
+  }
+  if (!buffer.length) {
+    fail(`${file} is empty`)
+  }
+
+  const mime = detectMime(buffer, file)
+  if (!mime) {
+    fail(`${file} is not a recognized image (expected PNG, JPEG, WebP, or GIF)`)
+  }
+
+  const query = new URLSearchParams({ task_id: TASK_ID })
+  if (caption.trim()) {
+    query.set('caption', caption.trim())
+  }
+  if (route.trim()) {
+    query.set('route', route.trim())
+  }
+  const { width, height } = pngDimensions(buffer, mime)
+  if (width && height) {
+    query.set('width', String(width))
+    query.set('height', String(height))
+  }
+
+  let response
+  try {
+    response = await fetch(`${API_URL}/api/v1/agent/screenshots?${query.toString()}`, {
+      method: 'POST',
+      headers: { 'content-type': mime },
+      body: buffer
+    })
+  } catch (error) {
+    fail(`could not reach the Seraphim API at ${API_URL}: ${error.message}`)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    fail(`the API rejected the screenshot (HTTP ${response.status}): ${detail}`)
+  }
+
+  console.log(`Stored screenshot ${path.basename(file)} for the user to see on the task view.`)
+}
+
+main().catch((error) => fail(error.message))
