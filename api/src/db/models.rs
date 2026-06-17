@@ -207,6 +207,10 @@ pub struct Settings {
     pub claude_token_set: bool,
     /// How the agent authenticates to Claude (subscription token vs API key).
     pub claude_auth_mode: ClaudeAuthMode,
+    /// The connected Claude account's email, shown next to the environment name on
+    /// the board (issue #269). Captured from the OAuth token response; empty for a
+    /// manually pasted setup-token or API key, where no account identity is known.
+    pub claude_account_email: String,
     /// Whether subscription usage credentials are stored (the refreshing
     /// access/refresh pair used only to poll the usage gauge). Only meaningful in
     /// `subscription` mode; the tokens themselves are never sent.

@@ -183,6 +183,9 @@ export type Settings = {
   claude_token_set: boolean
   // How the agent authenticates to Claude (subscription token vs API key).
   claude_auth_mode: ClaudeAuthMode
+  // The connected Claude account's email (issue #269); empty when unknown
+  // (a manually pasted setup-token or API key returns no account identity).
+  claude_account_email: string
   // Whether subscription usage credentials are stored (powers the usage gauge).
   claude_usage_token_set: boolean
   github_token_set: boolean

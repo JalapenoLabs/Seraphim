@@ -944,6 +944,14 @@
     <div class="flex items-baseline gap-2">
       {#if settings}
         <strong class="text-base">{settings.org_name}</strong>
+        {#if settings.claude_account_email}
+          <span
+            class="text-sm text-muted-foreground"
+            title="Connected Claude account"
+          >
+            • ({settings.claude_account_email})
+          </span>
+        {/if}
         {#if outsideSchedule}
           <span
             class="rounded-full border border-warning/40 px-2 py-0.5 text-xs text-warning"

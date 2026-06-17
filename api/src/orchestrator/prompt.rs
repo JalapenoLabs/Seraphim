@@ -718,6 +718,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             claude_token_set: false,
             claude_auth_mode: crate::db::models::ClaudeAuthMode::Subscription,
+            claude_account_email: String::new(),
             claude_usage_token_set: false,
             github_token_set: false,
             availability_enabled: false,

@@ -30,7 +30,7 @@ const SETTINGS_COLUMNS: &str =
      claude_model, workspace_image_tag, base_setup_script, config_repo_url, \
      default_branch_template, config_repo_error, current_session_id, updated_at, \
      (claude_oauth_token <> '') AS claude_token_set, \
-     claude_auth_mode, \
+     claude_auth_mode, claude_account_email, \
      (claude_usage_refresh_token <> '') AS claude_usage_token_set, \
      (github_token <> '') AS github_token_set, \
      availability_enabled, availability_timezone, availability_windows, \
@@ -308,18 +308,23 @@ pub async fn set_subscription_credentials(
     refresh_token: &str,
     expires_at: DateTime<Utc>,
     scopes: &str,
+    account_email: &str,
 ) -> sqlx::Result<()> {
+    // An empty `account_email` keeps the stored one rather than wiping it, so a
+    // response that happens to omit the account never blanks a known email.
     sqlx::query(
         "UPDATE settings SET claude_oauth_token = $1, claude_auth_mode = 'subscription', \
          claude_usage_access_token = $2, claude_usage_refresh_token = $3, \
-         claude_usage_expires_at = $4, claude_usage_scopes = $5, updated_at = now() \
-         WHERE id = 1",
+         claude_usage_expires_at = $4, claude_usage_scopes = $5, \
+         claude_account_email = COALESCE(NULLIF($6, ''), claude_account_email), \
+         updated_at = now() WHERE id = 1",
     )
     .bind(inference_token)
     .bind(access_token)
     .bind(refresh_token)
     .bind(expires_at)
     .bind(scopes)
+    .bind(account_email)
     .execute(pool)
     .await?;
     Ok(())
@@ -334,15 +339,23 @@ pub async fn set_oauth_tokens(
     access_token: &str,
     refresh_token: &str,
     expires_at: DateTime<Utc>,
+    account_email: &str,
 ) -> sqlx::Result<()> {
+    // Like the refresh token, an empty `account_email` keeps the existing value, so
+    // a refresh response that omits the account never blanks a known email. This is
+    // also how an install that connected before #269 backfills its email: the first
+    // refresh that returns an account populates it without a reconnect.
     sqlx::query(
         "UPDATE settings SET claude_oauth_token = $1, claude_usage_access_token = $1, \
          claude_usage_refresh_token = COALESCE(NULLIF($2, ''), claude_usage_refresh_token), \
-         claude_usage_expires_at = $3, updated_at = now() WHERE id = 1",
+         claude_usage_expires_at = $3, \
+         claude_account_email = COALESCE(NULLIF($4, ''), claude_account_email), \
+         updated_at = now() WHERE id = 1",
     )
     .bind(access_token)
     .bind(refresh_token)
     .bind(expires_at)
+    .bind(account_email)
     .execute(pool)
     .await?;
     Ok(())
@@ -354,7 +367,8 @@ pub async fn set_api_key(pool: &PgPool, api_key: &str) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE settings SET claude_oauth_token = $1, claude_auth_mode = 'api_key', \
          claude_usage_access_token = '', claude_usage_refresh_token = '', \
-         claude_usage_expires_at = NULL, claude_usage_scopes = '', updated_at = now() \
+         claude_usage_expires_at = NULL, claude_usage_scopes = '', \
+         claude_account_email = '', updated_at = now() \
          WHERE id = 1",
     )
     .bind(api_key)

@@ -194,6 +194,7 @@ pub async fn claude_oauth_finish(
         &tokens.refresh_token,
         expires_at,
         &tokens.scopes,
+        &tokens.account_email,
     )
     .await?;
     info!(

@@ -118,7 +118,11 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `current_session_id` (the one shared Claude session), the secret columns
   `claude_oauth_token` / `github_token` (the API only ever exposes
   `*_token_set` booleans plus a masked `*_token_preview`, never the raw values;
-  write via `POST /settings/tokens`), and the optional **availability schedule**
+  write via `POST /settings/tokens`), the connected Claude account's
+  `claude_account_email` (captured from the subscription OAuth token-exchange /
+  refresh response and shown next to the environment name on the board, issue
+  #269; blank for a pasted setup-token or API key), and the optional
+  **availability schedule**
   (`availability_enabled`, `availability_timezone` (IANA), `availability_windows`
   JSONB, `availability_skip_dates` JSONB). When enabled, the agent only pulls new
   work during the configured weekly windows in the operator's time zone, skipping
