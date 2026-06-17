@@ -60,7 +60,8 @@
   ]
   const OPERATORS: { value: RuleOperator; label: string; needsValues: boolean }[] = [
     { value: 'has_one_of', label: 'has one of', needsValues: true },
-    { value: 'exactly', label: 'is exactly', needsValues: true },
+    { value: 'exactly', label: 'is exactly (case-insensitive)', needsValues: true },
+    { value: 'exactly_case_sensitive', label: 'is exactly (case-sensitive)', needsValues: true },
     { value: 'contains', label: 'contains', needsValues: true },
     { value: 'is_empty', label: 'is empty', needsValues: false },
     { value: 'is_not_empty', label: 'is not empty', needsValues: false }

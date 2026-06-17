@@ -52,6 +52,8 @@ pub enum Field {
 pub enum Operator {
     /// Equals one of the values (case-insensitive).
     Exactly,
+    /// Equals one of the values (case-sensitive).
+    ExactlyCaseSensitive,
     /// Contains one of the values as a substring (case-insensitive).
     Contains,
     /// For a list field: shares at least one value. For a scalar: same as `exactly`.
@@ -139,40 +141,84 @@ impl Condition {
         }
     }
 
-    /// Non-empty values, trimmed and lowercased, for case-insensitive matching.
-    fn needles(&self) -> impl Iterator<Item = String> + '_ {
+    /// Non-empty rule values, trimmed. Case folding is deferred to the comparison
+    /// (see [`str_eq`] / [`str_contains`]) so the case-sensitive and
+    /// case-insensitive operators share one matching path (issue #230).
+    fn needles(&self) -> impl Iterator<Item = &str> + '_ {
         self.values
             .iter()
-            .map(|value| value.trim().to_ascii_lowercase())
+            .map(|value| value.trim())
             .filter(|value| !value.is_empty())
     }
 
+    /// Whether this condition's operator compares with case respected. Only the
+    /// dedicated case-sensitive "exactly" does; everything else stays
+    /// case-insensitive, so existing rules keep their meaning.
+    fn case_sensitive(&self) -> bool {
+        matches!(self.operator, Operator::ExactlyCaseSensitive)
+    }
+
     fn eval_scalar(&self, value: &str) -> bool {
-        let value = value.trim().to_ascii_lowercase();
+        let value = value.trim();
+        let case_sensitive = self.case_sensitive();
         match self.operator {
             Operator::IsEmpty => value.is_empty(),
             Operator::IsNotEmpty => !value.is_empty(),
-            Operator::Exactly | Operator::HasOneOf => self.needles().any(|needle| needle == value),
-            Operator::Contains => self.needles().any(|needle| value.contains(&needle)),
+            Operator::Exactly | Operator::ExactlyCaseSensitive | Operator::HasOneOf => self
+                .needles()
+                .any(|needle| str_eq(needle, value, case_sensitive)),
+            Operator::Contains => self
+                .needles()
+                .any(|needle| str_contains(value, needle, case_sensitive)),
         }
     }
 
     fn eval_list(&self, items: &[String]) -> bool {
-        let present: Vec<String> = items
+        let present: Vec<&str> = items
             .iter()
-            .map(|item| item.trim().to_ascii_lowercase())
+            .map(|item| item.trim())
             .filter(|item| !item.is_empty())
             .collect();
+        let case_sensitive = self.case_sensitive();
         match self.operator {
             Operator::IsEmpty => present.is_empty(),
             Operator::IsNotEmpty => !present.is_empty(),
-            Operator::Exactly | Operator::HasOneOf => self
-                .needles()
-                .any(|needle| present.iter().any(|item| item == &needle)),
-            Operator::Contains => self
-                .needles()
-                .any(|needle| present.iter().any(|item| item.contains(&needle))),
+            Operator::Exactly | Operator::ExactlyCaseSensitive | Operator::HasOneOf => {
+                self.needles().any(|needle| {
+                    present
+                        .iter()
+                        .any(|item| str_eq(item, needle, case_sensitive))
+                })
+            }
+            Operator::Contains => self.needles().any(|needle| {
+                present
+                    .iter()
+                    .any(|item| str_contains(item, needle, case_sensitive))
+            }),
         }
+    }
+}
+
+/// Equality of two already-trimmed strings, honoring case only when asked. ASCII
+/// case folding mirrors the engine's prior behavior (it lowercased with
+/// `to_ascii_lowercase`); non-ASCII bytes compare verbatim either way.
+fn str_eq(left: &str, right: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        left == right
+    } else {
+        left.eq_ignore_ascii_case(right)
+    }
+}
+
+/// Substring test, honoring case only when asked. The case-insensitive path
+/// lowercases both sides, matching the engine's prior `contains` behavior.
+fn str_contains(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        haystack.contains(needle)
+    } else {
+        haystack
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase())
     }
 }
 
@@ -281,6 +327,85 @@ mod tests {
             conditions: vec![condition(Field::Body, Operator::IsNotEmpty, &[])],
         };
         assert!(not_empty_body.matches(&ctx(Trigger::Created, &labels)));
+    }
+
+    #[test]
+    fn exactly_is_case_insensitive_for_scalar_and_labels() {
+        // The existing operator must stay case-insensitive (no behavior change on
+        // upgrade): a rule value of "Bug" still matches "bug".
+        let scalar = RuleGroup {
+            combinator: Combinator::And,
+            conditions: vec![condition(
+                Field::Author,
+                Operator::Exactly,
+                &["NavarroTech"],
+            )],
+        };
+        assert!(scalar.matches(&ctx(Trigger::Created, &[]))); // author is "navarrotech"
+
+        let labels = vec!["bug".to_string()];
+        let list = RuleGroup {
+            combinator: Combinator::And,
+            conditions: vec![condition(Field::Labels, Operator::Exactly, &["Bug"])],
+        };
+        assert!(list.matches(&ctx(Trigger::Created, &labels)));
+    }
+
+    #[test]
+    fn exactly_case_sensitive_requires_identical_case() {
+        // Scalar: matches the same case, rejects a different case.
+        let same = RuleGroup {
+            combinator: Combinator::And,
+            conditions: vec![condition(
+                Field::Author,
+                Operator::ExactlyCaseSensitive,
+                &["navarrotech"],
+            )],
+        };
+        assert!(same.matches(&ctx(Trigger::Created, &[]))); // author is "navarrotech"
+
+        let differing = RuleGroup {
+            combinator: Combinator::And,
+            conditions: vec![condition(
+                Field::Author,
+                Operator::ExactlyCaseSensitive,
+                &["NavarroTech"],
+            )],
+        };
+        assert!(!differing.matches(&ctx(Trigger::Created, &[])));
+
+        // Labels: same-case label matches, differing case does not. Surrounding
+        // whitespace is still trimmed, as for the case-insensitive operator.
+        let labels = vec!["Bug".to_string()];
+        let label_same = RuleGroup {
+            combinator: Combinator::And,
+            conditions: vec![condition(
+                Field::Labels,
+                Operator::ExactlyCaseSensitive,
+                &[" Bug "],
+            )],
+        };
+        assert!(label_same.matches(&ctx(Trigger::Created, &labels)));
+
+        let label_differing = RuleGroup {
+            combinator: Combinator::And,
+            conditions: vec![condition(
+                Field::Labels,
+                Operator::ExactlyCaseSensitive,
+                &["bug"],
+            )],
+        };
+        assert!(!label_differing.matches(&ctx(Trigger::Created, &labels)));
+    }
+
+    #[test]
+    fn exactly_case_sensitive_round_trips_through_json() {
+        // The serde name must be stable so the frontend dropdown value round-trips.
+        let condition = condition(Field::Author, Operator::ExactlyCaseSensitive, &["x"]);
+        let json = serde_json::to_value(&condition).unwrap();
+        assert_eq!(json["operator"], "exactly_case_sensitive");
+        let parsed: Condition = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.operator, Operator::ExactlyCaseSensitive);
     }
 
     #[test]

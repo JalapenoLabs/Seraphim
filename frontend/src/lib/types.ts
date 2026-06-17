@@ -439,7 +439,13 @@ export type RuleField =
   | 'comment'
   | 'comment_author'
   | 'state'
-export type RuleOperator = 'exactly' | 'contains' | 'has_one_of' | 'is_empty' | 'is_not_empty'
+export type RuleOperator =
+  | 'exactly'
+  | 'exactly_case_sensitive'
+  | 'contains'
+  | 'has_one_of'
+  | 'is_empty'
+  | 'is_not_empty'
 export type QueuePosition = 'top' | 'bottom'
 // A rule's source: a real source kind or 'any' to match all.
 export type RuleSource = 'github' | 'jira' | 'internal' | 'any'
