@@ -214,6 +214,15 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **Two-tier setup:** environment setup (`settings.base_setup_script`) runs once
   per provision/recreate (install CLIs/toolchains); per-repo setup
   (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).
+- **Submodules (issue #251):** a cloned repo's git submodules are initialized
+  automatically (`provision::submodule_update_snippet`, generic to any repo with a
+  `.gitmodules`), before its setup script, on clone and after a branch checkout.
+  It does NOT fail silently: a denied/missing private submodule (the common cause:
+  the mounted host SSH/deploy key lacks read access, e.g. Plunder's private `brand`
+  submodule) aborts prep with a message naming the offending submodule URL(s) and
+  the fix (grant the key read access; for `brand` that is the `BRAND_DEPLOY_KEY`
+  deploy key), instead of a generic build failure mid-task. Relies on the mounted
+  host key only; no private key material is baked into the image.
 - **`~/.claude`** comes from cloning `settings.config_repo_url` into
   `CLAUDE_CONFIG_DIR=/workspace/.claude` (git init+fetch+checkout so untracked
   `projects/` — the persisted session — survives). No host mount. This is a
