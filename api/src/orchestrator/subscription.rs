@@ -99,6 +99,7 @@ async fn refresh_and_store(state: &AppState, refresh_token: &str) -> Result<Stri
         &tokens.access_token,
         &tokens.refresh_token,
         expires_at,
+        &tokens.account_email,
     )
     .await?;
     info!(

@@ -66,6 +66,9 @@ pub struct Tokens {
     /// Seconds until the access token expires.
     pub expires_in: i64,
     pub scopes: String,
+    /// The connected account's email, if the token response carried it (issue
+    /// #269). Empty when the response omitted the account block.
+    pub account_email: String,
 }
 
 /// A subscription usage snapshot (rolling-window utilization percentages).
@@ -175,6 +178,17 @@ async fn token_request(body: &Value) -> Result<Tokens> {
         expires_in: i64,
         #[serde(default)]
         scope: String,
+        /// The authenticated account, returned by the token endpoint on both the
+        /// authorization-code and refresh grants. Used only for its email (#269).
+        #[serde(default)]
+        account: Option<Account>,
+    }
+    #[derive(Deserialize)]
+    struct Account {
+        // The token endpoint returns the account email as `email_address`; accept a
+        // bare `email` too so a shape variation never silently drops the identity.
+        #[serde(default, alias = "email")]
+        email_address: String,
     }
     let client = reqwest::Client::new();
     let response = client
@@ -205,6 +219,10 @@ async fn token_request(body: &Value) -> Result<Tokens> {
             3600
         },
         scopes: parsed.scope,
+        account_email: parsed
+            .account
+            .map(|account| account.email_address)
+            .unwrap_or_default(),
     })
 }
 
