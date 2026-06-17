@@ -6,7 +6,7 @@
 //! PR, or a CI-fix protocol that re-engages on the PR's existing branch.
 
 use crate::db::models::{AnswerKind, Question, Repository, Settings, SourceKind, Task};
-use crate::git::IssueComment;
+use crate::git::{IssueComment, ReviewThread};
 
 use super::provision::repo_dir_name;
 
@@ -239,6 +239,132 @@ pub fn build_revisit(
     ));
 
     prompt
+}
+
+/// Builds the instruction text to address unresolved PR review comments before
+/// the PR merges.
+///
+/// Sent when a task's PR(s) are green and (auto-)approved but still carry
+/// unresolved review threads, from the org CI reviewer bots or humans. The agent
+/// works the existing `branch` (each repo with a PR is checked out): it makes the
+/// changes the actionable comments call for, replies to and resolves the threads
+/// it handles, and pushes, after which the review loop re-checks and merges.
+/// `threads` are the unresolved threads across the task's PRs (each tagged with
+/// its `repo#pr` plus `file:line`). The pass is best-effort: the agent is told to
+/// reply and move on rather than force out-of-scope changes, so the queue never
+/// stalls.
+pub fn build_address_review(
+    settings: &Settings,
+    repo: &Repository,
+    task: &Task,
+    branch: &str,
+    threads: &[ReviewThread],
+    comments: &[IssueComment],
+) -> String {
+    let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
+    let mut prompt = context_header(settings, repo, task, comments);
+
+    prompt.push_str(&format!(
+        "# Addressing pull request review comments\n\
+         - Your pull request for this issue passed CI and was (auto-)approved, but reviewers \
+         (the org CI reviewer bots and/or humans) left review comments that have not been \
+         addressed. Make a best-effort pass to address them before the merge.\n\
+         - Your cwd is `/workspace`. The focus repo `{repo}` is at `{repo_path}`, already checked \
+         out on branch `{branch}` with your earlier commits. If this issue spans several repos, \
+         each one with a PR is also checked out on `{branch}` as a sibling directory; each comment \
+         below is tagged with its `repo#pr` so you know which repo it belongs to.\n\
+         - These automated reviewers (and humans) are NOT the authority on the code; you are. They \
+         can be wrong, hallucinate, or ask for defensive code that isn't warranted. Apply the \
+         comments that genuinely improve the change; for ones you disagree with or that are out of \
+         scope, do not force the change.\n\
+         - For each comment you act on: make the fix on this branch. For each comment you decline: \
+         decide deliberately. Either way, reply to the thread (a short note saying what you did or \
+         why you didn't) and resolve it, so the conversation is closed out.\n\
+         {reply}\
+         - When you have addressed what you reasonably can, run the project's build/tests/linters, \
+         then commit and push. Do not open a new pull request; the existing one updates \
+         automatically. It is fine if a comment needs no code change (a reply and resolve is \
+         enough).\n\
+         - Do not get stuck: if a thread needs a decision you can't make or is genuinely \
+         unresolvable, leave a brief reply explaining why and move on. The merge proceeds once the \
+         threads are handled or the attempt budget is spent.\n\
+         - After pushing (or replying where no code change was needed), stop and finish with a short \
+         summary. Do not watch or wait for CI; Seraphim re-checks the PR and merges it (or brings \
+         you back) automatically.\n\n",
+        repo = repo.full_name,
+        repo_path = repo_path,
+        branch = branch,
+        reply = REVIEW_THREAD_COMMANDS,
+    ));
+
+    prompt.push_str(&render_review_threads(threads));
+    prompt
+}
+
+/// Concrete commands for replying to and resolving a review thread, shared into
+/// the addressing prompt so the agent has exact handles rather than guessing.
+const REVIEW_THREAD_COMMANDS: &str = "\
+    - To reply to a thread, post to its first comment id (the `comment id` shown below):\n\
+    \x20    `gh api repos/OWNER/REPO/pulls/PR/comments/COMMENT_ID/replies -X POST -f body='...'`\n\
+    - To resolve a thread, use the GraphQL `resolveReviewThread` mutation on its thread id (the \
+    `thread id` shown below):\n\
+    \x20    `gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"THREAD_ID\"})\
+    {thread{id}}}'`\n";
+
+/// Renders the unresolved review threads for the addressing brief, each tagged
+/// with `repo#pr`, its `file:line`, the author, and the identifiers the agent
+/// needs to reply and resolve. Returns a short fallback when the list is empty.
+fn render_review_threads(threads: &[ReviewThread]) -> String {
+    if threads.is_empty() {
+        return "# Review comments\n(The unresolved comments could not be enumerated; inspect the \
+                PR's review threads yourself with `gh api` or `gh pr view`.)\n"
+            .to_string();
+    }
+
+    let mut section = format!(
+        "# Review comments\n\
+         {count} unresolved review thread{plural} across this task's pull request(s), each with \
+         the handles to reply and resolve it:\n\n",
+        count = threads.len(),
+        plural = if threads.len() == 1 { "" } else { "s" },
+    );
+
+    for (index, thread) in threads.iter().enumerate() {
+        let location = match (&thread.path, thread.line) {
+            (Some(path), Some(line)) => format!("{path}:{line}"),
+            (Some(path), None) => path.clone(),
+            _ => "(not anchored to a file)".to_string(),
+        };
+        let author = if thread.author.is_empty() {
+            "unknown"
+        } else {
+            &thread.author
+        };
+        let comment_id = thread
+            .comment_id
+            .map_or_else(|| "(unknown)".to_string(), |id| id.to_string());
+        let owner_repo = thread
+            .repo_full_name
+            .split('/')
+            .next_back()
+            .unwrap_or(&thread.repo_full_name);
+        section.push_str(&format!(
+            "## {n}. {repo}#{pr} {location} (by {author})\n\
+             - repo: {full_repo} | thread id: {thread_id} | comment id: {comment_id}\n\
+             {body}\n\n",
+            n = index + 1,
+            repo = owner_repo,
+            pr = thread.pr_number,
+            location = location,
+            author = author,
+            full_repo = thread.repo_full_name,
+            thread_id = thread.thread_id,
+            comment_id = comment_id,
+            body = thread.body.trim(),
+        ));
+    }
+
+    section
 }
 
 /// The shared prompt header: who the agent is, the org/global/repo instructions,
@@ -570,6 +696,7 @@ mod tests {
             pr_url: None,
             error: None,
             ci_fix_attempts: 0,
+            review_fix_attempts: 0,
             hold: false,
             blocking: false,
             notes: String::new(),
@@ -713,6 +840,61 @@ mod tests {
         assert!(prompt.contains("single linear sequence"));
         // It must not tell the agent to open a new PR; the existing one updates.
         assert!(prompt.contains("Do not open a new pull request"));
+    }
+
+    fn review_thread(
+        repo_full_name: &str,
+        pr: i64,
+        path: &str,
+        line: i64,
+        author: &str,
+        body: &str,
+    ) -> ReviewThread {
+        ReviewThread {
+            repo_full_name: repo_full_name.to_string(),
+            pr_number: pr,
+            thread_id: "PRRT_thread1".to_string(),
+            comment_id: Some(987_654),
+            path: Some(path.to_string()),
+            line: Some(line),
+            author: author.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn address_review_prompt_lists_each_comment_with_its_handles() {
+        let threads = [review_thread(
+            "navarrotech/seraphim",
+            11,
+            "api/src/orchestrator/review.rs",
+            42,
+            "mooreslabai-claude",
+            "This branch can panic on an empty slice.",
+        )];
+        let prompt = build_address_review(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &threads,
+            &[],
+        );
+
+        // It reorients the agent to the addressing pass and stays on the branch.
+        assert!(prompt.contains("Addressing pull request review comments"));
+        assert!(prompt.contains("Do not open a new pull request"));
+        // Each comment is rendered tagged with repo#pr and file:line, plus the
+        // handles the agent needs to reply and resolve.
+        assert!(prompt
+            .contains("seraphim#11 api/src/orchestrator/review.rs:42 (by mooreslabai-claude)"));
+        assert!(prompt.contains("This branch can panic on an empty slice."));
+        assert!(prompt.contains("thread id: PRRT_thread1"));
+        assert!(prompt.contains("comment id: 987654"));
+        // It carries the reply + resolve commands and the not-the-authority guidance.
+        assert!(prompt.contains("resolveReviewThread"));
+        assert!(prompt.contains("/replies"));
+        assert!(prompt.contains("NOT the authority"));
     }
 
     #[test]

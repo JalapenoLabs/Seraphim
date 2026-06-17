@@ -287,10 +287,13 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    answers via `prompt::build_resume`), (b) a PR with failing CI to fix
    (`ci_failing`), (c) a PR whose auto-merge failed on a conflict to resolve
    (`merge_conflict` → `prompt::build_merge_conflict`: merge the base in, resolve,
-   keep migrations linear), (d) top of **To Do** (fresh issue → branch → Claude
-   turn → detect PR → **In Review**, or **park** as `waiting_for_input` if the
-   agent asked a question), then (e) when nothing else is queued, *revisit* a PR it
-   gave up on (`ci_blocked`), cooldown-gated (`REVISIT_COOLDOWN`, 15 min). The agent
+   keep migrations linear), (d) a green PR with unresolved review comments to
+   address (`addressing_review` → `prompt::build_address_review`: apply/decline
+   each comment, reply, resolve the threads, push), (e) top of **To Do** (fresh
+   issue → branch → Claude turn → detect PR → **In Review**, or **park** as
+   `waiting_for_input` if the agent asked a question), then (f) when nothing else is
+   queued, *revisit* a PR it gave up on (`ci_blocked`), cooldown-gated
+   (`REVISIT_COOLDOWN`, 15 min). The agent
    asks via the `seraphim-ask` CLI and records environment recommendations via the
    `seraphim-suggest` CLI (both baked into the workspace image), posting to
    `POST /agent/questions` and `POST /agent/suggestions`; the exec injects
@@ -302,7 +305,9 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    have all merged. The pure, unit-tested `orchestrator::review::decide` takes the
    tick's action from the set of PRs (`refresh_task_prs` updates each PR's CI +
    lifecycle first): any open PR failing → hand back to the agent; any pending →
-   wait; merge the green `auto_squash_merge` PRs now; once all are settled and at
+   wait; once every open PR is green, before merging or holding, address any
+   unresolved review comments (see below); then merge the green `auto_squash_merge`
+   PRs now; once all are settled and at
    least one merged → **Done** (and, for a GitHub-sourced task, close the linked
    issue with `state_reason: "completed"` when `close_issue_on_done` is set, the
    default; best-effort); open passing human-review PRs → hold. A red PR is bounded
@@ -314,6 +319,25 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    pushes nothing (genuinely unresolvable) or the budget is exhausted, it falls
    back to `ci_blocked` for a human. The single-PR case is just a one-row set, so
    its behavior is unchanged.
+   - **Review-comment addressing (issue #255):** a green, (auto-)approved PR can
+     still carry unresolved review threads from the org CI reviewer bots
+     (`mooreslabai-claude`, `mooreslabai-codex`) or humans, which auto-merge would
+     otherwise paper over. Before merging (auto policy) or holding (human-review
+     policy), `review::decide` checks each green open PR for unresolved review
+     threads (octocrab GraphQL `reviewThreads { isResolved }`, via
+     `git::list_unresolved_review_threads`; only inline review threads count, so
+     purely informational or approving comments never block). If any are
+     actionable and the task has attempts left, it flags `addressing_review`
+     (`queries::flag_review_addressing`) and emits a synthetic `ci`-style feed
+     note; the agent loop then picks it up (`pick_next_review_address`) and runs an
+     addressing turn (`build_address_review`) listing each comment tagged with
+     `repo#pr` + `file:line` + author + body, plus the handles to reply and
+     resolve. The turn is best-effort and never blocks on "nothing pushed" (a
+     comment may only warrant a reply or be declined): it always returns to review.
+     Bounded by `MAX_REVIEW_FIX_ATTEMPTS` (3) on a dedicated `review_fix_attempts`
+     counter (separate from `ci_fix_attempts`); once the threads are resolved the
+     loop merges, and once the budget is spent the threads no longer block the
+     merge, so the queue never stalls on a genuinely unresolvable thread.
 4. **defibrillator** (dead-agent management) — recovers turns that die mid-flight,
    which we call a **"heart attack"**: the agent hangs with no output, its stream
    breaks, or the turn aborts internally, leaving the card stranded `in_progress`

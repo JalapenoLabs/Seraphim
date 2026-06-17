@@ -12,6 +12,7 @@ export type TaskStatus =
   | 'ci_failing'
   | 'ci_blocked'
   | 'merge_conflict'
+  | 'addressing_review'
   | 'merging'
   | 'done'
   | 'failed'
@@ -27,6 +28,7 @@ export const STATUS_LABELS = {
   ci_failing: 'CI failing',
   ci_blocked: 'CI blocked',
   merge_conflict: 'resolving conflict',
+  addressing_review: 'addressing review',
   merging: 'merging',
   done: 'done',
   failed: 'failed'
@@ -43,6 +45,7 @@ export const STATUS_BADGE = {
   ci_failing: 'border-warning/40 text-warning',
   ci_blocked: 'border-destructive/40 text-destructive',
   merge_conflict: 'border-warning/40 text-warning',
+  addressing_review: 'border-primary/40 text-primary',
   merging: 'border-primary/40 text-primary',
   done: 'border-success/40 text-success',
   failed: 'border-destructive/40 text-destructive'

@@ -238,6 +238,164 @@ pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) ->
     })
 }
 
+/// One unresolved review thread on a pull request, reduced to its originating
+/// (first) comment, which is the actionable item the agent must address.
+///
+/// Carries the GraphQL `thread_id` (for `resolveReviewThread`) and the REST
+/// `comment_id` of the first comment (for posting a reply), so the agent has the
+/// exact handles it needs without re-deriving them.
+#[derive(Debug, Clone)]
+pub struct ReviewThread {
+    pub repo_full_name: String,
+    pub pr_number: i64,
+    /// GraphQL node id of the thread, used to resolve it once handled.
+    pub thread_id: String,
+    /// REST database id of the originating comment, used to reply to it. `None`
+    /// if GitHub did not surface one (e.g. a comment from a deleted account).
+    pub comment_id: Option<i64>,
+    /// The file the thread is anchored to (`None` for a file-less thread).
+    pub path: Option<String>,
+    /// The line the thread is anchored to, when GitHub still resolves it (an
+    /// outdated thread may report none).
+    pub line: Option<i64>,
+    pub author: String,
+    pub body: String,
+}
+
+/// Lists a pull request's unresolved review threads (inline review comments not
+/// marked resolved), from reviewer bots and humans alike, via the GraphQL API.
+///
+/// REST has no notion of thread resolution, so this uses GraphQL `reviewThreads`.
+/// Only each thread's first (originating) comment is returned, the actionable
+/// item; replies are omitted to keep the brief focused. Resolved threads and
+/// threads with no comment are skipped. Capped at the first 100 threads, which
+/// comfortably covers any real PR.
+///
+/// # Errors
+/// If the GraphQL request fails or the response can't be parsed.
+pub async fn list_unresolved_review_threads(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<Vec<ReviewThread>> {
+    // First 100 threads, first comment of each: the originating comment carries
+    // the file/line/author/body the agent needs to act, plus the handles to reply
+    // and resolve.
+    const QUERY: &str = "\
+        query($owner:String!,$repo:String!,$number:Int!){\
+          repository(owner:$owner,name:$repo){\
+            pullRequest(number:$number){\
+              reviewThreads(first:100){\
+                nodes{\
+                  id isResolved\
+                  comments(first:1){\
+                    nodes{ databaseId path line originalLine body author{login} }\
+                  }\
+                }\
+              }\
+            }\
+          }\
+        }";
+
+    let response: ReviewThreadsResponse = octo
+        .graphql(&json!({
+            "query": QUERY,
+            "variables": { "owner": owner, "repo": repo, "number": number },
+        }))
+        .await
+        .wrap_err("failed to query pull request review threads")?;
+
+    let nodes = response
+        .data
+        .and_then(|data| data.repository)
+        .and_then(|repository| repository.pull_request)
+        .map(|pull| pull.review_threads.nodes)
+        .unwrap_or_default();
+
+    let mut threads = Vec::new();
+    for node in nodes {
+        if node.is_resolved {
+            continue;
+        }
+        let Some(comment) = node.comments.nodes.into_iter().next() else {
+            continue; // A thread with no comment has nothing to address.
+        };
+        threads.push(ReviewThread {
+            repo_full_name: format!("{owner}/{repo}"),
+            pr_number: i64::try_from(number).unwrap_or_default(),
+            thread_id: node.id,
+            comment_id: comment.database_id,
+            path: comment.path,
+            // Fall back to the original line when the current line is stale.
+            line: comment.line.or(comment.original_line),
+            author: comment
+                .author
+                .map(|author| author.login)
+                .unwrap_or_default(),
+            body: comment.body,
+        });
+    }
+    Ok(threads)
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadsResponse {
+    data: Option<ReviewThreadsData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadsData {
+    repository: Option<ReviewRepositoryNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewRepositoryNode {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<ReviewPullRequestNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewPullRequestNode {
+    #[serde(rename = "reviewThreads")]
+    review_threads: ReviewThreadConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadConnection {
+    nodes: Vec<ReviewThreadNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadNode {
+    id: String,
+    #[serde(rename = "isResolved")]
+    is_resolved: bool,
+    comments: ReviewCommentConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewCommentConnection {
+    nodes: Vec<ReviewCommentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewCommentNode {
+    #[serde(rename = "databaseId")]
+    database_id: Option<i64>,
+    path: Option<String>,
+    line: Option<i64>,
+    #[serde(rename = "originalLine")]
+    original_line: Option<i64>,
+    body: String,
+    author: Option<ReviewAuthorNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewAuthorNode {
+    login: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CombinedStatus {
     state: String,
