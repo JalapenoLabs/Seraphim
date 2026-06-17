@@ -211,6 +211,22 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   after `/`), so cross-repo work is natural. The task names a focus repo + branch.
 - **Instructions become files:** global → `/workspace/AGENTS.md`; per-repo →
   `/workspace/{repo}/CLAUDE.md` (Claude auto-loads them).
+- **Visual self-review (issues #244, #245):** every task prompt carries a standing
+  instruction (`prompt::VISUAL_SELF_REVIEW`, in the shared header so it applies on
+  fresh work and fix/revisit turns alike) to look at any UI change in a real
+  browser before declaring it done, via the Playwright MCP baked into the workspace
+  (issue #243): start the dev server (test data only), open the affected route(s),
+  and check layout with computed styles (cheaper and less ambiguous than
+  screenshots; screenshot only to confirm), at mobile (375px) and desktop (1280px).
+  Computed-style checks are the workhorse: a documented, reusable check library
+  (`workspace/visual-checks.md`, baked into the image at
+  `/usr/local/share/seraphim/visual-checks.md`, issue #245) provides deterministic
+  centering / spacing / overflow / stacking pass-fail assertions the agent runs
+  through the Playwright MCP `browser_evaluate`. The per-repo dev-server facts live
+  in that repo's `CLAUDE.md` (i.e. `repositories.instructions`): record the dev
+  command, base URL/port, and key routes there, e.g. "dev server: `npm run dev` on
+  :5173; check /, /login, /dashboard". The loop degrades gracefully: a repo with no
+  runnable UI is skipped with a noted reason, never failed.
 - **Two-tier setup:** environment setup (`settings.base_setup_script`) runs once
   per provision/recreate (install CLIs/toolchains); per-repo setup
   (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).
@@ -263,15 +279,6 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   pinned to the Playwright version Plunder uses (`PLAYWRIGHT_VERSION` build arg);
   if that drifts, only the browser re-downloads on first run, never the slow apt
   dependency step.
-- **Visual self-review (issue #245):** a documented computed-style check library
-  (`workspace/visual-checks.md`) is baked into the image at
-  `/usr/local/share/seraphim/visual-checks.md`. It is the workhorse for verifying
-  layout: deterministic centering / spacing / overflow / stacking assertions the
-  agent runs through the Playwright MCP `browser_evaluate` (primary signal,
-  screenshots only to confirm), at 375px and 1280px. The agent's default
-  instructions point at this path (`VISUAL_CHECKS` in `orchestrator/prompt.rs`);
-  per-repo dev server URL + routes belong in each repo's `CLAUDE.md`.
-
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
 1. **sync** — polls every repo with `sync_issues` for open issues and upserts
    them into the **top** of **Available** (never clobbers human-set
@@ -443,6 +450,13 @@ cd frontend && npm run check && npm run build
 
 CI (`.github/workflows/ci.yml`) runs these three jobs independently (no
 fail-fast) on every PR and on `main`/`develop`.
+
+**Frontend dev server (for the agent's visual self-review, issue #244):**
+`cd frontend && npm run dev` serves the UI on `:5173` (`vite dev`, which proxies
+`/api` to the backend). Key routes to eyeball after a UI change: `/` (the kanban
+board), `/settings`, `/railways`, and `/task/<id>`. After any change to this
+frontend, follow the visual self-review loop (open the affected route(s) with the
+Playwright MCP, check layout via computed styles at 375px and 1280px).
 
 ## Conventions & gotchas
 
