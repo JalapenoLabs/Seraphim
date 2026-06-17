@@ -1,9 +1,10 @@
-//! Environment setup suggestions the agent makes, and the user acknowledging
-//! them.
+//! Recommendations the agent makes about a task, and the user acting on them.
 //!
-//! The agent's `seraphim-suggest` helper posts recommendations
-//! (`POST /agent/suggestions`); the task view checks them off
-//! (`POST /suggestions/:id/ack`) or turns one into a tracked issue
+//! Two kinds share this pipeline: **environment** setup tips (the `seraphim-suggest`
+//! helper) and end-of-task **follow-up work** the agent noticed, e.g. cleanup, tech
+//! debt, dead code, or security gaps (the `seraphim-followup` helper, issue #272).
+//! Both post to `POST /agent/suggestions`; the task view checks them off
+//! (`POST /suggestions/:id/ack`) or one-clicks one into a tracked issue
 //! (`POST /suggestions/:id/create`). They are listed as part of the task detail.
 
 use axum::extract::{Path, State};
@@ -27,12 +28,19 @@ const MAX_SUGGESTIONS: usize = 10;
 pub struct SuggestRequest {
     pub task_id: Uuid,
     pub suggestions: Vec<EnvSuggestionWrite>,
+    /// `"follow_up"` for end-of-task follow-up work (issue #272); anything else
+    /// (including omitted) is an environment setup recommendation.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
-/// `POST /api/v1/agent/suggestions` - the agent records setup recommendations.
+/// `POST /api/v1/agent/suggestions` - the agent records recommendations.
 ///
-/// Called from inside the workspace by `seraphim-suggest`. Blank-titled entries
-/// are skipped, and the board badge lights up for the task.
+/// Called from inside the workspace by `seraphim-suggest` (environment) and
+/// `seraphim-followup` (`kind = "follow_up"`). Blank-titled entries are skipped,
+/// and the board badge lights up for the task. For follow-up work, anything whose
+/// title already matches a task still on the board is dropped, so the agent never
+/// recommends work that is already queued (issue #272).
 pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<SuggestRequest>,
@@ -45,22 +53,95 @@ pub async fn create(
             .into_response());
     }
 
+    let kind = if body.kind.as_deref() == Some("follow_up") {
+        "follow_up"
+    } else {
+        "environment"
+    };
+    // The light de-dup applies only to follow-up work (environment tips are not
+    // board tasks); fetch the open board's titles once to compare against.
+    let queued_titles = if kind == "follow_up" {
+        queries::open_task_titles(&state.db).await?
+    } else {
+        Vec::new()
+    };
+
     let mut ids = Vec::new();
+    let mut skipped_duplicates = 0;
     for suggestion in body.suggestions.into_iter().take(MAX_SUGGESTIONS) {
         let title = suggestion.title.trim();
         if title.is_empty() {
             continue;
         }
-        let created =
-            queries::create_suggestion(&state.db, body.task_id, title, suggestion.detail.trim())
-                .await?;
+        if kind == "follow_up" && already_queued(title, &queued_titles) {
+            skipped_duplicates += 1;
+            continue;
+        }
+        let created = queries::create_suggestion(
+            &state.db,
+            body.task_id,
+            kind,
+            title,
+            suggestion.detail.trim(),
+        )
+        .await?;
         ids.push(created.id);
     }
 
     // The board badge reflects the new unacknowledged suggestions.
     state.notify_board();
 
-    Ok(Json(json!({ "suggestion_ids": ids })).into_response())
+    Ok(
+        Json(json!({ "suggestion_ids": ids, "skipped_duplicates": skipped_duplicates }))
+            .into_response(),
+    )
+}
+
+/// Normalizes a title for the light duplicate check: lowercased, with every run of
+/// non-alphanumeric characters collapsed to a single space and the ends trimmed. So
+/// "Add a security layer!" and "add  a  security layer" compare equal.
+fn normalize_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut pending_space = false;
+    for ch in title.chars() {
+        if ch.is_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_space = true;
+        }
+    }
+    out
+}
+
+/// Whether a follow-up `title` is already represented by one of the `queued` task
+/// titles. Deliberately light and deterministic (issue #272): a hit is normalized
+/// equality, or one normalized title fully containing the other when the shorter is
+/// substantial, to catch obvious restatements without over-matching on a shared
+/// word. Not a fuzzy/semantic match.
+fn already_queued(title: &str, queued: &[String]) -> bool {
+    // Below this many characters the containment rule is off, so short titles only
+    // match exactly (otherwise a common phrase would swallow unrelated work).
+    const MIN_CONTAIN_CHARS: usize = 12;
+    let needle = normalize_title(title);
+    if needle.is_empty() {
+        return false;
+    }
+    queued.iter().any(|other| {
+        let hay = normalize_title(other);
+        if hay == needle {
+            return true;
+        }
+        let (short, long) = if needle.len() <= hay.len() {
+            (needle.as_str(), hay.as_str())
+        } else {
+            (hay.as_str(), needle.as_str())
+        };
+        short.len() >= MIN_CONTAIN_CHARS && long.contains(short)
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,4 +305,44 @@ async fn create_jira_issue(
         .await
         .map_err(|error| error.to_string())?;
     Ok(issue.url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{already_queued, normalize_title};
+
+    #[test]
+    fn normalize_collapses_case_punctuation_and_spacing() {
+        assert_eq!(
+            normalize_title("Add a security layer!"),
+            "add a security layer"
+        );
+        assert_eq!(
+            normalize_title("  Dead-code   removal  "),
+            "dead code removal"
+        );
+        assert_eq!(normalize_title("!!!"), "");
+    }
+
+    #[test]
+    fn already_queued_matches_restatements_not_shared_words() {
+        let queued = vec![
+            "Add a security layer to uploads".to_string(),
+            "Photo upload system".to_string(),
+        ];
+        // Exact restatement (case/punctuation aside) is a duplicate.
+        assert!(already_queued("photo upload system", &queued));
+        // A substantial restatement contained in a queued title is a duplicate.
+        assert!(already_queued("Add a security layer!", &queued));
+        // Genuinely new work is not a duplicate, even sharing a word ("upload").
+        assert!(!already_queued("Add thumbnail generation", &queued));
+        // A short shared phrase must NOT over-match (containment rule is off).
+        assert!(!already_queued("add a test", &queued));
+    }
+
+    #[test]
+    fn already_queued_is_false_against_an_empty_board() {
+        assert!(!already_queued("anything at all", &[]));
+        assert!(!already_queued("", &["something".to_string()]));
+    }
 }

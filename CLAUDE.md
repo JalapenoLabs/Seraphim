@@ -170,13 +170,22 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   squash-merge, an external merge/close found by the review refresh, a per-task
   reset close, and the issue-close-on-Done path). Both flow through the
   synthetic CI turn (`get_or_create_ci_turn`).
-- **`environment_suggestions`** — setup recommendations the agent makes after a
-  task (`title`, `detail`, `acknowledged`). Posted by the agent's
-  `seraphim-suggest` helper; shown loudly on the board and as checkboxes on the
-  task until the user acknowledges them. A split "Create issue" button
-  (`POST /suggestions/:id/create` with `target` internal/github/jira) turns one
-  into a tracked issue (internal task, a GitHub issue in the task's repo via
-  octocrab, or a Jira ticket) and marks the recommendation done.
+- **`environment_suggestions`** — recommendations the agent makes about a task
+  (`title`, `detail`, `acknowledged`, `kind`), of two kinds sharing one pipeline:
+  `environment` setup tips (the `seraphim-suggest` helper) and, at the end of a
+  task, `follow_up` work it noticed but kept out of scope (dead/duplicate code,
+  tech debt, an inefficient process, a missing security layer, a now-unused system
+  to deprecate; the `seraphim-followup` helper, issue #272). Both post to
+  `POST /agent/suggestions` (`kind` defaults to `environment`); both show loudly on
+  the board (one badge, count is kind-agnostic) and as checkboxes on the task,
+  split by kind ("Environment recommendations" / "Follow-up work"), until
+  acknowledged. A split "Create issue" button (`POST /suggestions/:id/create` with
+  `target` internal/github/jira) turns one into a tracked issue (internal task, a
+  GitHub issue in the task's repo via octocrab, or a Jira ticket) and marks it done.
+  Follow-ups get a light de-dup: a normalized-title check (`suggestions::already_queued`,
+  unit-tested) drops any whose title matches a task still on the board, so the agent
+  never re-recommends queued work. Both standing instructions live in the shared
+  prompt header (`ENVIRONMENT_SUGGESTIONS`, `FOLLOW_UP_SUGGESTIONS`).
 - **`questions`** — decisions the agent escalated to the user, stored on the task
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and
@@ -382,12 +391,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    `waiting_for_input` if the agent asked a question), then (f) when nothing else is
    queued, *revisit* a PR it gave up on (`ci_blocked`), cooldown-gated
    (`REVISIT_COOLDOWN`, 15 min). The agent
-   asks via the `seraphim-ask` CLI, records environment recommendations via the
-   `seraphim-suggest` CLI, and uploads screenshots via the `seraphim-screenshot`
-   CLI (all baked into the workspace image), posting to `POST /agent/questions`,
-   `POST /agent/suggestions`, and `POST /agent/screenshots`; the exec injects
-   `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL`. One task awaited to completion before
-   the next (no overlap).
+   asks via the `seraphim-ask` CLI, records environment recommendations via
+   `seraphim-suggest`, bubbles up follow-up work via `seraphim-followup` (issue
+   #272), and uploads screenshots via `seraphim-screenshot` (all baked into the
+   workspace image), posting to `POST /agent/questions`, `POST /agent/suggestions`,
+   and `POST /agent/screenshots`; the exec injects `SERAPHIM_TASK_ID` +
+   `SERAPHIM_API_URL`. One task awaited to completion before the next (no overlap).
    - **Stacked dependencies (issue #256):** a fresh ticket that depends on another
      ticket whose PR is still open builds on a default branch that lacks that work.
      A `Depends on:` marker in the ticket body (e.g. `Depends on: A1 (package

@@ -2670,18 +2670,29 @@ pub async fn list_events_for_task(
 pub async fn create_suggestion(
     pool: &PgPool,
     task_id: Uuid,
+    kind: &str,
     title: &str,
     detail: &str,
 ) -> sqlx::Result<EnvSuggestion> {
     sqlx::query_as::<_, EnvSuggestion>(
-        "INSERT INTO environment_suggestions (task_id, title, detail) \
-         VALUES ($1, $2, $3) RETURNING *",
+        "INSERT INTO environment_suggestions (task_id, kind, title, detail) \
+         VALUES ($1, $2, $3, $4) RETURNING *",
     )
     .bind(task_id)
+    .bind(kind)
     .bind(title)
     .bind(detail)
     .fetch_one(pool)
     .await
+}
+
+/// Titles of every task that is not finished, i.e. still on the board as work
+/// (Available / To Do / In Progress / In Review). Used as the light de-dup check
+/// (issue #272) so the agent never recommends follow-up work already queued.
+pub async fn open_task_titles(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar("SELECT title FROM tasks WHERE board_column NOT IN ('done', 'ignored')")
+        .fetch_all(pool)
+        .await
 }
 
 /// One suggestion by id (to act on it, e.g. create an issue from it).

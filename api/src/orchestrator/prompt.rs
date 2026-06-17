@@ -476,6 +476,9 @@ fn context_header(
     // Shared by every mode: noticing missing tooling can happen on any run, so
     // the recommend-improvements guidance lives in the common header.
     prompt.push_str(ENVIRONMENT_SUGGESTIONS);
+    // Likewise follow-up work the agent spots while working (issue #272): bubble it
+    // up at the end so the operator can one-click it into a ticket.
+    prompt.push_str(FOLLOW_UP_SUGGESTIONS);
     // Build-then-verify for UI work: first steer toward the repo's design vocabulary
     // (issue #247) so spacing is picked from a fixed set, then the self-review loop
     // checks the result. Both are shared by every mode.
@@ -563,6 +566,23 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
     \x20 JSON\n\n\
     Only suggest things that genuinely help; if nothing comes to mind, skip it. \
     This does not replace opening the pull request.\n";
+
+/// Guidance, appended to every task prompt, on bubbling up follow-up work (#272).
+const FOLLOW_UP_SUGGESTIONS: &str = "\n\
+    # Recommend follow-up work\n\
+    As you work, keep an eye out for follow-up work worth its own ticket that is \
+    OUTSIDE this task's scope: dead or duplicated code you noticed, tech debt, an \
+    inefficient or fragile process, a missing security layer, or a now-unused system \
+    that could be deprecated. Do NOT do this work now (it belongs in its own ticket) \
+    and do NOT pad your PR with it. Instead, at the end, bubble each up so the \
+    operator can one-click it into a ticket. Keep it LIGHT: only genuine, specific \
+    finds, and skip anything already covered by a ticket in the queue (the API also \
+    drops follow-ups whose title matches a task already on the board). If nothing \
+    stands out, skip this entirely. Pass valid JSON to `seraphim-followup` on stdin \
+    via a heredoc:\n\n\
+    \x20 seraphim-followup <<'JSON'\n\
+    \x20 {\"suggestions\":[{\"title\":\"<short, specific follow-up>\",\"detail\":\"<what and why, e.g. which dead code or what security gap>\"}]}\n\
+    \x20 JSON\n";
 
 /// Standing instruction (issue #247) to build UI from the repo's design vocabulary
 /// rather than ad-hoc spacing.

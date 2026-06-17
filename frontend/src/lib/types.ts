@@ -390,6 +390,9 @@ export type EnvSuggestion = {
   task_id: string
   title: string
   detail: string
+  // 'environment' (setup tips) or 'follow_up' (cleanup / tech debt / dead code /
+  // security / deprecations the agent spotted while working; issue #272).
+  kind: string
   acknowledged: boolean
   created_at: string
   acknowledged_at: string | null

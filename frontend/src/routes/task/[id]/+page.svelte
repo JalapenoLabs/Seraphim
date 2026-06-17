@@ -66,6 +66,12 @@
   let task = $state<Task | null>(null)
   let events = $state<StreamEvent[]>([])
   let suggestions = $state<EnvSuggestion[]>([])
+  // Split by kind (issue #272): environment setup tips vs follow-up work the agent
+  // noticed. Both render with the same checkbox + create-issue control.
+  const envSuggestions = $derived(suggestions.filter((suggestion) => suggestion.kind !== 'follow_up'))
+  const followUpSuggestions = $derived(
+    suggestions.filter((suggestion) => suggestion.kind === 'follow_up')
+  )
   let questions = $state<Question[]>([])
   let pullRequests = $state<TaskPullRequest[]>([])
   let screenshots = $state<TaskScreenshot[]>([])
@@ -584,16 +590,15 @@
       </section>
     {/if}
 
-    {#if suggestions.length}
-      <!-- Loud on the task too: the checkboxes here are what clear the board badge. -->
+    <!-- A list of the agent's recommendations of one kind. Loud on the task too:
+         the checkboxes here are what clear the board badge. Shared by the
+         environment tips and the follow-up work (issue #272). -->
+    {#snippet suggestionList(items: EnvSuggestion[], heading: string, blurb: string)}
       <section class="rounded-lg border border-warning/50 bg-card p-3">
-        <h2 class="text-sm font-semibold">💡 Environment recommendations</h2>
-        <p class="mt-0.5 text-xs text-muted-foreground">
-          Things the agent thinks would make future runs smoother. Check one off once you have
-          handled it; unchecked ones stay loud on the board.
-        </p>
+        <h2 class="text-sm font-semibold">{heading}</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground">{blurb}</p>
         <ul class="mt-2 divide-y divide-border">
-          {#each suggestions as suggestion (suggestion.id)}
+          {#each items as suggestion (suggestion.id)}
             <li class="flex items-start justify-between gap-3 py-2">
               <button
                 type="button"
@@ -635,6 +640,22 @@
           {/each}
         </ul>
       </section>
+    {/snippet}
+
+    {#if envSuggestions.length}
+      {@render suggestionList(
+        envSuggestions,
+        '💡 Environment recommendations',
+        'Things the agent thinks would make future runs smoother. Check one off once you have handled it; unchecked ones stay loud on the board.'
+      )}
+    {/if}
+
+    {#if followUpSuggestions.length}
+      {@render suggestionList(
+        followUpSuggestions,
+        '🧹 Follow-up work',
+        'Work the agent noticed but kept out of this task (dead code, tech debt, security, deprecations). Check one off, or one-click it into a ticket; unchecked ones stay loud on the board.'
+      )}
     {/if}
 
     {#if screenshots.length}
