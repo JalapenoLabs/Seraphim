@@ -545,9 +545,12 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
     If during the task you noticed tooling or setup that was missing or would \
     make future runs on a fresh workstation go smoother (a toolchain you had to \
     install, a CLI that was absent, a slow step that a cached tool would fix), \
-    record it before you finish so it is not buried in your output. Run:\n\n\
-    \x20 seraphim-suggest '{\"suggestions\":[{\"title\":\"<short recommendation>\",\
-    \"detail\":\"<why it helps and how to apply it, e.g. a setup-script snippet>\"}]}'\n\n\
+    record it before you finish so it is not buried in your output. Pass valid \
+    JSON to `seraphim-suggest` on stdin via a heredoc, so quotes and apostrophes \
+    in your text never need shell-escaping:\n\n\
+    \x20 seraphim-suggest <<'JSON'\n\
+    \x20 {\"suggestions\":[{\"title\":\"<short recommendation>\",\"detail\":\"<why it helps, e.g. a setup-script snippet>\"}]}\n\
+    \x20 JSON\n\n\
     Only suggest things that genuinely help; if nothing comes to mind, skip it. \
     This does not replace opening the pull request.\n";
 
@@ -556,9 +559,13 @@ const ASKING_FOR_HELP: &str = "\n\
     # Asking the user for help\n\
     If you hit a decision you should not guess on (an ambiguous requirement, a \
     tradeoff with no clear winner, missing access, or anything where a wrong \
-    assumption would be costly), ask the user instead of guessing. Run:\n\n\
-    \x20 seraphim-ask '{\"questions\":[{\"prompt\":\"<your question>\",\
-    \"options\":[{\"title\":\"<short answer>\",\"description\":\"<why this>\"}]}]}'\n\n\
+    assumption would be costly), ask the user instead of guessing. Pass valid \
+    JSON to `seraphim-ask` on stdin via a heredoc, so quotes and apostrophes in \
+    your question never need shell-escaping (a malformed payload is rejected with \
+    an error, never shown to the user as a question):\n\n\
+    \x20 seraphim-ask <<'JSON'\n\
+    \x20 {\"questions\":[{\"prompt\":\"<your question>\",\"options\":[{\"title\":\"<short answer>\",\"description\":\"<why this>\"}]}]}\n\
+    \x20 JSON\n\n\
     Offer up to 3 suggested options per question, and you may ask several \
     questions at once. After running it, STOP and end your turn; you will be \
     automatically resumed once the user answers. Prefer asking over guessing \
@@ -884,6 +891,27 @@ mod tests {
             &[],
         );
         assert!(!prompt.contains("Stacked on unmerged dependencies"));
+    }
+
+    #[test]
+    fn help_guidance_uses_the_stdin_heredoc_form() {
+        // Issue #260: recommend the heredoc stdin form, which sidesteps the shell
+        // quoting of quotes/apostrophes that produced malformed payloads, and tell
+        // the agent a malformed payload is rejected rather than shown to the user.
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+        );
+        assert!(prompt.contains("seraphim-ask <<'JSON'"));
+        assert!(prompt.contains("seraphim-suggest <<'JSON'"));
+        assert!(prompt.contains("malformed payload is rejected"));
+        // The brittle single-quoted-argument example is gone.
+        assert!(!prompt.contains("seraphim-ask '{"));
     }
 
     #[test]
