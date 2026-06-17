@@ -167,6 +167,14 @@ COPY visual-checks.md /usr/local/share/seraphim/visual-checks.md
 # each opted-in repo, never here.
 COPY visual-regression.md /usr/local/share/seraphim/visual-regression.md
 
+# --- Design-system guidance (issue #247) --------------------------------------
+# Build-time guidance to compose UI from the repo's existing tokens/primitives
+# instead of ad-hoc spacing (fewer degrees of freedom, fewer ways to be wrong),
+# plus the optional path for implementing against a Figma spec when a Figma MCP is
+# configured. Baked at the fixed path the default instructions point at; the
+# concrete tokens/primitives live in each repo under test, not here.
+COPY design-system.md /usr/local/share/seraphim/design-system.md
+
 # --- Throwaway PostgreSQL 17 helper (boots a local cluster for DB validation) -
 COPY pg-ephemeral /usr/local/bin/pg-ephemeral
 RUN chmod +x /usr/local/bin/pg-ephemeral
