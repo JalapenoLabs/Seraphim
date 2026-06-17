@@ -191,9 +191,16 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   JSON: a dedicated `GET /screenshots/:id` streams them (immutable cache), and
   `TaskDetail.screenshots` carries metadata only. The task view renders them as a
   lazy-loaded gallery (newest first, caption / route / dimensions; click opens the
-  full image). Privacy: dev/test-data screenshots only, since the bytes persist in
-  Postgres (respect at-rest disk encryption as with the other blobs/secrets). The
-  optional GitHub-issue/PR attachment toggle is not built yet (left to a follow-up).
+  full image). On capture, the upload handler also emits a `screenshot` **activity
+  event** (issue #249) onto the task's current turn (`append_event` + `notify_task`,
+  mirroring `ci_watch`), carrying the id + metadata, never the bytes. That surfaces
+  the screenshot as a lazy-loaded inline **thumbnail** in the live activity feed
+  (watch page) and the task's saved history; clicking any thumbnail (feed, history,
+  or gallery) opens the shared `ScreenshotLightbox` (fullscreen, Escape to close,
+  arrow-key paging through that task's screenshots, click to zoom). Privacy:
+  dev/test-data screenshots only, since the bytes persist in Postgres (respect
+  at-rest disk encryption as with the other blobs/secrets). The optional
+  GitHub-issue/PR attachment toggle is not built yet (left to a follow-up).
 - **`heart_attacks`** — recorded "heart attacks" (turns that died mid-flight),
   written by the defibrillator loop (see above), never by a request. Each holds a
   task snapshot, the status at death, the diagnostic `detail` (error logs kept for

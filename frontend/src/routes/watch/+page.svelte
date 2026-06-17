@@ -19,6 +19,7 @@
   import { mapActivityEvent, DEFAULT_EXCLUDES } from '$lib/runewood/mapEvent'
   import UsageGauges from '$lib/components/stats/UsageGauges.svelte'
   import LifetimeTotals from '$lib/components/stats/LifetimeTotals.svelte'
+  import ScreenshotLightbox from '$lib/components/ScreenshotLightbox.svelte'
 
   let board = $state<BoardResponse | null>(null)
   let boardStream: EventSource | null = null
@@ -64,9 +65,27 @@
     // For CI events, the step status ('step_passed' | 'step_failed' | ...) so the
     // glyph can be colored green/red rather than the type's single color.
     status?: string
+    // For screenshot events (issue #249), the id to render a thumbnail / open the
+    // viewer; the bytes are fetched on demand, never carried in the feed payload.
+    screenshotId?: string
   }
   let feed = $state<FeedEntry[]>([])
   let feedSeq = 0
+
+  // The fullscreen screenshot viewer (issue #249), or null when closed. Opening a
+  // feed thumbnail pages through that task's screenshots currently in the feed.
+  let lightbox = $state<{ items: { id: string; caption?: string }[]; index: number } | null>(null)
+
+  function openScreenshot(entry: FeedEntry) {
+    const items: { id: string; caption?: string }[] = []
+    for (const candidate of feed) {
+      if (candidate.type === 'screenshot' && candidate.screenshotId && candidate.taskId === entry.taskId) {
+        items.push({ id: candidate.screenshotId, caption: candidate.text })
+      }
+    }
+    const found = items.findIndex((shot) => shot.id === entry.screenshotId)
+    lightbox = { items, index: found < 0 ? 0 : found }
+  }
   const MAX_FEED = 60
   let feedEl = $state<HTMLDivElement>()
 
@@ -215,7 +234,8 @@
     result: { glyph: '✓', color: 'text-success' },
     rate_limit: { glyph: '◷', color: 'text-info' },
     ci: { glyph: '●', color: 'text-info' },
-    lifecycle: { glyph: '⬢', color: 'text-primary' }
+    lifecycle: { glyph: '⬢', color: 'text-primary' },
+    screenshot: { glyph: '▣', color: 'text-accent' }
   }
 
   // CI glyph color follows the step status (green pass / red fail / info running),
@@ -280,6 +300,12 @@
         return firstLine(payload?.text)
       case 'lifecycle':
         return lifecycleLine(payload)
+      case 'screenshot':
+        return payload?.caption
+          ? String(payload.caption)
+          : payload?.route
+            ? `screenshot ${String(payload.route)}`
+            : 'screenshot'
       default:
         return null
     }
@@ -317,7 +343,8 @@
         : type === 'lifecycle'
           ? String(payload?.action ?? '')
           : undefined
-    const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at, status }
+    const screenshotId = type === 'screenshot' ? String(payload?.id ?? '') : undefined
+    const entry: FeedEntry = { id: feedSeq++, taskId, type, text, at, status, screenshotId }
     feed = [...feed, entry].slice(-MAX_FEED)
     // Keep the newest line in view (terminal-style autoscroll).
     await tick()
@@ -775,7 +802,24 @@
                 {taskLabel(entry.taskId)}
               </span>
               <span class="w-[1ch] shrink-0 text-center {glyphColor}">{meta.glyph}</span>
-              <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
+              {#if entry.type === 'screenshot' && entry.screenshotId}
+                <button
+                  type="button"
+                  onclick={() => openScreenshot(entry)}
+                  class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  title="Open screenshot"
+                >
+                  <img
+                    src={`/api/v1/screenshots/${entry.screenshotId}`}
+                    alt={entry.text}
+                    loading="lazy"
+                    class="h-8 w-12 flex-none rounded border border-white/10 bg-white/5 object-cover"
+                  />
+                  <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
+                </button>
+              {:else}
+                <span class="min-w-0 flex-1 truncate text-foreground/90">{entry.text}</span>
+              {/if}
             </div>
           {/each}
         </div>
@@ -802,6 +846,14 @@
     </section>
   </div>
 </div>
+
+{#if lightbox}
+  <ScreenshotLightbox
+    items={lightbox.items}
+    index={lightbox.index}
+    onClose={() => (lightbox = null)}
+  />
+{/if}
 
 <style>
   .aura {

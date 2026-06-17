@@ -50,6 +50,7 @@
   import IssueView from '$lib/components/IssueView.svelte'
   import RepoMultiSelect from '$lib/components/RepoMultiSelect.svelte'
   import SuggestionCreateButton from '$lib/components/SuggestionCreateButton.svelte'
+  import ScreenshotLightbox from '$lib/components/ScreenshotLightbox.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import Markdown from '$lib/components/Markdown.svelte'
   import JsonHighlight from '$lib/components/JsonHighlight.svelte'
@@ -69,6 +70,25 @@
   let pullRequests = $state<TaskPullRequest[]>([])
   let screenshots = $state<TaskScreenshot[]>([])
   let eventSource: EventSource | null = null
+
+  // The fullscreen screenshot viewer (issue #249): the set to page through and the
+  // index that is open, or null when closed.
+  let lightbox = $state<{
+    items: { id: string; caption?: string; route?: string }[]
+    index: number
+  } | null>(null)
+
+  // Opens the viewer at a screenshot id, paging through all of this task's
+  // screenshots (newest first, matching the gallery and feed order).
+  function openScreenshot(id: string) {
+    const items = screenshots.map((shot) => ({
+      id: shot.id,
+      caption: shot.caption,
+      route: shot.route
+    }))
+    const found = items.findIndex((shot) => shot.id === id)
+    lightbox = { items, index: found < 0 ? 0 : found }
+  }
 
   // Target-repo picker, shown only for internal tickets (a GitHub task's repo is
   // its issue's and never reassigned). Internal tickets can target several repos
@@ -632,11 +652,10 @@
         <div class="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3">
           {#each screenshots as shot (shot.id)}
             <figure class="min-w-0">
-              <a
-                href={`/api/v1/screenshots/${shot.id}`}
-                target="_blank"
-                rel="noreferrer"
-                class="block overflow-hidden rounded border border-border hover:border-primary"
+              <button
+                type="button"
+                onclick={() => openScreenshot(shot.id)}
+                class="block w-full overflow-hidden rounded border border-border hover:border-primary"
                 title="Open full screenshot"
               >
                 <img
@@ -645,7 +664,7 @@
                   loading="lazy"
                   class="h-32 w-full bg-muted object-cover"
                 />
-              </a>
+              </button>
               <figcaption class="mt-1 flex flex-col gap-0.5">
                 {#if shot.caption}
                   <span class="truncate text-xs font-medium" title={shot.caption}>
@@ -948,6 +967,36 @@
                       >{describe(event)}</span
                     >
                   </div>
+                {:else if event.type === 'screenshot'}
+                  <!-- A screenshot the agent captured (issue #249): a small inline
+                       thumbnail, lazy-loaded, that opens the fullscreen viewer. -->
+                  {@const shotPayload = event.payload as Record<string, unknown>}
+                  {@const shotId = String(shotPayload.id ?? '')}
+                  {@const shotCaption = shotPayload.caption ? String(shotPayload.caption) : ''}
+                  {@const shotRoute = shotPayload.route ? String(shotPayload.route) : ''}
+                  <div class="flex items-start gap-2 py-0.5">
+                    <span class="w-[1ch] flex-none text-muted-foreground">▣</span>
+                    <span class="min-w-0 flex-1">
+                      <button
+                        type="button"
+                        onclick={() => openScreenshot(shotId)}
+                        class="block overflow-hidden rounded border border-border hover:border-primary"
+                        title="Open screenshot"
+                      >
+                        <img
+                          src={`/api/v1/screenshots/${shotId}`}
+                          alt={shotCaption || shotRoute || 'agent screenshot'}
+                          loading="lazy"
+                          class="h-20 max-w-[12rem] bg-muted object-cover"
+                        />
+                      </button>
+                      {#if shotCaption || shotRoute}
+                        <span class="mt-0.5 block truncate text-xs text-muted-foreground">
+                          {shotCaption}{shotCaption && shotRoute ? ' · ' : ''}{shotRoute}
+                        </span>
+                      {/if}
+                    </span>
+                  </div>
                 {:else if collapsible}
                   <button
                     type="button"
@@ -985,3 +1034,11 @@
     <p class="text-muted-foreground">Loading…</p>
   {/if}
 </div>
+
+{#if lightbox}
+  <ScreenshotLightbox
+    items={lightbox.items}
+    index={lightbox.index}
+    onClose={() => (lightbox = null)}
+  />
+{/if}
