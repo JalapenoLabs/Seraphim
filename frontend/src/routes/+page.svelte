@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DndEvent } from 'svelte-dnd-action'
-  import type { HeartAttack, Railway, RepoSyncError, Settings, Task, TaskColumn } from '$lib/types'
+  import type { HeartAttack, Railway, RepoSyncError, Settings, SourceKind, Task, TaskColumn } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { SvelteSet } from 'svelte/reactivity'
@@ -46,6 +46,7 @@
   import Card from '$lib/components/Card.svelte'
   import ColumnSort from '$lib/components/ColumnSort.svelte'
   import RailwayLane from '$lib/components/RailwayLane.svelte'
+  import SourceIcon from '$lib/components/SourceIcon.svelte'
   import Stats from '$lib/components/Stats.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -108,6 +109,7 @@
   // Lives only in the browser; it never changes what the agent picks up.
   let filtersOpen = $state(false)
   let filterRepoIds = new SvelteSet<string>()
+  let filterSourceKinds = new SvelteSet<SourceKind>()
   let filterCreatedAfter = $state('') // inclusive YYYY-MM-DD, or '' for unset
   let filterCreatedBefore = $state('') // inclusive YYYY-MM-DD, or '' for unset
 
@@ -118,15 +120,39 @@
       .sort((left, right) => left.full_name.localeCompare(right.full_name))
   )
 
+  // The source kinds, in a stable display order, restricted to those actually
+  // present on the board so we never offer (say) Jira before any Jira card exists.
+  const SOURCE_LABELS = { github: 'GitHub', jira: 'Jira', internal: 'Internal' } as const
+  const sourceOptions = $derived.by(() => {
+    const present = new Set<SourceKind>()
+    for (const buckets of Object.values(columnsByRailway)) {
+      for (const tasks of Object.values(buckets)) {
+        for (const task of tasks) {
+          present.add(task.source_kind)
+        }
+      }
+    }
+    return (['github', 'jira', 'internal'] as const)
+      .filter((kind) => present.has(kind))
+      .map((kind) => ({ kind, label: SOURCE_LABELS[kind] }))
+  })
+
   const activeFilterCount = $derived(
-    filterRepoIds.size + (filterCreatedAfter ? 1 : 0) + (filterCreatedBefore ? 1 : 0)
+    filterRepoIds.size +
+      filterSourceKinds.size +
+      (filterCreatedAfter ? 1 : 0) +
+      (filterCreatedBefore ? 1 : 0)
   )
   const filterActive = $derived(activeFilterCount > 0)
 
-  // Whether a task passes the active filters. Repo filter is an OR over the
-  // selected repos; the date bounds are inclusive of the chosen calendar days.
+  // Whether a task passes the active filters. The repo and source filters are each
+  // an OR within their own selected values and an AND across dimensions; the date
+  // bounds are inclusive of the chosen calendar days.
   function matchesFilter(task: Task): boolean {
     if (filterRepoIds.size > 0 && !(task.repo_id && filterRepoIds.has(task.repo_id))) {
+      return false
+    }
+    if (filterSourceKinds.size > 0 && !filterSourceKinds.has(task.source_kind)) {
       return false
     }
     if (filterCreatedAfter && new Date(task.created_at) < new Date(`${filterCreatedAfter}T00:00:00`)) {
@@ -146,8 +172,17 @@
     }
   }
 
+  function toggleSourceFilter(kind: SourceKind) {
+    if (filterSourceKinds.has(kind)) {
+      filterSourceKinds.delete(kind)
+    } else {
+      filterSourceKinds.add(kind)
+    }
+  }
+
   function clearFilters() {
     filterRepoIds.clear()
+    filterSourceKinds.clear()
     filterCreatedAfter = ''
     filterCreatedBefore = ''
   }
@@ -962,6 +997,34 @@
             {/each}
             {#if repoOptions.length === 0}
               <p class="text-sm text-muted-foreground">No repositories.</p>
+            {/if}
+          </div>
+        </div>
+
+        <div>
+          <Label class="text-xs uppercase tracking-wide text-muted-foreground">Source</Label>
+          <div class="mt-2 space-y-1">
+            {#each sourceOptions as source (source.kind)}
+              {@const checked = filterSourceKinds.has(source.kind)}
+              <button
+                type="button"
+                onclick={() => toggleSourceFilter(source.kind)}
+                aria-pressed={checked}
+                class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-secondary"
+              >
+                <span
+                  class="flex size-4 flex-none items-center justify-center rounded border {checked
+                    ? 'border-primary bg-primary text-primary-foreground'
+                    : 'border-input'}"
+                >
+                  {#if checked}<Check class="size-3" />{/if}
+                </span>
+                <SourceIcon source={source.kind} class="size-4 flex-none" />
+                <span class="truncate">{source.label}</span>
+              </button>
+            {/each}
+            {#if sourceOptions.length === 0}
+              <p class="text-sm text-muted-foreground">No cards.</p>
             {/if}
           </div>
         </div>
