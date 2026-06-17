@@ -35,6 +35,7 @@ pub async fn provision_workspace(state: &AppState) -> Result<()> {
     provision::provision_workspace(state, &main).await
 }
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -1121,6 +1122,41 @@ async fn reset_github_side(
                     Ok(()) => {
                         summary.pr_closed = true;
                         info!(task_id = %task.id, pr = pull.number, "reset: closed the pull request");
+
+                        // Surface the close once (#226) and consume the tracked row by
+                        // marking it closed, so the review loop's refresh never
+                        // re-announces this same closure if the task is re-worked later.
+                        let multi = task_is_multi_repo(state, task.id).await;
+                        let number = i64::try_from(pull.number).unwrap_or_default();
+                        if let Err(error) = queries::upsert_task_pr(
+                            &state.db,
+                            task.id,
+                            Some(repo.id),
+                            &repo.full_name,
+                            number,
+                            &pull.html_url,
+                            &pull.head_sha,
+                            "",
+                            "closed",
+                        )
+                        .await
+                        {
+                            warn!(error = %error, task_id = %task.id, "reset: failed to mark the PR closed");
+                        }
+                        if let Err(error) = emit_lifecycle_event(
+                            state,
+                            task.id,
+                            "pr_closed",
+                            &pull.title,
+                            &pull.html_url,
+                            short_repo_name(&repo.full_name),
+                            number,
+                            multi,
+                        )
+                        .await
+                        {
+                            warn!(error = %error, task_id = %task.id, "reset: failed to emit pr_closed lifecycle event");
+                        }
                     }
                     Err(error) => {
                         warn!(error = %error, task_id = %task.id, "reset: failed to close the pull request");
@@ -2137,7 +2173,7 @@ async fn review_task(
             if let Some(repo_id) = task.repo_id {
                 if let Some(repo) = queries::get_repository(&state.db, repo_id).await? {
                     if let Ok((owner, name)) = split_full_name(&repo.full_name) {
-                        close_linked_issue(github, settings, task, owner, name).await;
+                        close_linked_issue(state, github, settings, task, owner, name).await;
                     }
                 }
             }
@@ -2185,6 +2221,31 @@ async fn merge_task_prs(
                 )
                 .await?;
                 info!(task_id = %task.id, pr = %pr.pr_url, "auto-merged a PR");
+
+                // Surface the merge in the activity feed and the task's history (#226).
+                // The PR title is not stored on the row, so read it back (a rare path,
+                // one GET per merged PR); a lookup failure just drops the title.
+                let multi = prs
+                    .iter()
+                    .map(|other| other.repo_full_name.as_str())
+                    .collect::<HashSet<_>>()
+                    .len()
+                    > 1;
+                let title = git::pr_status(github, owner, name, number)
+                    .await
+                    .map(|status| status.title)
+                    .unwrap_or_default();
+                emit_lifecycle_event(
+                    state,
+                    task.id,
+                    "pr_merged",
+                    &title,
+                    &pr.pr_url,
+                    short_repo_name(&pr.repo_full_name),
+                    pr.pr_number,
+                    multi,
+                )
+                .await?;
             }
             Err(error) => {
                 if task.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS {
@@ -2284,7 +2345,19 @@ async fn detect_task_prs(
     let Some(branch) = task.branch.as_deref() else {
         return Ok(0);
     };
+
+    // The PRs already tracked before this pass, so we announce "PR opened" only for
+    // genuinely new ones (#226). Detection runs repeatedly (the In Review transition
+    // plus the review loop's re-detect while awaiting), so the existing-row guard is
+    // what keeps each PR's opened line to exactly once, surviving process restarts.
+    let known: HashSet<(String, i64)> = queries::list_task_prs(&state.db, task.id)
+        .await?
+        .into_iter()
+        .map(|pr| (pr.repo_full_name, pr.pr_number))
+        .collect();
+
     let mut found = 0;
+    let mut opened: Vec<(String, String, i64, String)> = Vec::new();
     for repo in queries::list_repositories(&state.db)
         .await?
         .into_iter()
@@ -2296,13 +2369,14 @@ async fn detect_task_prs(
         let Some(pull) = git::find_open_pr_for_branch(github, owner, name, branch).await? else {
             continue;
         };
+        let number = i64::try_from(pull.number).unwrap_or_default();
         let ci = ci_state_label(&git::ci_status(github, owner, name, &pull.head_sha).await?);
         queries::upsert_task_pr(
             &state.db,
             task.id,
             Some(repo.id),
             &repo.full_name,
-            i64::try_from(pull.number).unwrap_or_default(),
+            number,
             &pull.html_url,
             &pull.head_sha,
             ci,
@@ -2310,6 +2384,33 @@ async fn detect_task_prs(
         )
         .await?;
         found += 1;
+        if !known.contains(&(repo.full_name.clone(), number)) {
+            opened.push((
+                repo.full_name.clone(),
+                pull.title.clone(),
+                number,
+                pull.html_url,
+            ));
+        }
+    }
+
+    // Announce each newly detected PR once the full set is known, so the multi-repo
+    // tag reflects the whole task rather than detection order.
+    if !opened.is_empty() {
+        let multi = task_is_multi_repo(state, task.id).await;
+        for (full_name, title, number, url) in opened {
+            emit_lifecycle_event(
+                state,
+                task.id,
+                "pr_opened",
+                &title,
+                &url,
+                short_repo_name(&full_name),
+                number,
+                multi,
+            )
+            .await?;
+        }
     }
     Ok(found)
 }
@@ -2336,6 +2437,9 @@ async fn refresh_task_prs(
     github: &octocrab::Octocrab,
     task: &Task,
 ) -> Result<Vec<TaskPullRequest>> {
+    // Whether this task spans more than one repo, so a settled-PR line names the
+    // repo (#226). Computed once; the PR set is stable across this refresh.
+    let multi = task_is_multi_repo(state, task.id).await;
     for pr in queries::list_task_prs(&state.db, task.id).await? {
         if pr.pr_state != "open" {
             continue; // merged/closed PRs are settled.
@@ -2366,6 +2470,28 @@ async fn refresh_task_prs(
             pr_state,
         )
         .await?;
+
+        // A PR that settled outside Seraphim (it was open in our DB until this poll)
+        // gets one lifecycle line on the transition. Our own squash-merge marks the
+        // row "merged" before this runs, so it is skipped above and never doubled.
+        let action = match status.lifecycle {
+            git::PrLifecycle::Merged => Some("pr_merged"),
+            git::PrLifecycle::Closed => Some("pr_closed"),
+            git::PrLifecycle::Open => None,
+        };
+        if let Some(action) = action {
+            emit_lifecycle_event(
+                state,
+                task.id,
+                action,
+                &status.title,
+                &pr.pr_url,
+                short_repo_name(&pr.repo_full_name),
+                pr.pr_number,
+                multi,
+            )
+            .await?;
+        }
     }
     Ok(queries::list_task_prs(&state.db, task.id).await?)
 }
@@ -2467,6 +2593,7 @@ async fn collect_failing_checks(
 /// is logged and swallowed so it never affects the completed task. Closing an
 /// already-closed issue is harmless.
 async fn close_linked_issue(
+    state: &AppState,
     github: &octocrab::Octocrab,
     settings: &crate::db::models::Settings,
     task: &Task,
@@ -2490,11 +2617,87 @@ async fn close_linked_issue(
     )
     .await
     {
-        Ok(_) => info!(task_id = %task.id, issue = %task.external_id, "closed the linked issue"),
+        Ok(_) => {
+            info!(task_id = %task.id, issue = %task.external_id, "closed the linked issue");
+            // Surface the closure in the activity feed and the task's history (#226).
+            let number = task.external_id.trim().parse::<i64>().unwrap_or_default();
+            let url = format!("https://github.com/{owner}/{repo_name}/issues/{number}");
+            let multi = task_is_multi_repo(state, task.id).await;
+            if let Err(error) = emit_lifecycle_event(
+                state,
+                task.id,
+                "issue_closed",
+                &task.title,
+                &url,
+                short_repo_name(repo_name),
+                number,
+                multi,
+            )
+            .await
+            {
+                warn!(error = %error, task_id = %task.id, "failed to emit issue_closed lifecycle event");
+            }
+        }
         Err(error) => {
             warn!(error = %error, task_id = %task.id, "failed to close the linked issue");
         }
     }
+}
+
+/// The short repo name (the part after the owner), e.g. `Plunder` from
+/// `JalapenoLabs/Plunder`. Used to tag a lifecycle line for a multi-repo task.
+fn short_repo_name(repo_full_name: &str) -> &str {
+    repo_full_name.rsplit('/').next().unwrap_or(repo_full_name)
+}
+
+/// Whether the task's tracked PRs span more than one repo, so a lifecycle line
+/// should name the repo (`repo#number`) to disambiguate. Single-repo tasks read
+/// cleanly without the tag, matching how the CI events stay untagged when there
+/// is only one PR. Any lookup failure degrades to "not multi-repo" (no tag).
+async fn task_is_multi_repo(state: &AppState, task_id: uuid::Uuid) -> bool {
+    let prs = queries::list_task_prs(&state.db, task_id)
+        .await
+        .unwrap_or_default();
+    let repos: HashSet<&str> = prs.iter().map(|pr| pr.repo_full_name.as_str()).collect();
+    repos.len() > 1
+}
+
+/// Persists and broadcasts a deterministic PR/issue lifecycle event (#226): the
+/// open/merge/close moments the orchestrator drives via octocrab, which otherwise
+/// never reach the activity feed. It mirrors the CI watcher's `emit_persisted`
+/// exactly: the event lands in the synthetic CI turn (so it flows through the same
+/// `events` table + task SSE stream as agent and CI events) and is streamed live.
+///
+/// The payload is kept source-agnostic so a future Jira source (transition,
+/// comment) can reuse this same `lifecycle` type. `repo` is the short repo name,
+/// included only when the task spans more than one repo (empty otherwise), so the
+/// frontend shows a `repo#number` tag exactly when it disambiguates.
+#[allow(clippy::too_many_arguments)]
+async fn emit_lifecycle_event(
+    state: &AppState,
+    task_id: uuid::Uuid,
+    action: &str,
+    title: &str,
+    url: &str,
+    repo: &str,
+    number: i64,
+    multi_repo: bool,
+) -> Result<()> {
+    let turn = queries::get_or_create_ci_turn(&state.db, task_id).await?;
+    let seq = queries::next_event_seq(&state.db, turn.id).await?;
+    let payload = serde_json::json!({
+        "action": action,
+        "title": title,
+        "url": url,
+        "repo": if multi_repo { repo } else { "" },
+        "number": number,
+    });
+    queries::append_event(&state.db, turn.id, seq, "lifecycle", payload.clone()).await?;
+    state.notify_task(
+        task_id,
+        serde_json::json!({ "type": "lifecycle", "payload": payload, "created_at": Utc::now() }),
+    );
+    Ok(())
 }
 
 /// Records a task failure: captures the message and surfaces it in `In Review`.

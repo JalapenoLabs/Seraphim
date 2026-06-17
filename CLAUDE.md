@@ -153,7 +153,19 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   `board_column`, `position` (fractional rank), `status`, `branch`, `pr_url`,
   `error`, `hold`, `session_id`.
 - **`turns`** / **`events`** — per-task Claude invocations and the append-only
-  parsed stream-json (live feed + chat history).
+  parsed stream-json (live feed + chat history). Beyond the Claude stream, the
+  orchestrator injects synthetic non-Claude events into the same `events` table +
+  task SSE stream so they render with no special transport: `ci` step activity
+  (issue #185, `orchestrator::ci_watch`) and `lifecycle` PR/issue moments (issue
+  #226, `orchestrator::emit_lifecycle_event`). A `lifecycle` payload is
+  `{ action: pr_opened | pr_merged | pr_closed | issue_closed, title, url, repo,
+  number }`, kept source-agnostic so a future Jira source (transition, comment)
+  can reuse it; `repo` is the short repo name, set only when the task spans more
+  than one repo so the feed shows a `repo#number` tag exactly when it
+  disambiguates. Each fires once per genuine transition (PR detection, our
+  squash-merge, an external merge/close found by the review refresh, a per-task
+  reset close, and the issue-close-on-Done path). Both flow through the
+  synthetic CI turn (`get_or_create_ci_turn`).
 - **`environment_suggestions`** — setup recommendations the agent makes after a
   task (`title`, `detail`, `acknowledged`). Posted by the agent's
   `seraphim-suggest` helper; shown loudly on the board and as checkboxes on the

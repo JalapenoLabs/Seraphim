@@ -139,6 +139,7 @@ pub async fn list_org_repos(octo: &Octocrab, owner: &str) -> Result<Vec<Discover
 #[derive(Debug, Clone)]
 pub struct OpenPr {
     pub number: u64,
+    pub title: String,
     pub html_url: String,
     pub head_sha: String,
 }
@@ -176,6 +177,7 @@ pub async fn find_open_pr_for_branch(
 
     Ok(Some(OpenPr {
         number: pull.number,
+        title: pull.title.unwrap_or_default(),
         html_url: pull.html_url.map(|url| url.to_string()).unwrap_or_default(),
         head_sha: pull.head.sha,
     }))
@@ -194,6 +196,7 @@ pub enum PrLifecycle {
 #[derive(Debug, Clone)]
 pub struct PrStatus {
     pub lifecycle: PrLifecycle,
+    pub title: String,
     pub head_sha: String,
 }
 
@@ -209,6 +212,8 @@ pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) ->
         state: String,
         #[serde(default)]
         merged: bool,
+        #[serde(default)]
+        title: String,
         head: Head,
     }
     let pull: Pull = octo
@@ -224,6 +229,7 @@ pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) ->
     };
     Ok(PrStatus {
         lifecycle,
+        title: pull.title,
         head_sha: pull.head.sha,
     })
 }
