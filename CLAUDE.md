@@ -187,7 +187,8 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   webhook delivers an issue `created`/`updated`/`comment` event, each enabled
   rule whose source + trigger match is checked against the event; if its
   condition group (AND/OR of `{field, operator, values}`, operators
-  exactly/contains/has_one_of/is_empty/is_not_empty over labels/author/repo/
+  exactly (case-insensitive)/exactly_case_sensitive/contains/has_one_of/is_empty/
+  is_not_empty over labels/author/repo/
   title/body/comment/state) matches, its action runs (move the card to top/bottom
   of To Do). The rule shape + the pure matcher live in `src/automation/`
   (unit-tested, I/O-free); firing lives in `orchestrator::run_github_automation`
