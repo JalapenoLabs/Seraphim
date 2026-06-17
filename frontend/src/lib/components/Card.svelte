@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Railway, Task } from '../types'
+  import type { Railway, Task, TaskColumn } from '../types'
 
   import { goto } from '$app/navigation'
   import {
@@ -8,7 +8,10 @@
     TrainFront,
     SquareArrowOutUpRight,
     Link as LinkIcon,
-    GitPullRequestArrow
+    GitPullRequestArrow,
+    ArrowRightLeft,
+    Columns2,
+    Check
   } from '@lucide/svelte'
 
   import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
@@ -27,7 +30,8 @@
     selected = false,
     onselect,
     railways = [],
-    onMoveToRailway
+    onMoveToRailway,
+    onMoveToColumn
   }: {
     task: Task
     onchange: () => void
@@ -45,7 +49,23 @@
     // the single `main` lane, where the control is meaningless.
     railways?: Railway[]
     onMoveToRailway?: (railwayId: string) => void
+    // Move this card to another board column (context menu). "To Do" carries a
+    // placement so the agent's "do this next" (top) vs "later" (bottom) intent is
+    // expressible; the board computes the rank and calls moveTask.
+    onMoveToColumn?: (column: TaskColumn, placement: 'top' | 'bottom') => void
   } = $props()
+
+  // The board columns the context menu offers as move targets (issue #233). In
+  // Progress is omitted (the agent owns it); To Do is split into top/bottom of the
+  // queue, mirroring the server-side automation rank.
+  const COLUMN_MOVES: { column: TaskColumn; placement: 'top' | 'bottom'; label: string }[] = [
+    { column: 'available', placement: 'top', label: 'Available' },
+    { column: 'todo', placement: 'top', label: 'To Do (top)' },
+    { column: 'todo', placement: 'bottom', label: 'To Do (bottom)' },
+    { column: 'in_review', placement: 'top', label: 'In Review' },
+    { column: 'done', placement: 'top', label: 'Done' },
+    { column: 'ignored', placement: 'top', label: 'Ignored' }
+  ]
 
   // The other lanes this card's repo can move to. Empty for a tracking-only card
   // (no repo) or when `main` is the only lane, which hides the control entirely.
@@ -266,10 +286,8 @@
   </ContextMenu.Trigger>
 
   <!--
-    Placeholder menu for this foundation ticket: "Open task" is the working item;
-    real card actions (move column, hold, reset, etc.) land in follow-up tickets.
-    Closing on Escape / outside click / item select is handled by bits-ui; scroll
-    close is wired in this component (see the `$effect` above).
+    Card actions. Closing on Escape / outside click / item select is handled by
+    bits-ui; scroll close is wired in this component (see the `$effect` above).
   -->
   <ContextMenu.Content class="min-w-44">
     <ContextMenu.Label class="text-xs">#{task.external_id}</ContextMenu.Label>
@@ -283,7 +301,81 @@
         Open pull request
       </ContextMenu.Item>
     {/if}
+
     <ContextMenu.Separator />
+
+    <!--
+      Move to > Column / Lane (issue #233). A column move re-ranks/relocates just
+      this card; a lane move reassigns the card's REPO (and all its tasks), so it
+      is confirmed and toasted by the board. The current column/lane is checked,
+      and a no-op destination is disabled.
+    -->
+    <ContextMenu.Sub>
+      <ContextMenu.SubTrigger>
+        <ArrowRightLeft class="size-4" />
+        Move to
+      </ContextMenu.SubTrigger>
+      <ContextMenu.SubContent class="min-w-40">
+        <ContextMenu.Sub>
+          <ContextMenu.SubTrigger>
+            <Columns2 class="size-4" />
+            Column
+          </ContextMenu.SubTrigger>
+          <ContextMenu.SubContent class="min-w-40">
+            {#each COLUMN_MOVES as move (move.label)}
+              {@const isCurrent = move.column === task.board_column}
+              <ContextMenu.Item
+                disabled={isCurrent && move.column !== 'todo'}
+                onclick={() => onMoveToColumn?.(move.column, move.placement)}
+              >
+                {#if isCurrent}
+                  <Check class="size-4" />
+                {:else}
+                  <span class="size-4"></span>
+                {/if}
+                {move.label}
+              </ContextMenu.Item>
+            {/each}
+          </ContextMenu.SubContent>
+        </ContextMenu.Sub>
+
+        {#if railways.length > 1}
+          {#if task.repo_id}
+            <ContextMenu.Sub>
+              <ContextMenu.SubTrigger>
+                <TrainFront class="size-4" />
+                Lane
+              </ContextMenu.SubTrigger>
+              <ContextMenu.SubContent class="min-w-40">
+                {#each railways as railway (railway.id)}
+                  {@const isCurrent = railway.id === task.railway_id}
+                  <ContextMenu.Item
+                    disabled={isCurrent}
+                    onclick={() => onMoveToRailway?.(railway.id)}
+                  >
+                    {#if isCurrent}
+                      <Check class="size-4" />
+                    {:else}
+                      <span class="size-4"></span>
+                    {/if}
+                    {railway.name}
+                  </ContextMenu.Item>
+                {/each}
+              </ContextMenu.SubContent>
+            </ContextMenu.Sub>
+          {:else}
+            <!-- An internal task has no repo to follow between lanes. -->
+            <ContextMenu.Item disabled title="Internal tasks have no repo to move between lanes">
+              <TrainFront class="size-4" />
+              Lane
+            </ContextMenu.Item>
+          {/if}
+        {/if}
+      </ContextMenu.SubContent>
+    </ContextMenu.Sub>
+
+    <ContextMenu.Separator />
+
     <ContextMenu.Item onclick={copyTaskLink}>
       <LinkIcon class="size-4" />
       Copy link
