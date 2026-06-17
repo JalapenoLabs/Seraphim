@@ -181,6 +181,19 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and
   surfaced as toasts + native notifications + a sidebar.
+- **`task_screenshots`** (issue #248) — screenshots the agent captured during a
+  task (via the Playwright MCP, issue #243), so the operator sees what the agent
+  saw. The agent's `seraphim-screenshot <file>` helper POSTs the raw image bytes to
+  `POST /agent/screenshots` (Content-Type = MIME, metadata as query params:
+  `task_id`, `caption`, `route`, `width`/`height`); the capture is best-effort
+  associated with the task's latest turn (`turn_id`). The bytes live as `bytea`
+  following the notification-sound precedent and are NEVER returned in task/board
+  JSON: a dedicated `GET /screenshots/:id` streams them (immutable cache), and
+  `TaskDetail.screenshots` carries metadata only. The task view renders them as a
+  lazy-loaded gallery (newest first, caption / route / dimensions; click opens the
+  full image). Privacy: dev/test-data screenshots only, since the bytes persist in
+  Postgres (respect at-rest disk encryption as with the other blobs/secrets). The
+  optional GitHub-issue/PR attachment toggle is not built yet (left to a follow-up).
 - **`heart_attacks`** — recorded "heart attacks" (turns that died mid-flight),
   written by the defibrillator loop (see above), never by a request. Each holds a
   task snapshot, the status at death, the diagnostic `detail` (error logs kept for
@@ -362,9 +375,10 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    `waiting_for_input` if the agent asked a question), then (f) when nothing else is
    queued, *revisit* a PR it gave up on (`ci_blocked`), cooldown-gated
    (`REVISIT_COOLDOWN`, 15 min). The agent
-   asks via the `seraphim-ask` CLI and records environment recommendations via the
-   `seraphim-suggest` CLI (both baked into the workspace image), posting to
-   `POST /agent/questions` and `POST /agent/suggestions`; the exec injects
+   asks via the `seraphim-ask` CLI, records environment recommendations via the
+   `seraphim-suggest` CLI, and uploads screenshots via the `seraphim-screenshot`
+   CLI (all baked into the workspace image), posting to `POST /agent/questions`,
+   `POST /agent/suggestions`, and `POST /agent/screenshots`; the exec injects
    `SERAPHIM_TASK_ID` + `SERAPHIM_API_URL`. One task awaited to completion before
    the next (no overlap).
    - **Stacked dependencies (issue #256):** a fresh ticket that depends on another

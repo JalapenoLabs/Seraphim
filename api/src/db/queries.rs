@@ -16,7 +16,8 @@ use super::models::{
     EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment,
     NetworkAccessLevel, PendingPlacement, PendingQuestion, Question, QuestionOption,
     QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings,
-    SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskStatus, Turn,
+    SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskScreenshot, TaskStatus,
+    Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -2194,6 +2195,80 @@ pub async fn list_open_dependency_candidates(
     .bind(exclude_id)
     .fetch_all(pool)
     .await
+}
+
+// --- Agent screenshots (issue #248) ------------------------------------------
+
+/// The screenshot metadata columns, every column EXCEPT the `image` bytea, so a
+/// `SELECT` for a list or RETURNING never drags the bytes into a JSON payload.
+const SCREENSHOT_COLUMNS: &str =
+    "id, task_id, turn_id, mime, width, height, route, caption, created_at";
+
+/// Stores one captured screenshot and returns its metadata (never the bytes).
+/// `turn_id` best-effort associates it with the turn that captured it; `width` /
+/// `height` are `None` when the uploader could not determine them.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_screenshot(
+    pool: &PgPool,
+    task_id: Uuid,
+    turn_id: Option<Uuid>,
+    image: &[u8],
+    mime: &str,
+    width: Option<i32>,
+    height: Option<i32>,
+    route: &str,
+    caption: &str,
+) -> sqlx::Result<TaskScreenshot> {
+    sqlx::query_as::<_, TaskScreenshot>(&format!(
+        "INSERT INTO task_screenshots \
+         (task_id, turn_id, image, mime, width, height, route, caption) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {SCREENSHOT_COLUMNS}"
+    ))
+    .bind(task_id)
+    .bind(turn_id)
+    .bind(image)
+    .bind(mime)
+    .bind(width)
+    .bind(height)
+    .bind(route)
+    .bind(caption)
+    .fetch_one(pool)
+    .await
+}
+
+/// A task's screenshots, newest first, metadata only (the bytes are streamed by id).
+pub async fn list_screenshots_for_task(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Vec<TaskScreenshot>> {
+    sqlx::query_as::<_, TaskScreenshot>(&format!(
+        "SELECT {SCREENSHOT_COLUMNS} FROM task_screenshots \
+         WHERE task_id = $1 ORDER BY created_at DESC"
+    ))
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// The raw bytes and MIME of one screenshot, for the streaming endpoint. `None`
+/// when no screenshot has that id.
+pub async fn get_screenshot_image(
+    pool: &PgPool,
+    id: Uuid,
+) -> sqlx::Result<Option<(Vec<u8>, String)>> {
+    sqlx::query_as::<_, (Vec<u8>, String)>("SELECT image, mime FROM task_screenshots WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The id of a task's most recent turn, to associate an uploaded screenshot with
+/// the turn that captured it. `None` for a task that has no turns yet.
+pub async fn latest_turn_id(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar("SELECT id FROM turns WHERE task_id = $1 ORDER BY idx DESC LIMIT 1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
 }
 
 /// Every pull request tracked for a task, oldest first.

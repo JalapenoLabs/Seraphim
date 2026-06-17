@@ -529,12 +529,28 @@ export type TaskPullRequest = {
   updated_at: string
 }
 
+// A screenshot the agent captured during a task (issue #248), metadata only. The
+// image bytes are streamed from `/api/v1/screenshots/:id`, never inlined here.
+export type TaskScreenshot = {
+  id: string
+  task_id: string
+  turn_id: string | null
+  mime: string
+  // Pixel dimensions when known (e.g. read from a PNG header), else null.
+  width: number | null
+  height: number | null
+  route: string
+  caption: string
+  created_at: string
+}
+
 export type TaskDetail = {
   task: Task
   events: AgentEvent[]
   suggestions: EnvSuggestion[]
   questions: Question[]
   pull_requests: TaskPullRequest[]
+  screenshots: TaskScreenshot[]
 }
 
 // The kanban lanes, in display order, with human-readable labels.
