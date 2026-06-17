@@ -5,7 +5,7 @@
 //! detects and acts on them deterministically here, rather than parsing the
 //! agent's prose.
 
-use eyre::{Context, Result};
+use eyre::{eyre, Context, Result};
 use octocrab::params::pulls::MergeMethod;
 use octocrab::params::State;
 use octocrab::Octocrab;
@@ -324,25 +324,61 @@ pub async fn pr_review_status(
         .await
         .wrap_err("failed to query pull request review status")?;
 
-    let pull = response
+    review_status_from_response(response, owner, repo, number)
+}
+
+/// Interprets the GraphQL review-status response into a [`PrReviewStatus`], failing
+/// CLOSED whenever it cannot positively confirm the PR's review state.
+///
+/// This is the merge gate's most safety-critical step, so it never assumes "zero
+/// unresolved threads" from a degenerate response. GraphQL returns HTTP 200 even on
+/// field errors, so a `{ "data": null, "errors": [...] }` body (e.g. a permission
+/// or transient error) or a `pullRequest: null` (PR not resolved for this token)
+/// would otherwise deserialize into an empty thread list and wave an unreviewed PR
+/// straight through to merge (issue #270). Both now return an error, which the
+/// caller maps to `ReviewState::Unknown` so the PR waits and re-checks rather than
+/// merging on a guess. Pure (no I/O) so the fail-closed logic is unit-tested.
+///
+/// # Errors
+/// If the response carries GraphQL `errors`, or does not contain the pull request.
+fn review_status_from_response(
+    response: ReviewThreadsResponse,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<PrReviewStatus> {
+    if !response.errors.is_empty() {
+        let messages = response
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(eyre!(
+            "review-status query for {owner}/{repo}#{number} returned GraphQL errors: {messages}"
+        ));
+    }
+
+    // A missing pull request means we could not read the review state, NOT that the
+    // PR is clean. Refuse to assume zero threads so the gate never merges blind.
+    let Some(pull) = response
         .data
         .and_then(|data| data.repository)
-        .and_then(|repository| repository.pull_request);
+        .and_then(|repository| repository.pull_request)
+    else {
+        return Err(eyre!(
+            "review-status query for {owner}/{repo}#{number} returned no pull request; \
+             refusing to assume zero unresolved threads"
+        ));
+    };
 
     // Gate only on an outstanding "changes requested". "Approved" and the
     // "review required" approval gate are deliberately not merge blockers here:
     // resolution state, not approval, is what the gate enforces.
-    let changes_requested = pull
-        .as_ref()
-        .and_then(|pull| pull.review_decision.as_deref())
-        == Some("CHANGES_REQUESTED");
-
-    let nodes = pull
-        .map(|pull| pull.review_threads.nodes)
-        .unwrap_or_default();
+    let changes_requested = pull.review_decision.as_deref() == Some("CHANGES_REQUESTED");
 
     let mut unresolved_threads = Vec::new();
-    for node in nodes {
+    for node in pull.review_threads.nodes {
         if node.is_resolved {
             continue;
         }
@@ -373,6 +409,17 @@ pub async fn pr_review_status(
 #[derive(Debug, Deserialize)]
 struct ReviewThreadsResponse {
     data: Option<ReviewThreadsData>,
+    /// GraphQL field-level errors. Present (with `data` null or partial) on a
+    /// permission/transient failure, which GitHub still returns as HTTP 200, so the
+    /// gate must inspect this rather than treat the absent data as "no threads".
+    #[serde(default)]
+    errors: Vec<GraphQlError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlError {
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -987,7 +1034,120 @@ pub async fn add_issue_comment(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_log_timestamp;
+    use super::{review_status_from_response, strip_log_timestamp, ReviewThreadsResponse};
+    use serde_json::{from_value, json};
+
+    fn response(value: serde_json::Value) -> ReviewThreadsResponse {
+        from_value(value).expect("review-status payload should deserialize")
+    }
+
+    fn unresolved_thread(id: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "isResolved": false,
+            "comments": { "nodes": [{
+                "databaseId": 111,
+                "path": "src/init.ts",
+                "line": 10,
+                "originalLine": 10,
+                "body": "Consider extracting this.",
+                "author": { "login": "mooreslabai-claude" }
+            }]}
+        })
+    }
+
+    // Issue #270: GraphQL returns HTTP 200 even on field errors, so a body carrying
+    // `errors` (with data null) must NOT be read as "zero unresolved threads". It
+    // must fail closed so the caller waits rather than merging blind.
+    #[test]
+    fn graphql_errors_fail_closed() {
+        let result = review_status_from_response(
+            response(json!({ "data": null, "errors": [{ "message": "Something went wrong" }] })),
+            "mooreslabaiv1",
+            "frontend-core",
+            21,
+        );
+        assert!(
+            result.is_err(),
+            "GraphQL errors must not be treated as a clean PR"
+        );
+    }
+
+    // A `pullRequest: null` means we could not read the review state, not that the
+    // PR is clean; refuse to assume zero threads.
+    #[test]
+    fn missing_pull_request_fails_closed() {
+        let result = review_status_from_response(
+            response(json!({ "data": { "repository": { "pullRequest": null } } })),
+            "mooreslabaiv1",
+            "frontend-core",
+            21,
+        );
+        assert!(
+            result.is_err(),
+            "a missing pull request must not be treated as clean"
+        );
+    }
+
+    // The exact PR #21 regression: the bot COMMENTED (creating unresolved threads)
+    // then APPROVED, so `reviewDecision` is APPROVED. Approval must NOT clear the
+    // unresolved threads; they are still reported so the gate blocks the merge.
+    #[test]
+    fn unresolved_threads_are_reported_even_when_approved() {
+        let status = review_status_from_response(
+            response(json!({ "data": { "repository": { "pullRequest": {
+                "reviewDecision": "APPROVED",
+                "reviewThreads": { "nodes": [
+                    unresolved_thread("T1"),
+                    unresolved_thread("T2"),
+                    unresolved_thread("T3"),
+                    unresolved_thread("T4"),
+                ]}
+            }}}})),
+            "mooreslabaiv1",
+            "frontend-core",
+            21,
+        )
+        .expect("a well-formed response should parse");
+        assert_eq!(status.unresolved_threads.len(), 4);
+        assert!(!status.changes_requested);
+    }
+
+    // Resolved threads under an approval are genuinely clean and may merge.
+    #[test]
+    fn all_resolved_threads_are_clean() {
+        let mut resolved = unresolved_thread("T1");
+        resolved["isResolved"] = json!(true);
+        let status = review_status_from_response(
+            response(json!({ "data": { "repository": { "pullRequest": {
+                "reviewDecision": "APPROVED",
+                "reviewThreads": { "nodes": [resolved] }
+            }}}})),
+            "mooreslabaiv1",
+            "frontend-core",
+            21,
+        )
+        .expect("a well-formed response should parse");
+        assert!(status.unresolved_threads.is_empty());
+        assert!(!status.changes_requested);
+    }
+
+    // A standing "changes requested" review blocks even with no inline threads.
+    #[test]
+    fn changes_requested_is_flagged() {
+        let status = review_status_from_response(
+            response(json!({ "data": { "repository": { "pullRequest": {
+                "reviewDecision": "CHANGES_REQUESTED",
+                "reviewThreads": { "nodes": [] }
+            }}}})),
+            "mooreslabaiv1",
+            "frontend-core",
+            21,
+        )
+        .expect("a well-formed response should parse");
+        assert!(status.unresolved_threads.is_empty());
+        assert!(status.changes_requested);
+    }
 
     #[test]
     fn strips_the_leading_iso_timestamp() {
