@@ -248,6 +248,9 @@ pub async fn prepare_branch(
     script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
     script.push_str(reset_tree_snippet());
     script.push_str(&branch_prep_snippet(&repo.default_branch, branch));
+    // Re-sync submodules to the freshly-checked-out branch's pinned commits, failing
+    // loudly if a private submodule is inaccessible (issue #251).
+    script.push_str(&submodule_update_snippet(&dir));
 
     run(state, handle.container(), &script).await
 }
@@ -265,8 +268,7 @@ pub async fn prepare_branch(
 fn branch_prep_snippet(default: &str, branch: &str) -> String {
     format!(
         "git fetch origin \"{default}\"\n\
-         git checkout -B \"{branch}\" \"origin/{default}\"\n\
-         git submodule update --init --recursive || true\n"
+         git checkout -B \"{branch}\" \"origin/{default}\"\n"
     )
 }
 
@@ -293,12 +295,39 @@ pub async fn prepare_existing_branch(
     script.push_str(&format!(
         "git fetch origin\n\
          git checkout -B \"{branch}\" \"origin/{branch}\"\n\
-         git reset --hard \"origin/{branch}\"\n\
-         git submodule update --init --recursive || true\n",
+         git reset --hard \"origin/{branch}\"\n",
         branch = branch,
     ));
+    // Re-sync submodules to this branch's pinned commits, failing loudly if a
+    // private submodule is inaccessible (issue #251).
+    script.push_str(&submodule_update_snippet(&dir));
 
     run(state, handle.container(), &script).await
+}
+
+/// Bash that initializes a repo's git submodules (issue #251), generic to any repo
+/// that has them: a no-op when there is no `.gitmodules`, otherwise
+/// `git submodule update --init --recursive`.
+///
+/// Crucially it does NOT fail silently (the same principle as the config-repo and
+/// repo-sync error paths). The common failure is the workspace's mounted SSH /
+/// deploy key lacking read access to a *private* submodule repo (e.g. Plunder's
+/// `brand`); when that happens this names the offending submodule URL(s) and the
+/// fix, then exits non-zero, so the operator gets an actionable message up front
+/// instead of a generic build failure mid-task. Runs under the caller's `set -e`.
+fn submodule_update_snippet(dir: &str) -> String {
+    format!(
+        "if [ -f \"{dir}/.gitmodules\" ]; then\n\
+         if ! git -C \"{dir}\" submodule update --init --recursive; then\n\
+         echo \"ERROR: could not initialize git submodules for {dir}.\" >&2\n\
+         echo \"The workspace SSH/deploy key likely lacks read access to a private submodule repo:\" >&2\n\
+         git config -f \"{dir}/.gitmodules\" --get-regexp 'submodule[.].*[.]url' 2>/dev/null | awk '{{ print \"  - \" $2 }}' >&2\n\
+         echo \"Grant the mounted host SSH key (or a deploy key) read access to the repo(s) above, then re-provision.\" >&2\n\
+         echo \"For Plunder's private brand submodule this is the BRAND_DEPLOY_KEY deploy key (companion ticket).\" >&2\n\
+         exit 1\n\
+         fi\n\
+         fi\n"
+    )
 }
 
 /// Bash to clone-or-update a single repo, write its CLAUDE.md, and (on a fresh
@@ -324,19 +353,26 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
         String::new()
     };
 
-    // Submodules are common across the user's orgs, so fetch them on update and
-    // pull them down on a fresh clone.
+    // Clone (or fetch) the superproject, then initialize submodules explicitly via
+    // `submodule_update_snippet` so a missing/private submodule fails loudly and
+    // helpfully rather than as a silent partial clone (issue #251). Submodules are
+    // brought up BEFORE the setup script, since a repo's build/setup (e.g. Plunder's)
+    // may import from a submodule.
+    let submodules = submodule_update_snippet(&dir);
     format!(
         "if [ -d \"{dir}/.git\" ]; then\n\
-           git -C \"{dir}\" fetch origin --recurse-submodules || true\n\
+           git -C \"{dir}\" fetch origin || true\n\
+           {submodules}\
            {update_setup}\
          else\n\
-           git clone --recurse-submodules \"{clone_url}\" \"{dir}\"\n\
+           git clone \"{clone_url}\" \"{dir}\"\n\
+           {submodules}\
            {clone_setup}\
          fi\n\
          {claude_md}",
         dir = dir,
         clone_url = repo.clone_url,
+        submodules = submodules,
         claude_md = write_file_snippet(&format!("{dir}/CLAUDE.md"), &repo.instructions),
     )
 }
@@ -377,7 +413,31 @@ async fn run(state: &AppState, container: &str, script: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::branch_prep_snippet;
+    use super::{branch_prep_snippet, repo_block, submodule_update_snippet};
+    use crate::db::models::Repository;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn repo() -> Repository {
+        Repository {
+            id: Uuid::nil(),
+            railway_id: Uuid::nil(),
+            full_name: "JalapenoLabs/Plunder".to_string(),
+            clone_url: "git@github.com:JalapenoLabs/Plunder.git".to_string(),
+            default_branch: "main".to_string(),
+            branch_template: None,
+            setup_script: String::new(),
+            instructions: String::new(),
+            review_policy: None,
+            enabled: true,
+            sync_issues: false,
+            issue_labels: Vec::new(),
+            sync_error: None,
+            sync_error_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn branch_prep_fetches_the_target_then_cuts_from_its_fresh_tip() {
@@ -398,5 +458,43 @@ mod tests {
         let script = branch_prep_snippet("main", "branch");
         assert!(!script.contains("pull"));
         assert!(!script.contains("git fetch origin \"main\" || true"));
+        // Submodule handling moved to `submodule_update_snippet`, which no longer
+        // swallows failures; the silenced form must be gone (issue #251).
+        assert!(!script.contains("submodule update --init --recursive || true"));
+    }
+
+    #[test]
+    fn submodule_snippet_inits_and_fails_loudly_with_an_actionable_message() {
+        let script = submodule_update_snippet("/workspace/Plunder");
+
+        // Only acts when the repo actually has submodules, so it is a safe no-op
+        // for the common (no-submodule) repo.
+        assert!(script.contains(".gitmodules"));
+        // Initializes recursively.
+        assert!(
+            script.contains("git -C \"/workspace/Plunder\" submodule update --init --recursive")
+        );
+        // Does NOT fail silently (the whole point of issue #251).
+        assert!(!script.contains("submodule update --init --recursive || true"));
+        // On failure it names the access problem + the offending repo URLs + the fix,
+        // then exits non-zero so it surfaces instead of a generic mid-task failure.
+        assert!(script.contains("read access to a private submodule repo"));
+        assert!(script.contains("--get-regexp"));
+        assert!(script.contains("BRAND_DEPLOY_KEY"));
+        assert!(script.contains("exit 1"));
+    }
+
+    #[test]
+    fn repo_block_initializes_submodules_explicitly_without_recurse_clone() {
+        let script = repo_block(&repo(), true);
+
+        // The clone no longer relies on `--recurse-submodules` (which would fail with
+        // a generic message); submodules are initialized by the explicit, loud snippet.
+        assert!(!script.contains("--recurse-submodules"));
+        assert!(
+            script.contains("git submodule update --init --recursive")
+                || script.contains("submodule update --init --recursive")
+        );
+        assert!(script.contains("exit 1"));
     }
 }
