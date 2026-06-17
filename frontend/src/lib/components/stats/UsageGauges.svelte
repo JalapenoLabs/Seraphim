@@ -7,10 +7,13 @@
   import Gauge from './Gauge.svelte'
   import { pctLabel, resetsLabel, tokens, usageColor } from './format'
 
+  // `className` fully controls the layout of the group. It defaults to a centered
+  // flex row (the Watch flanks); the board/task panel passes `contents` so the
+  // gauges flatten into the panel's own flex and distribute evenly with the totals.
   let {
     stats,
     gaugeSize = 'size-20',
-    class: className = ''
+    class: className = 'flex flex-wrap items-center justify-center gap-x-8 gap-y-4'
   }: { stats: Stats; gaugeSize?: string; class?: string } = $props()
 
   const usagePct = $derived(stats.usage_utilization ?? 0)
@@ -25,7 +28,7 @@
   const usageStatusLabel = $derived(stats.usage_status?.replace(/_/g, ' ') ?? 'Unknown')
 </script>
 
-<div class="flex flex-wrap items-center justify-center gap-x-8 gap-y-4 {className}">
+<div class={className}>
   {#if stats.usage_utilization != null}
     <Gauge
       pct={usagePct}

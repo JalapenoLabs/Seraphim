@@ -108,8 +108,8 @@
 
   {#if open && stats}
     <div class="flex flex-wrap items-center justify-around gap-x-8 gap-y-4 border-t border-border px-4 py-4">
-      <UsageGauges {stats} />
-      <LifetimeTotals {stats} {workedMs} {taskId} />
+      <UsageGauges {stats} class="contents" />
+      <LifetimeTotals {stats} {workedMs} {taskId} class="contents" />
     </div>
   {/if}
 </section>

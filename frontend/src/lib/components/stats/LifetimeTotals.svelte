@@ -12,11 +12,14 @@
   // `costHistory` / `tokenHistory` are optional per-interval burn series; when
   // given (the Watch kiosk), a sparkline renders under the matching stat. The
   // board/task panels omit them, so they render exactly as before.
+  // `className` fully controls the layout of the group. It defaults to a centered
+  // flex row (the Watch flanks); the board/task panel passes `contents` so the
+  // totals flatten into the panel's own flex and distribute evenly with the gauges.
   let {
     stats,
     workedMs,
     taskId = null,
-    class: className = '',
+    class: className = 'flex flex-wrap items-center justify-center gap-x-8 gap-y-4',
     costHistory = null,
     tokenHistory = null
   }: {
@@ -29,7 +32,7 @@
   } = $props()
 </script>
 
-<div class="flex flex-wrap items-center justify-center gap-x-8 gap-y-4 {className}">
+<div class={className}>
   <!-- Time -->
   <div class="flex flex-col items-center">
     <span class="text-xl font-semibold tabular-nums">{durationPrecise(workedMs)}</span>

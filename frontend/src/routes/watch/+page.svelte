@@ -586,7 +586,7 @@
       <!-- Left flank: the three usage gauges, then Remaining nearest the ring. -->
       <div class="flex flex-1 items-center justify-center gap-6 lg:justify-end lg:gap-8">
         {#if stats}
-          <UsageGauges {stats} gaugeSize="size-[clamp(4.5rem,6vw,6rem)]" class="justify-end" />
+          <UsageGauges {stats} gaugeSize="size-[clamp(4.5rem,6vw,6rem)]" />
         {/if}
         <div class="flex flex-col items-center lg:items-end lg:text-right">
           <div
@@ -672,7 +672,7 @@
           <div class="mt-1 text-xs text-muted-foreground">shipped to done</div>
         </div>
         {#if stats}
-          <LifetimeTotals {stats} {workedMs} {costHistory} {tokenHistory} class="justify-start" />
+          <LifetimeTotals {stats} {workedMs} {costHistory} {tokenHistory} />
         {/if}
       </div>
     </section>
