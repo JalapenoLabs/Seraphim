@@ -377,8 +377,22 @@ pub struct Repository {
     pub sync_issues: bool,
     /// Only sync issues carrying all of these labels (empty = no filter).
     pub issue_labels: Vec<String>,
+    /// The last issue-sync failure for this repo (issue #213), or `None` when the
+    /// most recent sync succeeded. Cleared on the next successful sync.
+    pub sync_error: Option<String>,
+    /// When [`Self::sync_error`] was recorded.
+    pub sync_error_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A repository whose last issue sync failed (issue #213), for the board banner.
+/// Distinct from [`Repository`] so the payload carries only what the banner needs.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct RepoSyncError {
+    pub full_name: String,
+    pub sync_error: String,
+    pub sync_error_at: DateTime<Utc>,
 }
 
 /// What a repository delete will purge, so the UI can spell it out before the

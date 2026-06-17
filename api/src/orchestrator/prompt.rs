@@ -541,6 +541,8 @@ mod tests {
             enabled: true,
             sync_issues: false,
             issue_labels: Vec::new(),
+            sync_error: None,
+            sync_error_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

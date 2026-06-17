@@ -286,8 +286,19 @@ export type Repository = {
   enabled: boolean
   sync_issues: boolean
   issue_labels: string[]
+  // The last issue-sync failure for this repo (issue #213), or null when the most
+  // recent sync succeeded. Cleared automatically on the next successful sync.
+  sync_error: string | null
+  sync_error_at: string | null
   created_at: string
   updated_at: string
+}
+
+// A repo whose last issue sync failed (issue #213), for the board's sync banner.
+export type RepoSyncError = {
+  full_name: string
+  sync_error: string
+  sync_error_at: string
 }
 
 // What deleting a repository will purge, shown in the delete confirmation.
@@ -484,6 +495,8 @@ export type BoardResponse = {
   suggestion_counts: Record<string, number>
   // Unacknowledged heart attacks (dead turns), newest first, for the alert banner.
   heart_attacks: HeartAttack[]
+  // Repos whose last issue sync failed (issue #213), for a persistent banner.
+  repo_sync_errors: RepoSyncError[]
 }
 
 // A pull request the task has opened. A task may span several repos, so it can
