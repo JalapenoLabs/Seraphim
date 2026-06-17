@@ -152,6 +152,13 @@ RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask \
     /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state \
     /usr/local/bin/seraphim-draft
 
+# --- Computed-style check library for visual self-review (issue #245) ---------
+# The deterministic CSS checks (centering/spacing/overflow/stacking) the agent
+# runs through the Playwright MCP `browser_evaluate` to verify a layout before
+# spending tokens on a screenshot. Baked at a fixed, world-readable path so the
+# agent's default instructions can point at it no matter which repo it is on.
+COPY visual-checks.md /usr/local/share/seraphim/visual-checks.md
+
 # --- Throwaway PostgreSQL 17 helper (boots a local cluster for DB validation) -
 COPY pg-ephemeral /usr/local/bin/pg-ephemeral
 RUN chmod +x /usr/local/bin/pg-ephemeral

@@ -560,15 +560,16 @@ const ENVIRONMENT_SUGGESTIONS: &str = "\n\
     Only suggest things that genuinely help; if nothing comes to mind, skip it. \
     This does not replace opening the pull request.\n";
 
-/// Standing instruction (issue #244) to visually self-review any UI change.
+/// Standing instruction (issues #244, #245) to visually self-review any UI change.
 ///
 /// Capability without a standing instruction does nothing, so this bakes the
 /// loop into every task prompt (via the shared header) rather than relying on the
 /// operator's global instructions. It uses the Playwright MCP baked into the
-/// workspace (issue #243), prefers cheap computed-style checks over screenshots to
-/// keep token cost down, reads the per-repo dev-server facts from the repo's
-/// `CLAUDE.md`, and degrades gracefully: a repo with no runnable UI is skipped
-/// cleanly rather than failing the task.
+/// workspace (issue #243); computed-style checks are the workhorse, so it points at
+/// the reusable check library baked into the image (issue #245) and treats a
+/// screenshot as final confirmation only, to keep token cost down. It reads the
+/// per-repo dev-server facts from the repo's `CLAUDE.md`, and degrades gracefully:
+/// a repo with no runnable UI is skipped cleanly rather than failing the task.
 const VISUAL_SELF_REVIEW: &str = "\n\
     # Visual self-review (UI changes)\n\
     If your change affects the UI, you are NOT done until you have looked at it in a \
@@ -581,10 +582,12 @@ const VISUAL_SELF_REVIEW: &str = "\n\
     - Start the dev server with test/dev data only (never production data) and open \
     the affected route(s) with the Playwright MCP browser tools (navigate, snapshot, \
     evaluate, screenshot), headless.\n\
-    - Check layout (centering, spacing, alignment) using computed styles via \
-    `evaluate` and the accessibility snapshot. Prefer these computed-style checks \
-    over screenshots to keep cost down; take a screenshot only to confirm the final \
-    result.\n\
+    - Check layout (centering, spacing, overflow, stacking) using computed styles, \
+    not screenshots: a reusable set of computed-style checks is documented at \
+    `/usr/local/share/seraphim/visual-checks.md`. Read it, then run its checks via \
+    the Playwright MCP `browser_evaluate` against the affected route(s). These \
+    computed-style checks are your primary signal; take a screenshot only to confirm \
+    the final result.\n\
     - Confirm it renders correctly at both mobile (375px) and desktop (1280px) \
     widths.\n\
     - If the repo has no runnable UI (a backend-only or non-web repo, no dev server, \
@@ -973,6 +976,28 @@ mod tests {
         assert!(prompt.contains("malformed payload is rejected"));
         // The brittle single-quoted-argument example is gone.
         assert!(!prompt.contains("seraphim-ask '{"));
+    }
+
+    #[test]
+    fn task_prompt_points_at_the_computed_style_check_library() {
+        // Issue #245: the default instructions must steer the agent to the baked
+        // computed-style check library as the primary signal, screenshots only to
+        // confirm, at both breakpoints, with a graceful skip when there is no UI.
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+        );
+        assert!(prompt.contains("computed-style checks"));
+        assert!(prompt.contains("/usr/local/share/seraphim/visual-checks.md"));
+        assert!(prompt.contains("browser_evaluate"));
+        assert!(prompt.contains("375px"));
+        assert!(prompt.contains("1280px"));
+        assert!(prompt.contains("SKIP this review"));
     }
 
     #[test]
