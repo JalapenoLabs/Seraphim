@@ -2050,6 +2050,16 @@ pub async fn reset_ci_fix_attempts(pool: &PgPool, id: Uuid) -> sqlx::Result<()> 
     Ok(())
 }
 
+/// Resets a task's review-address counter, so an idle revisit of a review-blocked
+/// PR gets the full addressing budget again rather than re-parking immediately.
+pub async fn reset_review_fix_attempts(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE tasks SET review_fix_attempts = 0, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// The oldest blocked PR worth revisiting while the agent is otherwise idle: in
 /// review, `ci_blocked`, not on hold, and untouched for at least `cooldown_secs`
 /// (so a genuinely stuck PR is retried periodically, not in a tight loop).

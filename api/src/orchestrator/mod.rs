@@ -56,7 +56,7 @@ use crate::git;
 use crate::secrets::Scrubber;
 use crate::state::AppState;
 use railway::RailwayHandle;
-use review::{PrCi, PrReview, ReviewDecision};
+use review::{PrCi, PrReview, ReviewDecision, ReviewState};
 
 /// Pid file the main agent's `claude` records to, so a reset/defibrillation kills
 /// exactly it and never the compose assistant, which shares the workspace (#181).
@@ -1673,10 +1673,12 @@ async fn work_pr_fix(
 
     let settings = queries::get_settings(&state.db).await?;
 
-    // A revisit is a fresh effort: clear the exhausted counter so the renewed
-    // fix cycle gets the full retry budget again.
+    // A revisit is a fresh effort: clear the exhausted counters so the renewed
+    // fix cycle gets the full retry budget again, for CI fixes and for review
+    // addressing alike (a review-blocked PR parks as `ci_blocked` too).
     if mode == WorkMode::Revisit {
         queries::reset_ci_fix_attempts(&state.db, task.id).await?;
+        queries::reset_review_fix_attempts(&state.db, task.id).await?;
     }
 
     // While the turn runs the card sits in In Progress, like any actively-worked
@@ -2284,19 +2286,20 @@ async fn review_task(
     for pr in &prs {
         let auto_merge =
             pr_repo_policy(state, settings, pr).await? == ReviewPolicy::AutoSquashMerge;
-        // Only a green, open PR is a candidate for addressing review comments. For
-        // any other state CI handling or the merge takes priority anyway, so skip
-        // the extra GraphQL lookup.
-        let unresolved_review = if pr.pr_state == "open" && pr.ci_state == "passing" {
-            pr_has_unresolved_review_threads(github, pr).await
+        // Only a green, open PR is a candidate for the review gate. For any other
+        // state CI handling or the merge takes priority anyway, so skip the extra
+        // GraphQL lookup and treat the review as clean (it is never consulted).
+        let review = if pr.pr_state == "open" && pr.ci_state == "passing" {
+            pr_review_state(github, pr).await
         } else {
-            false
+            ReviewState::Clean
         };
-        views.push(pr_review_of(pr, auto_merge, unresolved_review));
+        views.push(pr_review_of(pr, auto_merge, review));
     }
 
-    // Once the attempt budget is spent, unresolved threads no longer block the
-    // merge, so a thread the agent can't resolve can't stall the task forever.
+    // Once the addressing budget is spent, an unresolved PR is parked for a human
+    // (never merged over), so a thread the agent can't resolve can't stall the
+    // queue yet can't slip through unaddressed either.
     let review_attempts_remaining = task.review_fix_attempts < MAX_REVIEW_FIX_ATTEMPTS;
     match review::decide(&views, review_attempts_remaining) {
         // Still settling (CI pending, or no actionable PR this tick): re-check next.
@@ -2312,9 +2315,12 @@ async fn review_task(
         }
         // A failing PR: hand back to the agent (or block once the cap is hit).
         ReviewDecision::Fix => handle_ci_failing(state, github, task, &prs).await?,
-        // A green PR with unresolved review threads: hand back to the agent to
-        // address the comments before the merge.
+        // A green PR with unresolved review threads (or a changes-requested
+        // review): hand back to the agent to address them before the merge.
         ReviewDecision::AddressReview => handle_review_addressing(state, task).await?,
+        // Review work is still outstanding after the addressing budget is spent:
+        // park the task for a human rather than merge over unresolved comments.
+        ReviewDecision::Block => handle_review_blocked(state, github, task).await?,
         // Merge the green, auto-merge PRs now; the next tick finishes once all are.
         ReviewDecision::Merge(indices) => {
             merge_task_prs(state, github, task, &prs, &indices).await?;
@@ -2670,10 +2676,9 @@ async fn pr_repo_policy(
     Ok(policy.unwrap_or(settings.default_review_policy))
 }
 
-/// Maps a stored PR row to the pure review view. `unresolved_review` is whether
-/// the open PR still carries unresolved review threads to address (only computed,
-/// and only meaningful, for a green open PR).
-fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool, unresolved_review: bool) -> PrReview {
+/// Maps a stored PR row to the pure review view. `review` is the PR's review-gate
+/// state (only computed, and only meaningful, for a green open PR).
+fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool, review: ReviewState) -> PrReview {
     match pr.pr_state.as_str() {
         "merged" => PrReview::Merged,
         "closed" => PrReview::Closed,
@@ -2684,27 +2689,36 @@ fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool, unresolved_review: bool)
                 _ => PrCi::Pending,
             },
             auto_merge,
-            unresolved_review,
+            review,
         },
     }
 }
 
-/// Whether a tracked PR has any unresolved review threads (reviewer-bot or human).
-/// Best-effort: a malformed repo name or a GraphQL failure is logged and treated
-/// as "none", so a transient lookup error never blocks an otherwise-ready merge.
-async fn pr_has_unresolved_review_threads(
-    github: &octocrab::Octocrab,
-    pr: &TaskPullRequest,
-) -> bool {
+/// A tracked PR's review-gate state: `Outstanding` if it has unresolved review
+/// threads or a "changes requested" review (bot or human), else `Clean`.
+///
+/// A malformed repo name or a GraphQL failure yields `Unknown`, NOT `Clean`: the
+/// gate must never merge over comments it simply failed to read, so an unreadable
+/// state re-checks next tick rather than waving the PR through.
+async fn pr_review_state(github: &octocrab::Octocrab, pr: &TaskPullRequest) -> ReviewState {
     let Some((owner, name)) = pr.repo_full_name.split_once('/') else {
-        return false;
+        // A name we can't parse can't be re-read into a different answer, so this
+        // is a permanent miss, not a transient one; treat it as nothing to address.
+        warn!(pr = %pr.pr_url, "malformed repo name for review lookup; treating as clean");
+        return ReviewState::Clean;
     };
     let number = u64::try_from(pr.pr_number).unwrap_or_default();
-    match git::list_unresolved_review_threads(github, owner, name, number).await {
-        Ok(threads) => !threads.is_empty(),
+    match git::pr_review_status(github, owner, name, number).await {
+        Ok(status) => {
+            if status.unresolved_threads.is_empty() && !status.changes_requested {
+                ReviewState::Clean
+            } else {
+                ReviewState::Outstanding
+            }
+        }
         Err(error) => {
-            warn!(error = %error, pr = %pr.pr_url, "could not list review threads; treating as none");
-            false
+            warn!(error = %error, pr = %pr.pr_url, "could not read review status; will re-check before merging");
+            ReviewState::Unknown
         }
     }
 }
@@ -2733,8 +2747,8 @@ async fn collect_unresolved_review_threads(
             continue;
         };
         let number = u64::try_from(pr.pr_number).unwrap_or_default();
-        match git::list_unresolved_review_threads(github, owner, name, number).await {
-            Ok(mut found) => threads.append(&mut found),
+        match git::pr_review_status(github, owner, name, number).await {
+            Ok(mut status) => threads.append(&mut status.unresolved_threads),
             Err(error) => {
                 warn!(error = %error, pr = %pr.pr_url, "could not list review threads for the prompt");
             }
@@ -2760,6 +2774,48 @@ async fn handle_review_addressing(state: &AppState, task: &Task) -> Result<()> {
         state.notify_board();
         info!(task_id = %task.id, "green PR has unresolved review comments; handing back to the agent");
     }
+    Ok(())
+}
+
+/// Parks a task for a human when its PR still has unresolved review threads (or a
+/// changes-requested review) after the addressing budget is spent. The PR is NEVER
+/// merged over open comments; a human resolves the stuck thread (or merges
+/// deliberately). Mirrors the `ci_blocked` park, so the idle revisit loop circles
+/// back to it later, just with a review-specific note instead of a CI one.
+async fn handle_review_blocked(
+    state: &AppState,
+    github: &octocrab::Octocrab,
+    task: &Task,
+) -> Result<()> {
+    // Only act on the transition; a steady-state re-detect each tick stays quiet.
+    if task.status == TaskStatus::CiBlocked {
+        return Ok(());
+    }
+
+    // Name the still-open repos so the note points a human at the right PR(s).
+    let threads = collect_unresolved_review_threads(state, github, task).await;
+    let repos: Vec<&str> = {
+        let mut seen: Vec<&str> = Vec::new();
+        for thread in &threads {
+            if !seen.contains(&thread.repo_full_name.as_str()) {
+                seen.push(&thread.repo_full_name);
+            }
+        }
+        seen
+    };
+    let where_ = if repos.is_empty() {
+        String::new()
+    } else {
+        format!(" on: {}", repos.join(", "))
+    };
+    let note = format!(
+        "Review comments still unresolved after {MAX_REVIEW_FIX_ATTEMPTS} addressing attempts{where_}. \
+         Not merging over open review threads; needs a human to resolve them or merge deliberately.",
+    );
+    queries::block_task_ci(&state.db, task.id, &note).await?;
+    emit_ci_note(state, task.id, &note, "review-blocked").await?;
+    state.notify_board();
+    warn!(task_id = %task.id, "review comments unresolved after the budget; parked for a human");
     Ok(())
 }
 
