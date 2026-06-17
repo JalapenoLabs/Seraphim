@@ -4,14 +4,19 @@
   import { goto } from '$app/navigation'
   import {
     Pause,
+    Play,
     Ban,
     TrainFront,
     SquareArrowOutUpRight,
     Link as LinkIcon,
     GitPullRequestArrow,
     ArrowRightLeft,
+    ArrowUpToLine,
     Columns2,
-    Check
+    Check,
+    CircleSlash,
+    RotateCcw,
+    Trash2
   } from '@lucide/svelte'
 
   import { STATUS_BADGE, STATUS_LABELS, ticketStateBadge } from '../types'
@@ -31,7 +36,10 @@
     onselect,
     railways = [],
     onMoveToRailway,
-    onMoveToColumn
+    onMoveToColumn,
+    onToggleHold,
+    onReset,
+    onDelete
   }: {
     task: Task
     onchange: () => void
@@ -53,7 +61,23 @@
     // placement so the agent's "do this next" (top) vs "later" (bottom) intent is
     // expressible; the board computes the rank and calls moveTask.
     onMoveToColumn?: (column: TaskColumn, placement: 'top' | 'bottom') => void
+    // Lifecycle actions (issue #235). The board owns the API call, toast, and (for
+    // the destructive ones) the confirmation dialog; the card just signals intent.
+    onToggleHold?: () => void
+    onReset?: () => void
+    onDelete?: () => void
   } = $props()
+
+  // Whether this task has actually started an attempt: it has a branch or PR, or
+  // it has moved past the queue. A task that never started has nothing to reset,
+  // so the destructive "Reset" action is disabled for it (issue #235).
+  const hasStarted = $derived(
+    !!task.branch ||
+      !!task.pr_url ||
+      task.board_column === 'in_progress' ||
+      task.board_column === 'in_review' ||
+      task.board_column === 'done'
+  )
 
   // The board columns the context menu offers as move targets (issue #233). In
   // Progress is omitted (the agent owns it); To Do is split into top/bottom of the
@@ -380,5 +404,56 @@
       <LinkIcon class="size-4" />
       Copy link
     </ContextMenu.Item>
+
+    <ContextMenu.Separator />
+
+    <!--
+      Lifecycle actions (issue #235). "Work this now" / "Send to Ignored" are just
+      column moves, so they reuse onMoveToColumn; Hold toggles the flag (the label
+      shows the opposite of the current state).
+    -->
+    <ContextMenu.Item onclick={() => onMoveToColumn?.('todo', 'top')}>
+      <ArrowUpToLine class="size-4" />
+      Work this now
+    </ContextMenu.Item>
+    <ContextMenu.Item onclick={() => onToggleHold?.()}>
+      {#if task.hold}
+        <Play class="size-4" />
+        Release hold
+      {:else}
+        <Pause class="size-4" />
+        Hold
+      {/if}
+    </ContextMenu.Item>
+    <ContextMenu.Item
+      disabled={task.board_column === 'ignored'}
+      onclick={() => onMoveToColumn?.('ignored', 'top')}
+    >
+      <CircleSlash class="size-4" />
+      Send to Ignored
+    </ContextMenu.Item>
+
+    <ContextMenu.Separator />
+
+    <!--
+      Destructive actions: visually separated, styled destructive, and confirmed by
+      the board before they run. Reset is disabled when the task never started;
+      Delete is internal-only (source-driven tasks are managed from their source).
+    -->
+    <ContextMenu.Item
+      variant="destructive"
+      disabled={!hasStarted}
+      title={hasStarted ? undefined : "This task hasn't started yet, so there is nothing to reset"}
+      onclick={() => onReset?.()}
+    >
+      <RotateCcw class="size-4" />
+      Reset task…
+    </ContextMenu.Item>
+    {#if task.source_kind === 'internal'}
+      <ContextMenu.Item variant="destructive" onclick={() => onDelete?.()}>
+        <Trash2 class="size-4" />
+        Delete…
+      </ContextMenu.Item>
+    {/if}
   </ContextMenu.Content>
 </ContextMenu.Root>

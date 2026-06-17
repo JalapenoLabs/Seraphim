@@ -31,12 +31,14 @@
     extractApiError,
     getBoard,
     getNotepad,
+    hardResetTask,
     listRepos,
     moveTask,
     provisionWorkspace,
     setNotepad,
     setPaused,
     setRailwayPaused,
+    setTaskHold,
     syncNow
   } from '$lib/api'
   import { isWithinSchedule } from '$lib/schedule'
@@ -583,6 +585,77 @@
     }
   }
 
+  // --- Card lifecycle actions (issue #235) -----------------------------------
+  // Toggle a card's hold flag from its context menu. A reversible flag, so no
+  // confirmation (unlike the destructive actions below); just toast the result.
+  async function toggleHold(task: Task) {
+    try {
+      await setTaskHold(task.id, !task.hold)
+      await load()
+      toast.success(task.hold ? 'Hold released' : 'Task held — the agent will skip it')
+    } catch (error) {
+      const message = await extractApiError(error, 'Failed to update the hold.')
+      toast.error(message)
+    }
+  }
+
+  // A task awaiting a hard-reset / delete confirmation. Both are destructive, so
+  // they are confirmed before running (mirroring the task page's buttons).
+  let pendingReset = $state<Task | null>(null)
+  let resetBusy = $state(false)
+  let pendingDelete = $state<Task | null>(null)
+  let deleteBusy = $state(false)
+
+  // Hard reset: abandon the attempt, close the PR, delete the branch, reopen the
+  // source issue, and return the card to Available. Reports the side effects that
+  // actually ran via a toast, matching the task page.
+  async function confirmReset() {
+    const task = pendingReset
+    if (!task) {
+      return
+    }
+    resetBusy = true
+    try {
+      const summary = await hardResetTask(task.id)
+      const done = [
+        summary.interrupted_agent && 'stopped the agent',
+        summary.pr_closed && 'closed the PR',
+        summary.branch_deleted && 'deleted the branch',
+        summary.issue_reopened && 'reopened the issue'
+      ].filter(Boolean)
+      const detail = done.length ? ` (${done.join(', ')})` : ''
+      await load()
+      toast.success(`Task reset to Available${detail}`)
+    } catch (error) {
+      const message = await extractApiError(error, 'Hard reset failed. See the server logs.')
+      toast.error(message)
+    } finally {
+      resetBusy = false
+      pendingReset = null
+    }
+  }
+
+  // Delete an internal task (the card + its history). Source-driven tasks are not
+  // deletable here, so this only ever runs for internal tickets.
+  async function confirmDelete() {
+    const task = pendingDelete
+    if (!task) {
+      return
+    }
+    deleteBusy = true
+    try {
+      await bulkDeleteTasks([task.id])
+      await load()
+      toast.success('Task deleted')
+    } catch (error) {
+      const message = await extractApiError(error, 'Failed to delete the task.')
+      toast.error(message)
+    } finally {
+      deleteBusy = false
+      pendingDelete = null
+    }
+  }
+
   async function togglePause() {
     if (!settings) {
       return
@@ -925,6 +998,9 @@
                 {railways}
                 onMoveToColumn={(column, placement) => moveCardToColumn(task, column, placement)}
                 onMoveToRailway={(targetRailwayId) => requestLaneMove(task, targetRailwayId)}
+                onToggleHold={() => toggleHold(task)}
+                onReset={() => (pendingReset = task)}
+                onDelete={() => (pendingDelete = task)}
               />
             </div>
           {/each}
@@ -1051,6 +1127,59 @@
         <AlertDialog.Cancel disabled={laneMoveBusy}>Cancel</AlertDialog.Cancel>
         <Button onclick={confirmLaneMove} disabled={laneMoveBusy}>
           {laneMoveBusy ? 'Moving…' : 'Move repo'}
+        </Button>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+
+  <!--
+    Hard-reset confirmation (issue #235). Same copy as the task page's Hard reset
+    button. Closing (Cancel / Escape / outside) clears the pending reset.
+  -->
+  <AlertDialog.Root
+    open={pendingReset !== null}
+    onOpenChange={(open) => {
+      if (!open) pendingReset = null
+    }}
+  >
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Hard reset this task?</AlertDialog.Title>
+        <AlertDialog.Description>
+          This abandons the current attempt and starts the task over. It will: stop the agent if it
+          is working this task right now, close its pull request, delete its branch (from GitHub and
+          the workspace), reopen the source issue if it was closed, and move the card back to
+          Available. This cannot be undone.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel disabled={resetBusy}>Cancel</AlertDialog.Cancel>
+        <Button variant="destructive" onclick={confirmReset} disabled={resetBusy}>
+          {resetBusy ? 'Resetting…' : 'Hard reset'}
+        </Button>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+
+  <!-- Delete confirmation (issue #235), internal tasks only. -->
+  <AlertDialog.Root
+    open={pendingDelete !== null}
+    onOpenChange={(open) => {
+      if (!open) pendingDelete = null
+    }}
+  >
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Delete this task?</AlertDialog.Title>
+        <AlertDialog.Description>
+          This permanently removes the card and its activity history from Seraphim. This cannot be
+          undone.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel disabled={deleteBusy}>Cancel</AlertDialog.Cancel>
+        <Button variant="destructive" onclick={confirmDelete} disabled={deleteBusy}>
+          {deleteBusy ? 'Deleting…' : 'Delete'}
         </Button>
       </AlertDialog.Footer>
     </AlertDialog.Content>
