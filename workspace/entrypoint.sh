@@ -17,6 +17,35 @@ mkdir -p /workspace "${CLAUDE_CONFIG_DIR}/projects"
 chown "${AGENT_USER}:${AGENT_USER}" /workspace
 chown -R "${AGENT_USER}:${AGENT_USER}" "${CLAUDE_CONFIG_DIR}" 2>/dev/null || true
 
+# --- Make documented ~/.claude/... paths resolve (issue #259) ----------------
+# The global instructions tell the agent to read ~/.claude/orgs/*.md and every
+# applicable ~/.claude/docs/*.md before its first edit (and to HALT if the org
+# file is missing). But the config repo lives under CLAUDE_CONFIG_DIR
+# (/workspace/.claude) while the agent's $HOME is /home/codespace, so those
+# literal home-dir paths don't resolve and can trigger a false halt that wastes a
+# run. Symlink the agent's ~/.claude at the real config dir so the documented
+# paths resolve, with no other effect.
+#
+# We deliberately do NOT move $HOME to /workspace (the alternative considered in
+# the issue): SSH keys are copied to ${AGENT_HOME}/.ssh below and `gh auth
+# setup-git` wires git credentials under ${AGENT_HOME}, so relocating $HOME would
+# break SSH cloning and auth unless those were relocated too. The symlink has no
+# such side effects.
+#
+# If a real (non-symlink) ~/.claude already exists, link only the two documented
+# subdirs so we never clobber other Claude state the home dir may hold. A symlink
+# to a target that the API clones later (orgs/, docs/) is fine: it dangles until
+# the config repo lands, then resolves.
+if [ "${CLAUDE_CONFIG_DIR}" != "${AGENT_HOME}/.claude" ]; then
+  if [ ! -e "${AGENT_HOME}/.claude" ] || [ -L "${AGENT_HOME}/.claude" ]; then
+    ln -sfn "${CLAUDE_CONFIG_DIR}" "${AGENT_HOME}/.claude"
+  else
+    ln -sfn "${CLAUDE_CONFIG_DIR}/orgs" "${AGENT_HOME}/.claude/orgs"
+    ln -sfn "${CLAUDE_CONFIG_DIR}/docs" "${AGENT_HOME}/.claude/docs"
+  fi
+  chown -h "${AGENT_USER}:${AGENT_USER}" "${AGENT_HOME}/.claude" 2>/dev/null || true
+fi
+
 # --- SSH: copy the host's keys so git@github.com clones work -----------------
 if [ -d /host-ssh ]; then
   mkdir -p "${AGENT_HOME}/.ssh"
