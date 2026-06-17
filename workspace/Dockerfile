@@ -187,9 +187,11 @@ COPY seraphim-comment /usr/local/bin/seraphim-comment
 COPY seraphim-state /usr/local/bin/seraphim-state
 COPY seraphim-draft /usr/local/bin/seraphim-draft
 COPY seraphim-screenshot /usr/local/bin/seraphim-screenshot
+COPY seraphim-followup /usr/local/bin/seraphim-followup
 RUN chmod +x /usr/local/bin/seraphim-suggest /usr/local/bin/seraphim-ask \
     /usr/local/bin/seraphim-comment /usr/local/bin/seraphim-state \
-    /usr/local/bin/seraphim-draft /usr/local/bin/seraphim-screenshot
+    /usr/local/bin/seraphim-draft /usr/local/bin/seraphim-screenshot \
+    /usr/local/bin/seraphim-followup
 
 # --- Computed-style check library for visual self-review (issue #245) ---------
 # The deterministic CSS checks (centering/spacing/overflow/stacking) the agent

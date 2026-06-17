@@ -653,13 +653,18 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
 }
 
-/// A setup recommendation the agent made after finishing a task.
+/// A recommendation the agent made about a task: either an environment setup
+/// improvement or a piece of follow-up work it noticed (issue #272). Both kinds
+/// share this struct and the ack / create-issue pipeline; `kind` discriminates.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct EnvSuggestion {
     pub id: Uuid,
     pub task_id: Uuid,
     pub title: String,
     pub detail: String,
+    /// `"environment"` (setup improvements) or `"follow_up"` (cleanup / tech debt /
+    /// dead code / security / deprecations the agent spotted while working).
+    pub kind: String,
     /// Checked off by the user; the board badge counts the unacknowledged ones.
     pub acknowledged: bool,
     pub created_at: DateTime<Utc>,

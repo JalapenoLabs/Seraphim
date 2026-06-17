@@ -362,9 +362,9 @@
     {#if suggestionCount > 0}
       <div
         class="mt-2 animate-pulse rounded-md bg-warning px-2 py-1 text-center text-xs font-bold text-background motion-reduce:animate-none"
-        title="The agent recommended environment changes"
+        title="The agent has recommendations (setup improvements and/or follow-up work)"
       >
-        💡 {suggestionCount} setup {suggestionCount === 1 ? 'suggestion' : 'suggestions'}
+        💡 {suggestionCount} {suggestionCount === 1 ? 'suggestion' : 'suggestions'}
       </div>
     {/if}
 
