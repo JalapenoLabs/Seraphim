@@ -1111,10 +1111,12 @@ pub async fn upsert_issue_task(
 /// fields and the live Jira status, but never the human-curated `board_column` or
 /// `position`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_jira_task(
     pool: &PgPool,
     external_id: &str,
     repo_id: Option<Uuid>,
+    target_repo_ids: &[Uuid],
     jira_board_id: Uuid,
     title: &str,
     body: &str,
@@ -1125,11 +1127,15 @@ pub async fn upsert_jira_task(
 ) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         // A task's railway follows its repo, falling back to `main` (issue #201).
-        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
+        // The repo assignment (`repo_id` / `target_repo_ids`) is seeded from the
+        // board's repo set ONLY on first insert and is deliberately absent from the
+        // conflict path, so the operator's per-card repo choice (and "cleared to
+        // tracking-only") survives every later sync, exactly like the human-curated
+        // column / position do (issue #290).
+        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, target_repo_ids, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
          VALUES (COALESCE((SELECT railway_id FROM repositories WHERE id = $2), (SELECT id FROM railways WHERE is_main)), \
-          'jira', $1, $2, $3, $4, $5, $6, $7, $8, $9) \
+          'jira', $1, $2, $10, $3, $4, $5, $6, $7, $8, $9) \
          ON CONFLICT (external_id) WHERE source_kind = 'jira' DO UPDATE SET \
-         repo_id = EXCLUDED.repo_id, \
          jira_board_id = EXCLUDED.jira_board_id, \
          title = EXCLUDED.title, \
          body_snapshot = EXCLUDED.body_snapshot, \
@@ -1147,6 +1153,7 @@ pub async fn upsert_jira_task(
     .bind(status)
     .bind(initial_column)
     .bind(initial_position)
+    .bind(Json(target_repo_ids.to_vec()))
     .fetch_one(pool)
     .await
 }
@@ -1165,6 +1172,7 @@ pub async fn upsert_jira_task_placed(
     pool: &PgPool,
     external_id: &str,
     repo_id: Option<Uuid>,
+    target_repo_ids: &[Uuid],
     jira_board_id: Uuid,
     title: &str,
     body: &str,
@@ -1177,15 +1185,15 @@ pub async fn upsert_jira_task_placed(
     sqlx::query_as::<_, Task>(
         // railway = repo's railway, else the planner's chosen lane, else `main`.
         // Only the railway / column / position differ from `upsert_jira_task`; the
-        // conflict path is identical, so an existing card is never disturbed.
-        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
+        // conflict path is identical (repo assignment seeded on insert only), so an
+        // existing card and the operator's repo choice are never disturbed (#290).
+        "INSERT INTO tasks (railway_id, source_kind, external_id, repo_id, target_repo_ids, jira_board_id, title, body_snapshot, url, external_state, board_column, position) \
          VALUES (COALESCE( \
              (SELECT railway_id FROM repositories WHERE id = $2), \
              $10, \
              (SELECT id FROM railways WHERE is_main)), \
-          'jira', $1, $2, $3, $4, $5, $6, $7, $8, $9) \
+          'jira', $1, $2, $11, $3, $4, $5, $6, $7, $8, $9) \
          ON CONFLICT (external_id) WHERE source_kind = 'jira' DO UPDATE SET \
-         repo_id = EXCLUDED.repo_id, \
          jira_board_id = EXCLUDED.jira_board_id, \
          title = EXCLUDED.title, \
          body_snapshot = EXCLUDED.body_snapshot, \
@@ -1204,6 +1212,7 @@ pub async fn upsert_jira_task_placed(
     .bind(initial_column)
     .bind(initial_position)
     .bind(railway_id)
+    .bind(Json(target_repo_ids.to_vec()))
     .fetch_one(pool)
     .await
 }
@@ -1876,14 +1885,20 @@ pub async fn create_internal_task_in_todo(
 /// the primary `repo_id`), or clears them with an empty slice. Restricted to
 /// internal tasks: a GitHub task's repo is its issue's and must not be
 /// reassigned. Returns the updated task, or `None` if the id is not internal.
-pub async fn set_internal_task_repos(
+/// Sets (or clears) the repos an internal or Jira ticket targets, in priority
+/// order; the first becomes the primary repo the agent branches in. The first
+/// entry is mirrored into `repo_id`, and an empty list clears both (back to
+/// tracking-only / not auto-pulled). Restricted to internal and Jira tickets: a
+/// GitHub task's repo is its issue's own and is never reassigned (issue #290).
+/// Returns `None` when the task is missing or a GitHub task.
+pub async fn set_task_target_repos(
     pool: &PgPool,
     id: Uuid,
     repo_ids: &[Uuid],
 ) -> sqlx::Result<Option<Task>> {
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET repo_id = $2, target_repo_ids = $3, updated_at = now() \
-         WHERE id = $1 AND source_kind = 'internal' RETURNING *",
+         WHERE id = $1 AND source_kind IN ('internal', 'jira') RETURNING *",
     )
     .bind(id)
     .bind(repo_ids.first().copied())
@@ -1965,25 +1980,21 @@ pub async fn reclaim_orphaned_turns(pool: &PgPool) -> sqlx::Result<u64> {
 
 /// The next card the agent should work: top of `To Do`, not on hold.
 ///
-/// Restricted to GitHub tasks for now: the agent codes a ticket by branching and
-/// opening a PR in one repo, while a Jira ticket may span several (its board's
-/// repo set), which is a separate execution model not yet built. Jira tickets
-/// still sync in, map to columns, and transition on moves; they just are not
-/// auto-pulled to be coded.
+/// A GitHub issue is always workable (its repo is the issue's own). An internal
+/// or Jira ticket is workable once the operator (or, for Jira, the followed
+/// board's repo set) has pointed it at a target repo, since the agent needs
+/// somewhere to branch and open the PR; a repo-less internal/Jira ticket is left
+/// on the board for the operator to assign rather than pulled and failed (issue
+/// #290). A Jira ticket with a target repo is worked exactly like a GitHub issue,
+/// reusing the internal multi-repo execution model.
 pub async fn pick_next_todo(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<Option<Task>> {
-    // GitHub issues are always workable; internal tickets are too, but only once
-    // the operator has pointed them at a target repo (the agent needs somewhere to
-    // branch and open the PR). Jira tickets stay excluded (multi-repo execution is
-    // not built yet). An internal ticket with no repo is left for the operator to
-    // assign rather than pulled and immediately failed.
-    //
     // Scoped to the railway (issue #202) so each lane pulls only its own work; with
     // only `main` every task is on `main`, so the result is unchanged from before.
     sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE board_column = 'todo' AND hold = FALSE \
          AND railway_id = $1 \
          AND (source_kind = 'github' \
-              OR (source_kind = 'internal' AND repo_id IS NOT NULL)) \
+              OR (source_kind IN ('internal', 'jira') AND repo_id IS NOT NULL)) \
          ORDER BY position ASC LIMIT 1",
     )
     .bind(railway_id)

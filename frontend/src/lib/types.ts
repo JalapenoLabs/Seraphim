@@ -122,9 +122,10 @@ export type Task = {
   repo_id: string | null
   // The railway (swimlane) working this card; always set and follows the repo.
   railway_id: string
-  // Every repo an internal ticket targets, in priority order; the first equals
-  // `repo_id` (the primary repo the agent branches in). Empty for tracking-only
-  // tickets and for GitHub/Jira tasks.
+  // Every repo an internal or Jira ticket targets, in priority order; the first
+  // equals `repo_id` (the primary repo the agent branches in). A Jira ticket
+  // defaults to its board's repo set. Empty for tracking-only tickets and for
+  // GitHub tasks.
   target_repo_ids: string[]
   title: string
   body_snapshot: string

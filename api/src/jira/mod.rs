@@ -393,6 +393,50 @@ impl JiraClient {
         Ok(true)
     }
 
+    /// Posts a comment to an issue (issue #290), so the agent can report a PR link
+    /// and outcome back to the Jira ticket the work came from.
+    ///
+    /// Cloud (REST v3) takes the body as Atlassian Document Format; Server (v2)
+    /// takes plain text, so the body is encoded per deployment, mirroring
+    /// [`Self::create_issue`]'s description handling.
+    pub async fn add_comment(&self, issue_key: &str, body: &str) -> Result<()> {
+        let url = format!(
+            "{}{}/issue/{issue_key}/comment",
+            self.config.base_url,
+            self.config.api_base()
+        );
+        let payload = match self.config.deployment {
+            JiraDeployment::Cloud => serde_json::json!({
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": body }],
+                    }],
+                }
+            }),
+            JiraDeployment::Server => serde_json::json!({ "body": body }),
+        };
+
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", self.config.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(eyre!(
+                "Jira comment on {issue_key} failed ({status}): {body}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Creates a `Task`-type issue in `project_key` and returns its key + URL.
     /// Cloud (REST v3) takes the description as Atlassian Document Format; Server
     /// (v2) takes plain text, so the description is encoded per deployment.

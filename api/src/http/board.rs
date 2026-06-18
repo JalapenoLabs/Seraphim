@@ -113,38 +113,13 @@ pub async fn move_task(
     state.notify_board();
 
     // Two-way sync: reflect the move onto a Jira ticket by transitioning its
-    // workflow status. Best-effort, so a Jira hiccup never fails the board move.
-    if task.source_kind == SourceKind::Jira {
-        if let Err(error) = transition_jira(&state, &task, body.column).await {
-            warn!(error = %error, task = %task.id, "failed to transition Jira ticket on move");
-        }
+    // workflow status (the shared helper is a no-op for non-Jira tasks).
+    // Best-effort, so a Jira hiccup never fails the board move.
+    if let Err(error) = orchestrator::transition_jira_to_column(&state, &task, body.column).await {
+        warn!(error = %error, task = %task.id, "failed to transition Jira ticket on move");
     }
 
     Ok(Json(task))
-}
-
-/// Transitions a Jira ticket to the status its new column maps to (via the
-/// board's mapping). A no-op when the task has no board, nothing maps to that
-/// column, or Jira is unconfigured.
-async fn transition_jira(state: &AppState, task: &Task, column: TaskColumn) -> eyre::Result<()> {
-    let Some(board_id) = task.jira_board_id else {
-        return Ok(());
-    };
-    let Some(board) = queries::get_jira_board(&state.db, board_id).await? else {
-        return Ok(());
-    };
-    let Some(target) = crate::jira::status_for_column(&board.status_map.0, column) else {
-        return Ok(());
-    };
-    let Some(jira) = state.jira().await? else {
-        return Ok(());
-    };
-    if jira.transition_issue(&task.external_id, &target).await? {
-        // Mirror the new status onto the card so the badge matches immediately.
-        queries::set_task_external_state(&state.db, task.id, &target).await?;
-        state.notify_board();
-    }
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,7 +409,9 @@ async fn sync_ticket_to_column(
     };
 
     match task.source_kind {
-        SourceKind::Jira => transition_jira(state, task, column).await,
+        SourceKind::Jira => orchestrator::transition_jira_to_column(state, task, column)
+            .await
+            .map(|_| ()),
         SourceKind::Internal => {
             if task.external_state.as_deref() != Some(desired) {
                 queries::set_task_external_state(&state.db, task.id, desired).await?;
