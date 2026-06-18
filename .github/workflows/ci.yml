@@ -15,9 +15,23 @@ permissions:
   contents: read
 
 jobs:
-  # The three jobs are independent, so a failure in one never short-circuits the
-  # others ("no fail fast"). Within a job, checks use `if: ${{ !cancelled() }}`
-  # so a formatting failure still lets the tests run and report.
+  # The jobs are independent, so a failure in one never short-circuits the others
+  # ("no fail fast"). Within a job, checks use `if: ${{ !cancelled() }}` so a
+  # formatting failure still lets the tests run and report.
+
+  # Repo-wide, language-agnostic guard: reject NUL bytes (and other stray control
+  # characters) committed into a text source. A literal NUL compiles fine but makes
+  # git/grep/ripgrep treat the file as binary and silently skip it in code search
+  # (issue #295). Fast (checkout + a stdlib Python scan), so it gates every PR
+  # cheaply. The same script runs locally: `python3 scripts/check-control-chars.py`.
+  hygiene:
+    name: Source hygiene
+    runs-on: [self-hosted, Linux, X64, fedora]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject NUL bytes and control characters in tracked sources
+        run: python3 scripts/check-control-chars.py
 
   api:
     name: API (Rust)

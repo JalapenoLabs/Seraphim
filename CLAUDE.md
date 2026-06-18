@@ -612,7 +612,12 @@ Playwright MCP, check layout via computed styles at 375px and 1280px).
   looks un-searchable, check it for NUL bytes
   (`python3 -c "print(open(p,'rb').read().count(0))"`) rather than trusting an
   empty `grep`. A literal NUL in a `.rs`/`.ts` source is a defect (usually a paste
-  artifact in a comment or string) and should be removed, not worked around.
+  artifact in a comment or string) and should be removed, not worked around. CI now
+  guards against this regressing (issue #305): the **Source hygiene** job runs
+  `scripts/check-control-chars.py`, which fails the PR if any tracked text file
+  (binary assets and the vendored `.yarn/` bundle excluded) contains a NUL byte or
+  other control character besides tab / newline / carriage return. Run it locally
+  the same way: `python3 scripts/check-control-chars.py`.
 - **Rust toolchain is pinned to 1.88** (`api/rust-toolchain.toml`) because some
   transitive deps ship edition2024 crates. The host default may be older — always
   use `cargo +1.88`.
