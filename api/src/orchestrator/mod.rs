@@ -1419,9 +1419,11 @@ async fn next_actionable_task(
     if let Some(task) = queries::pick_next_review_address(&state.db, railway.id).await? {
         return Ok(Some((task, WorkMode::AddressReview)));
     }
-    // A blocking task in progress (being worked or parked waiting for input)
-    // serializes this railway's queue: pull no new To Do work until it finishes.
-    // Resumes and CI fixes above continue existing in-flight work and are not gated.
+    // A blocking task that is unfinished (being worked, parked waiting for input,
+    // or in review with its PR running CI) serializes this railway's queue: pull
+    // no new To Do work until it squash-merges (issue #302). Resumes and CI/review
+    // fixes above are not gated, so the blocking task's own PR still advances to a
+    // merge; only fresh work waits.
     if !queries::has_active_blocking_task(&state.db, railway.id).await? {
         if let Some(task) = queries::pick_next_todo(&state.db, railway.id).await? {
             return Ok(Some((task, WorkMode::Fresh)));

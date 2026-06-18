@@ -564,8 +564,10 @@ pub struct Task {
     /// retry thrash, independent of `ci_fix_attempts`).
     pub review_fix_attempts: i32,
     pub hold: bool,
-    /// When true, while this task is in progress the agent pulls no new work, so
-    /// dependent tasks wait until it finishes (queue serialization).
+    /// When true, the agent pulls no new work while this task is unfinished, so
+    /// dependent tasks wait until it merges (queue serialization). The gate spans
+    /// the whole life of the task, from `in_progress` through `in_review` until its
+    /// PR squash-merges to `done` (issue #302), not just while it is being worked.
     pub blocking: bool,
     /// The operator's private scratchpad for this task. Stored only here and
     /// never written back to the source ticket.

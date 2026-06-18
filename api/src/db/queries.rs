@@ -1720,8 +1720,9 @@ pub async fn set_task_hold(pool: &PgPool, id: Uuid, hold: bool) -> sqlx::Result<
     .await
 }
 
-/// Flags a task as blocking (or clears it). While a blocking task is in progress,
-/// the agent pulls no new work.
+/// Flags a task as blocking (or clears it). While a blocking task is unfinished
+/// (in progress or its PR is in review), the agent pulls no new work; see
+/// [`has_active_blocking_task`].
 pub async fn set_task_blocking(pool: &PgPool, id: Uuid, blocking: bool) -> sqlx::Result<Task> {
     sqlx::query_as::<_, Task>(
         "UPDATE tasks SET blocking = $2, updated_at = now() WHERE id = $1 RETURNING *",
@@ -1781,17 +1782,24 @@ pub async fn delete_tasks(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {
     Ok(result.rows_affected())
 }
 
-/// Whether any blocking task is currently in progress. A fresh task that
-/// finishes (success or failure) leaves `in_progress`, so a blocking task still
-/// sitting here is unfinished, being worked or parked waiting for input, and the
-/// agent must not start anything new.
+/// Whether any blocking task is still unfinished and gating the railway's queue.
+///
+/// A blocking task serializes the queue from the moment it starts (`in_progress`)
+/// until its pull request squash-merges and the card lands in `done` (issue #302).
+/// The `in_review` column is included deliberately: a blocking task whose PR has
+/// opened is not finished, it is only running CI and waiting to merge, so the
+/// agent must keep holding back new work until the merge completes rather than
+/// racing ahead the instant the PR appears. A blocking task in any other column
+/// (`available`/`todo` before it starts, `done` once merged, `ignored` when set
+/// aside) does not gate: the agent is free to pull it or move on.
 pub async fn has_active_blocking_task(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<bool> {
     // Scoped to the railway (issue #202): each railway serializes only its own
     // queue, so a blocking task on another lane never gates this one. With only the
     // `main` railway every task is on `main`, so this matches the global behavior.
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM tasks \
-         WHERE blocking = TRUE AND board_column = 'in_progress' AND railway_id = $1)",
+         WHERE blocking = TRUE AND board_column IN ('in_progress', 'in_review') \
+         AND railway_id = $1)",
     )
     .bind(railway_id)
     .fetch_one(pool)
@@ -3377,4 +3385,129 @@ pub async fn prune_stale_pending_placements(pool: &PgPool, max_age_days: i32) ->
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A blocking task must keep the railway's queue serialized across its whole
+    /// life, including while its PR sits in review running CI, and release it only
+    /// once the PR squash-merges to Done (issue #302).
+    ///
+    /// The check exercises the real [`has_active_blocking_task`] query, so it needs
+    /// Postgres. It runs against a throwaway database of its own (created via the
+    /// `postgres` maintenance DB and dropped at the end), never the one
+    /// `DATABASE_URL` points at, so it never collides with a parallel migrate step
+    /// or leaves rows behind. With no reachable database it skips: an environment
+    /// quirk must not fail the suite, and CI exercises the migrations separately.
+    #[tokio::test]
+    async fn blocking_task_gates_the_queue_until_its_pr_merges() {
+        const TEST_DB: &str = "seraphim_issue302_test";
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping blocking_task_gates_the_queue_until_its_pr_merges: DATABASE_URL unset"
+            );
+            return;
+        };
+        let Some((prefix, _)) = url.rsplit_once('/') else {
+            eprintln!("skipping: DATABASE_URL has no database segment");
+            return;
+        };
+        // `raw_sql` (the simple protocol) is required: CREATE/DROP DATABASE cannot
+        // run inside the implicit transaction of a prepared statement.
+        let Ok(admin) = PgPool::connect(&format!("{prefix}/postgres")).await else {
+            eprintln!("skipping: cannot reach the Postgres maintenance database");
+            return;
+        };
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+            .execute(&admin)
+            .await;
+        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {TEST_DB}"))
+            .execute(&admin)
+            .await
+        {
+            eprintln!("skipping: cannot create the throwaway test database: {error}");
+            return;
+        }
+
+        let pool = PgPool::connect(&format!("{prefix}/{TEST_DB}"))
+            .await
+            .expect("connect to the throwaway test database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        // Every freshly migrated database has a seeded `main` railway; both tasks
+        // below land on it (no repo means "railway follows repo" falls back to main).
+        let railway_id: Uuid = sqlx::query_scalar("SELECT id FROM railways WHERE is_main")
+            .fetch_one(&pool)
+            .await
+            .expect("the main railway is seeded by the migrations");
+
+        let task = create_internal_task(&pool, "blocking work", "", "open", &[], 1.0)
+            .await
+            .expect("create the blocking task");
+        set_task_blocking(&pool, task.id, true)
+            .await
+            .expect("flag the task blocking");
+
+        // A blocking task that has not started yet (Available) gates nothing: the
+        // agent should be free to pull it.
+        assert!(
+            !has_active_blocking_task(&pool, railway_id).await.unwrap(),
+            "a blocking task still in Available must not gate the queue"
+        );
+
+        // Once it is being worked, the queue serializes (the pre-existing behavior).
+        move_task(&pool, task.id, TaskColumn::InProgress, 1.0)
+            .await
+            .unwrap();
+        assert!(
+            has_active_blocking_task(&pool, railway_id).await.unwrap(),
+            "a blocking task in progress must gate the queue"
+        );
+
+        // Its PR opens and the card moves to In Review while CI runs. This is the
+        // crux of issue #302: the gate must persist, not drop the instant the PR
+        // appears, so no fresh work is pulled while the blocking PR is unmerged.
+        move_task(&pool, task.id, TaskColumn::InReview, 1.0)
+            .await
+            .unwrap();
+        assert!(
+            has_active_blocking_task(&pool, railway_id).await.unwrap(),
+            "a blocking task in review (PR open, awaiting merge) must still gate the queue"
+        );
+
+        // The PR squash-merges and the card lands in Done: the gate releases and the
+        // agent may resume pulling new work.
+        move_task(&pool, task.id, TaskColumn::Done, 1.0)
+            .await
+            .unwrap();
+        assert!(
+            !has_active_blocking_task(&pool, railway_id).await.unwrap(),
+            "a blocking task that has merged to Done must release the queue"
+        );
+
+        // A non-blocking task in review never gates, so ordinary PRs running CI do
+        // not stall the queue.
+        let ordinary = create_internal_task(&pool, "ordinary work", "", "open", &[], 2.0)
+            .await
+            .expect("create the non-blocking task");
+        move_task(&pool, ordinary.id, TaskColumn::InReview, 2.0)
+            .await
+            .unwrap();
+        assert!(
+            !has_active_blocking_task(&pool, railway_id).await.unwrap(),
+            "a non-blocking task in review must not gate the queue"
+        );
+
+        // Tear down: close our pool, then drop the throwaway database (a database
+        // cannot be dropped while a connection to it is open). Best-effort.
+        pool.close().await;
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+            .execute(&admin)
+            .await;
+    }
 }

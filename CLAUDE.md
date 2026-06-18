@@ -157,7 +157,8 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   from org** action (`POST /repos/import-org`).
 - **`tasks`** — the cards: `source_kind`, `external_id`, `repo_id`, `title`,
   `board_column`, `position` (fractional rank), `status`, `branch`, `pr_url`,
-  `error`, `hold`, `session_id`.
+  `error`, `hold` (agent skips this card), `blocking` (serialize the queue while
+  this card is unfinished, see the agent loop), `session_id`.
 - **`turns`** / **`events`** — per-task Claude invocations and the append-only
   parsed stream-json (live feed + chat history). Beyond the Claude stream, the
   orchestrator injects synthetic non-Claude events into the same `events` table +
@@ -434,6 +435,16 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    workspace image), posting to `POST /agent/questions`, `POST /agent/suggestions`,
    and `POST /agent/screenshots`; the exec injects `SERAPHIM_TASK_ID` +
    `SERAPHIM_API_URL`. One task awaited to completion before the next (no overlap).
+   - **Blocking tasks (queue serialization, issue #302):** a task flagged
+     `blocking` holds back step (e), pulling fresh **To Do** work, for as long as it
+     is unfinished, where "unfinished" spans `in_progress` AND `in_review` until its
+     PR squash-merges to **Done** (`queries::has_active_blocking_task`, scoped per
+     railway). The gate deliberately does NOT drop the instant the PR opens and the
+     card moves to In Review: the agent must not race ahead to the next issue while
+     the blocking PR is still running CI / awaiting merge. Steps (a)-(d) (resume, CI
+     fix, conflict resolve, review address) are NOT gated, so the blocking task's own
+     PR keeps advancing to a merge; only new work waits. A blocking task in
+     `available`/`todo` (not started), `done` (merged), or `ignored` does not gate.
    - **Stacked dependencies (issue #256):** a fresh ticket that depends on another
      ticket whose PR is still open builds on a default branch that lacks that work.
      A `Depends on:` marker in the ticket body (e.g. `Depends on: A1 (package
