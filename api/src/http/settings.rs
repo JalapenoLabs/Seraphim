@@ -17,6 +17,7 @@ use crate::db::models::{
     AvailabilityWindow, EnvVarWrite, JiraDeployment, NetworkAccessLevel, ReviewPolicy, Settings,
 };
 use crate::db::queries;
+use crate::orchestrator;
 use crate::secrets::mask;
 use crate::state::AppState;
 
@@ -103,6 +104,20 @@ pub async fn update(
         body.completion_sound_enabled,
     )
     .await?;
+    // Re-evaluate an active usage auto-pause against the change (issue #292): a
+    // disabled toggle or a threshold raised above current utilization lifts the
+    // pause now, instead of waiting for the window reset.
+    let updated = queries::get_settings(&state.db).await?;
+    orchestrator::reevaluate_usage_pause(&state, &updated).await?;
+    state.notify_board();
+    Ok(Json(settings_view(&state).await?))
+}
+
+/// `POST /api/v1/settings/usage/resume` - manually clear an active usage
+/// auto-pause (issue #292), so the operator can resume the agent from the UI
+/// without a DB edit. A no-op when nothing is paused.
+pub async fn resume_usage(State(state): State<AppState>) -> ApiResult<Json<Settings>> {
+    queries::set_usage_paused_until(&state.db, None).await?;
     state.notify_board();
     Ok(Json(settings_view(&state).await?))
 }

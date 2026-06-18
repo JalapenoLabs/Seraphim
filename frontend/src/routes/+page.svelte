@@ -37,6 +37,7 @@
     listRepos,
     moveTask,
     provisionWorkspace,
+    resumeUsage,
     setNotepad,
     setPaused,
     setRailwayPaused,
@@ -826,6 +827,22 @@
     }
   }
 
+  // Manually lift the subscription-usage auto-pause (issue #292), so the agent
+  // resumes now instead of waiting for the window reset.
+  let resumingUsage = $state(false)
+  async function resumeUsageNow() {
+    resumingUsage = true
+    try {
+      await resumeUsage()
+      toast.success('Resumed; the agent will pull new work')
+    } catch {
+      toast.error('Could not resume')
+    } finally {
+      await load()
+      resumingUsage = false
+    }
+  }
+
   onMount(() => {
     // Hydrate each column's saved sort before the first load so it applies at once.
     for (const column of COLUMNS) {
@@ -947,12 +964,24 @@
   {/each}
 
   {#if settings?.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
-    <Alert.Root class="mx-6 mt-4 border-warning/40">
-      <Alert.Title>Paused: subscription usage limit reached.</Alert.Title>
-      <Alert.Description>
-        New work is on hold until the usage window resets at
-        {new Date(settings.usage_paused_until).toLocaleString()}. The agent resumes automatically.
-      </Alert.Description>
+    <Alert.Root class="mx-6 mt-4 flex items-start justify-between gap-4 border-warning/40">
+      <div class="min-w-0">
+        <Alert.Title>Paused: subscription usage limit reached.</Alert.Title>
+        <Alert.Description>
+          New work is on hold until the usage window resets at
+          {new Date(settings.usage_paused_until).toLocaleString()}, when it resumes automatically.
+          To resume sooner, raise the usage threshold in Settings or resume now.
+        </Alert.Description>
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        class="flex-none"
+        disabled={resumingUsage}
+        onclick={resumeUsageNow}
+      >
+        {resumingUsage ? 'Resuming…' : 'Resume now'}
+      </Button>
     </Alert.Root>
   {/if}
 

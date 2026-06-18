@@ -1313,6 +1313,47 @@ async fn agent_loop(state: AppState, handle: RailwayHandle) {
     }
 }
 
+/// Re-evaluates an active usage auto-pause after a settings change and lifts it if
+/// it no longer applies (issue #292).
+///
+/// The auto-pause keys only to the window reset time, so without this neither a
+/// raised `usage_limit_threshold` nor a disabled `usage_limit_pause_enabled` would
+/// take effect until the reset. Called on every settings update: when there is an
+/// active (future) pause and [`usage::should_lift_pause`] says it no longer holds
+/// (the feature was turned off, or the latest utilization is now under the raised
+/// threshold), it clears `usage_paused_until` so the agent resumes immediately. A
+/// genuinely exhausted window still stands until reset. Best-effort and idempotent;
+/// when no pause is active it does nothing.
+pub(crate) async fn reevaluate_usage_pause(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+) -> Result<()> {
+    let Some(until) = settings.usage_paused_until else {
+        return Ok(());
+    };
+    // An already-lapsed pause is cleared by the gate on the next tick; nothing to do.
+    if Utc::now() >= until {
+        return Ok(());
+    }
+    // Re-judge against the latest rate-limit signal at the current threshold. The
+    // stored payload may wrap the info under `rate_limit_info` (the event) or be the
+    // info object itself, so accept either shape.
+    let payload = queries::latest_rate_limit(&state.db).await?;
+    let info = payload
+        .as_ref()
+        .map(|value| value.get("rate_limit_info").unwrap_or(value));
+    if usage::should_lift_pause(
+        info,
+        settings.usage_limit_pause_enabled,
+        settings.usage_limit_threshold,
+    ) {
+        queries::set_usage_paused_until(&state.db, None).await?;
+        state.notify_board();
+        info!("usage auto-pause lifted after a settings change (disabled or threshold raised)");
+    }
+    Ok(())
+}
+
 /// The next card this railway should work and how, or `None` if paused, halted,
 /// outside the availability schedule, or idle.
 ///

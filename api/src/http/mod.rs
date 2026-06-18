@@ -155,6 +155,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/settings", get(settings::get).patch(settings::update))
         .route("/settings/pause", post(settings::set_pause))
+        // Manually lift an active subscription-usage auto-pause (issue #292).
+        .route("/settings/usage/resume", post(settings::resume_usage))
         .route("/notepad", get(notepad::get).put(notepad::set))
         .route("/settings/tokens", post(settings::set_tokens))
         .route(
