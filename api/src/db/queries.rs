@@ -1978,6 +1978,33 @@ pub async fn reclaim_orphaned_turns(pool: &PgPool) -> sqlx::Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Finalizes any still-`running` *agent* turn on a railway (issue #297): marks it
+/// `failed` with `finished_at = started_at`, i.e. zero duration, so it never folds
+/// orphan time into `worked_ms` (matching [`reclaim_orphaned_turns`]'s deliberate
+/// choice).
+///
+/// Synthetic `[CI activity]` turns are left untouched: they are long-lived event
+/// containers, not agent work, so giving them a `finished_at` would fold their
+/// whole lifetime into `worked_ms`. They are instead excluded from the live
+/// running-turn counters below.
+///
+/// Called before starting a new turn (so a superseded turn never lingers) and on a
+/// defibrillator death (so an abandoned turn never lingers), which together bound
+/// the live `running` agent turns to at most one per active railway. Returns how
+/// many turns it finalized.
+pub async fn finalize_orphaned_agent_turns(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE turns SET status = 'failed', finished_at = started_at \
+         WHERE status = 'running' AND prompt <> $2 \
+         AND task_id IN (SELECT id FROM tasks WHERE railway_id = $1)",
+    )
+    .bind(railway_id)
+    .bind(CI_TURN_PROMPT)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// The next card the agent should work: top of `To Do`, not on hold.
 ///
 /// A GitHub issue is always workable (its repo is the issue's own). An internal
@@ -2613,18 +2640,25 @@ pub async fn railway_stats(pool: &PgPool, railway_id: Uuid) -> sqlx::Result<Stat
     .await
 }
 
-/// When any currently-running turn on this railway started, for its live ticker.
+/// When the genuinely-live turn on this railway started, for its live ticker.
+///
+/// Counts only a real agent turn whose task the orchestrator is actively working
+/// (`in_progress` + `working`/`preparing`), never a synthetic `[CI activity]`
+/// container or an orphaned `running` row whose task has moved on, so the ticker
+/// never races (issue #297).
 pub async fn railway_running_since(
     pool: &PgPool,
     railway_id: Uuid,
 ) -> sqlx::Result<Option<DateTime<Utc>>> {
     sqlx::query_scalar(
-        "SELECT turns.started_at FROM turns \
-         JOIN tasks ON tasks.id = turns.task_id \
-         WHERE tasks.railway_id = $1 AND turns.status = 'running' \
-         ORDER BY turns.started_at DESC LIMIT 1",
+        "SELECT started_at FROM turns \
+         WHERE status = 'running' AND prompt <> $2 \
+         AND task_id IN (SELECT id FROM tasks WHERE railway_id = $1 \
+             AND board_column = 'in_progress' AND status IN ('working', 'preparing')) \
+         ORDER BY started_at DESC LIMIT 1",
     )
     .bind(railway_id)
+    .bind(CI_TURN_PROMPT)
     .fetch_optional(pool)
     .await
 }
@@ -2643,30 +2677,48 @@ pub async fn railway_latest_usage(pool: &PgPool, railway_id: Uuid) -> sqlx::Resu
     Ok(row.map(|json| json.0))
 }
 
-/// When the currently-running turn for a task started, for the live time ticker.
+/// When the genuinely-live turn for a task started, for the live time ticker.
+///
+/// Counts only a real agent turn while the task is actively being worked, never a
+/// synthetic `[CI activity]` container or a leftover `running` row, so the ticker
+/// reflects real in-flight work (issue #297).
 pub async fn task_running_since(
     pool: &PgPool,
     task_id: Uuid,
 ) -> sqlx::Result<Option<DateTime<Utc>>> {
     sqlx::query_scalar(
-        "SELECT started_at FROM turns WHERE task_id = $1 AND status = 'running' \
+        "SELECT started_at FROM turns WHERE task_id = $1 AND status = 'running' AND prompt <> $2 \
+         AND EXISTS (SELECT 1 FROM tasks WHERE id = $1 \
+             AND board_column = 'in_progress' AND status IN ('working', 'preparing')) \
          ORDER BY started_at DESC LIMIT 1",
     )
     .bind(task_id)
+    .bind(CI_TURN_PROMPT)
     .fetch_optional(pool)
     .await
 }
 
-/// The start time of every currently-running turn, across all railways.
+/// The start time of every genuinely-live agent turn, across all railways.
 ///
 /// Railways run turns in parallel, so the global worked-time tick must account for
-/// each running turn's elapsed time, not just one. The handler folds these into the
+/// each live turn's elapsed time, not just one. The handler folds these into the
 /// reported `worked_ms` (persisted total plus each turn's elapsed so far) and the
 /// `running_turns` count the client uses to keep ticking at the combined rate.
+///
+/// Only counts a real agent turn whose task the orchestrator is actively working
+/// (`in_progress` + `working`/`preparing`): never a synthetic `[CI activity]`
+/// container (never finished by design) nor an orphaned `running` row whose task
+/// has moved on (superseded, died, or interrupted). Without this, leaked `running`
+/// rows made the lifetime clock advance at N times the true rate (issue #297).
 pub async fn global_running_turns(pool: &PgPool) -> sqlx::Result<Vec<DateTime<Utc>>> {
     sqlx::query_scalar(
-        "SELECT started_at FROM turns WHERE status = 'running' ORDER BY started_at DESC",
+        "SELECT started_at FROM turns \
+         WHERE status = 'running' AND prompt <> $1 \
+         AND task_id IN (SELECT id FROM tasks WHERE board_column = 'in_progress' \
+             AND status IN ('working', 'preparing')) \
+         ORDER BY started_at DESC",
     )
+    .bind(CI_TURN_PROMPT)
     .fetch_all(pool)
     .await
 }
@@ -3377,4 +3429,141 @@ pub async fn prune_stale_pending_placements(pool: &PgPool, max_age_days: i32) ->
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A task's still-`running` real agent turns (excludes the synthetic
+    /// `[CI activity]` container), the thing that must stay bounded (issue #297).
+    async fn running_agent_turns(pool: &PgPool, task_id: Uuid) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM turns WHERE task_id = $1 AND status = 'running' AND prompt <> $2",
+        )
+        .bind(task_id)
+        .bind(CI_TURN_PROMPT)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn set_task_active(pool: &PgPool, task_id: Uuid, active: bool) {
+        let (column, status) = if active {
+            (TaskColumn::InProgress, TaskStatus::Working)
+        } else {
+            (TaskColumn::Available, TaskStatus::Queued)
+        };
+        sqlx::query("UPDATE tasks SET board_column = $2, status = $3 WHERE id = $1")
+            .bind(task_id)
+            .bind(column)
+            .bind(status)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Orphaned `running` turns must never race the lifetime clock (issue #297):
+    /// starting a new turn supersedes the prior one, a death finalizes the dying
+    /// turn, and the synthetic CI container is never counted as live work.
+    ///
+    /// DB-gated: runs only when `DATABASE_URL` is set (the CI test job's throwaway
+    /// Postgres, or `pg-ephemeral` locally); otherwise it skips.
+    #[tokio::test]
+    async fn orphaned_running_turns_never_race_the_clock() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping orphaned_running_turns_never_race_the_clock: DATABASE_URL unset");
+            return;
+        };
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let task = create_internal_task(&pool, "issue-297 orphan turn test", "", "open", &[], 1.0)
+            .await
+            .expect("create task");
+        let railway: Uuid = sqlx::query_scalar("SELECT id FROM railways WHERE is_main")
+            .fetch_one(&pool)
+            .await
+            .expect("main railway id");
+
+        // A synthetic CI container: `running` by design and never finished, but not
+        // agent work, so it must never be finalized nor counted as a live turn.
+        get_or_create_ci_turn(&pool, task.id)
+            .await
+            .expect("ci container turn");
+
+        // A (finalize-on-supersede): a second turn closes the first; at most one
+        // agent turn stays running.
+        create_turn(&pool, task.id, 1, "agent turn 1", None)
+            .await
+            .expect("turn 1");
+        finalize_orphaned_agent_turns(&pool, railway)
+            .await
+            .expect("supersede");
+        create_turn(&pool, task.id, 2, "agent turn 2", None)
+            .await
+            .expect("turn 2");
+        assert_eq!(
+            running_agent_turns(&pool, task.id).await,
+            1,
+            "starting a new turn must leave at most one running agent turn"
+        );
+
+        // The CI container is left intact: finalizing it (a `finished_at`) would
+        // fold its whole lifetime into `worked_ms`.
+        let ci_running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM turns WHERE task_id = $1 AND prompt = $2 AND status = 'running'",
+        )
+        .bind(task.id)
+        .bind(CI_TURN_PROMPT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ci_running, 1, "the CI container must not be finalized");
+
+        // B (finalize-on-death): a death closes the running turn; none remain.
+        finalize_orphaned_agent_turns(&pool, railway)
+            .await
+            .expect("death finalize");
+        assert_eq!(
+            running_agent_turns(&pool, task.id).await,
+            0,
+            "a death must leave zero running agent turns"
+        );
+
+        // D (robust live count): the clock counts only a genuine agent turn whose
+        // task is actively worked, never the still-running CI container. A fresh DB
+        // holds only this task, so the global count is exactly our setup.
+        create_turn(&pool, task.id, 3, "agent turn 3", None)
+            .await
+            .expect("turn 3");
+        set_task_active(&pool, task.id, true).await;
+        assert_eq!(
+            global_running_turns(&pool).await.unwrap().len(),
+            1,
+            "only the live agent turn counts; the CI container is excluded"
+        );
+
+        // A turn whose task is not actively being worked is an orphan and must not
+        // be counted, even before it is finalized.
+        set_task_active(&pool, task.id, false).await;
+        assert_eq!(
+            global_running_turns(&pool).await.unwrap().len(),
+            0,
+            "a turn whose task is not actively worked never races the clock"
+        );
+
+        // Tidy up so a shared local Postgres is not left with test rows (turns
+        // cascade from the task).
+        sqlx::query("DELETE FROM tasks WHERE id = $1")
+            .bind(task.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

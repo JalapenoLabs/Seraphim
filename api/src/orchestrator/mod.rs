@@ -2199,6 +2199,14 @@ async fn stream_turn(
     // The session this turn resumes is the railway's own (read from its row).
     let resume_session_id = railway::read_session(state, handle).await?;
 
+    // Finalize-on-supersede (issue #297): one agent works one turn at a time per
+    // railway, so any still-`running` agent turn on this lane is stale (a prior turn
+    // that ended abnormally). Close it before opening the new one, so a leaked turn
+    // never lingers and races the lifetime clock.
+    if let Err(error) = queries::finalize_orphaned_agent_turns(&state.db, handle.id).await {
+        warn!(error = %error, railway = %handle.id, "failed to finalize a superseded turn");
+    }
+
     let idx = queries::next_turn_idx(&state.db, task.id).await?;
     let turn = queries::create_turn(
         &state.db,
@@ -3455,6 +3463,14 @@ async fn defibrillate(
     // Shock first: make sure no orphaned claude process keeps spinning in this
     // railway's container.
     kill_agent_process(state, handle).await;
+
+    // Finalize-on-death (issue #297): a watchdog-reaped death can leave the turn's
+    // row stuck `running` (the in-turn finish never ran), which would race the
+    // lifetime clock. Close it now so a death never leaves a lingering `running`
+    // turn. Best-effort; never blocks the recovery below.
+    if let Err(error) = queries::finalize_orphaned_agent_turns(&state.db, task.railway_id).await {
+        warn!(error = %error, task_id = %task.id, "failed to finalize the dying turn");
+    }
 
     // Decide recovery from how many times this task has now died.
     let incident_count = queries::count_heart_attacks_for_task(&state.db, task.id).await? + 1;
