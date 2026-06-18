@@ -1650,6 +1650,19 @@ pub async fn move_task(
     .await
 }
 
+/// Repositions a task within its column WITHOUT the re-queue side effects of
+/// [`move_task`] (issue #274). A bulk sort only changes the manual order, so it
+/// must not reset status / error / CI-fix counter / stats the way moving into
+/// To Do or Available does. The column is left untouched.
+pub async fn set_task_position(pool: &PgPool, id: Uuid, position: f64) -> sqlx::Result<()> {
+    sqlx::query("UPDATE tasks SET position = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(position)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Hard-resets a single task back to a clean, unstarted state in **Available**:
 /// clears its branch, PR link, error, session, and started/finished markers,
 /// re-queues it (`queued`), zeroes the CI-fix counter, and restarts its stats.

@@ -213,6 +213,22 @@ export function bulkDeleteTasks(ids: string[]) {
   return apiClient.post('tasks/bulk/delete', { json: { ids } }).json<{ deleted: number }>()
 }
 
+// The keys a "Sort selected" reorder accepts (issue #274), mirroring the backend
+// enum and the per-column sort vocabulary.
+export type BulkSortKey =
+  | 'id_asc'
+  | 'id_desc'
+  | 'created_asc'
+  | 'created_desc'
+  | 'updated_asc'
+  | 'updated_desc'
+
+// Reorder ONLY the selected cards by a key, within the slots they already occupy
+// in each column (unselected cards stay put).
+export function bulkSortTasks(ids: string[], sort: BulkSortKey) {
+  return apiClient.post('tasks/bulk/sort', { json: { ids, sort } }).json<{ reordered: number }>()
+}
+
 // Save the private per-task notepad. Stored only in our DB, never sent to the ticket.
 export function setTaskNotes(taskId: string, notes: string) {
   return apiClient.put(`tasks/${taskId}/notes`, { json: { notes } }).json<{ saved: boolean }>()

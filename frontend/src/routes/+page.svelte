@@ -28,6 +28,8 @@
     bulkDeleteTasks,
     bulkSetTaskFields,
     bulkSetTaskStatus,
+    bulkSortTasks,
+    type BulkSortKey,
     extractApiError,
     getBoard,
     getNotepad,
@@ -251,6 +253,19 @@
     selected.clear()
     await load()
     toast.success(`Deleted ${ids.length} ${ids.length === 1 ? 'task' : 'tasks'}`)
+  }
+
+  // Re-order only the selected cards (issue #274). The selection is kept so the
+  // operator can re-sort or keep editing.
+  async function applyBulkSort(sort: BulkSortKey) {
+    const ids = [...selected]
+    const { reordered } = await bulkSortTasks(ids, sort)
+    await load()
+    toast.success(
+      reordered > 0
+        ? `Re-ordered ${ids.length} ${ids.length === 1 ? 'task' : 'tasks'}`
+        : 'Already in that order'
+    )
   }
 
   function onWindowKeydown(event: KeyboardEvent) {
@@ -1210,6 +1225,7 @@
       onClear={exitBulkMode}
       onEditFields={applyBulkFields}
       onChangeStatus={applyBulkStatus}
+      onSort={applyBulkSort}
       onDelete={applyBulkDelete}
     />
   {/if}

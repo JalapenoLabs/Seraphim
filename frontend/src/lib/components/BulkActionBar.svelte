@@ -1,9 +1,11 @@
 <script lang="ts">
   import type { TaskColumn } from '../types'
+  import type { BulkSortKey } from '$lib/api'
 
   import {
     SlidersHorizontal,
     ArrowLeftRight,
+    ArrowDownUp,
     Trash2,
     X,
     Circle,
@@ -26,6 +28,7 @@
     onClear,
     onEditFields,
     onChangeStatus,
+    onSort,
     onDelete,
     dialogOpen = $bindable(false)
   }: {
@@ -33,6 +36,7 @@
     onClear: () => void
     onEditFields: (fields: { hold?: boolean; blocking?: boolean }) => Promise<void>
     onChangeStatus: (column: TaskColumn) => Promise<void>
+    onSort: (sort: BulkSortKey) => Promise<void>
     onDelete: () => Promise<void>
     dialogOpen?: boolean
   } = $props()
@@ -46,12 +50,24 @@
     { column: 'ignored', label: 'Ignored', icon: CircleSlash }
   ]
 
+  // The orders the operator can re-sort the selection into (issue #274). Only the
+  // selected cards move, within the slots they already occupy.
+  const SORT_OPTIONS: { key: BulkSortKey; label: string }[] = [
+    { key: 'id_asc', label: 'Issue number, ascending' },
+    { key: 'id_desc', label: 'Issue number, descending' },
+    { key: 'created_asc', label: 'Created, oldest first' },
+    { key: 'created_desc', label: 'Created, newest first' },
+    { key: 'updated_asc', label: 'Updated, oldest first' },
+    { key: 'updated_desc', label: 'Updated, newest first' }
+  ]
+
   // A three-way per-field choice in the Edit fields modal.
   type FieldChoice = 'keep' | 'true' | 'false'
 
   let editOpen = $state(false)
   let deleteOpen = $state(false)
   let statusOpen = $state(false)
+  let sortOpen = $state(false)
   let busy = $state(false)
 
   let holdChoice = $state<FieldChoice>('keep')
@@ -59,7 +75,7 @@
 
   // Let the page suppress its Escape-to-exit while one of our overlays is open.
   $effect(() => {
-    dialogOpen = editOpen || deleteOpen || statusOpen
+    dialogOpen = editOpen || deleteOpen || statusOpen || sortOpen
   })
 
   const noneSelected = $derived(count === 0)
@@ -111,6 +127,16 @@
     }
   }
 
+  async function pickSort(sort: BulkSortKey) {
+    sortOpen = false
+    busy = true
+    try {
+      await onSort(sort)
+    } finally {
+      busy = false
+    }
+  }
+
   async function confirmDelete() {
     busy = true
     try {
@@ -155,6 +181,26 @@
         {@const Icon = option.icon}
         <DropdownMenu.Item onclick={() => pickStatus(option.column)}>
           <Icon class="size-4" />
+          {option.label}
+        </DropdownMenu.Item>
+      {/each}
+    </DropdownMenu.Content>
+  </DropdownMenu.Root>
+
+  <DropdownMenu.Root bind:open={sortOpen}>
+    <DropdownMenu.Trigger
+      disabled={noneSelected || busy}
+      class={buttonVariants({ variant: 'ghost', size: 'sm' })}
+      title="Re-order the selected cards"
+    >
+      <ArrowDownUp class="size-4" />
+      Sort selected
+      <ChevronUp class="size-4 opacity-60" />
+    </DropdownMenu.Trigger>
+    <DropdownMenu.Content side="top" align="center" class="min-w-52">
+      <DropdownMenu.Label>Re-order the selection by</DropdownMenu.Label>
+      {#each SORT_OPTIONS as option (option.key)}
+        <DropdownMenu.Item onclick={() => pickSort(option.key)}>
           {option.label}
         </DropdownMenu.Item>
       {/each}
