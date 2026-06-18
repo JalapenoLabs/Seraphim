@@ -1041,6 +1041,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!(prompt.contains("Work Jira ticket BUG-42: Crash on empty input"));
