@@ -2471,6 +2471,11 @@ pub async fn next_event_seq(pool: &PgPool, turn_id: Uuid) -> sqlx::Result<i32> {
 }
 
 /// Records (or refreshes) a task's pull request, keyed by `(task, repo, number)`.
+///
+/// `is_draft` / `is_empty` capture the PR's shape for the review sweep's
+/// parked-empty-draft handling (issue #304); callers that do not inspect the diff
+/// (initial detection, a merge, a reset close) pass `false` for both, and the
+/// review refresh fills in the true values from the live PR.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_task_pr(
     pool: &PgPool,
@@ -2482,14 +2487,18 @@ pub async fn upsert_task_pr(
     head_sha: &str,
     ci_state: &str,
     pr_state: &str,
+    is_draft: bool,
+    is_empty: bool,
 ) -> sqlx::Result<TaskPullRequest> {
     sqlx::query_as::<_, TaskPullRequest>(
         "INSERT INTO task_pull_requests \
-           (task_id, repo_id, repo_full_name, pr_number, pr_url, head_sha, ci_state, pr_state) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+           (task_id, repo_id, repo_full_name, pr_number, pr_url, head_sha, ci_state, pr_state, \
+            is_draft, is_empty) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (task_id, repo_full_name, pr_number) DO UPDATE SET \
            repo_id = EXCLUDED.repo_id, pr_url = EXCLUDED.pr_url, head_sha = EXCLUDED.head_sha, \
-           ci_state = EXCLUDED.ci_state, pr_state = EXCLUDED.pr_state, updated_at = now() \
+           ci_state = EXCLUDED.ci_state, pr_state = EXCLUDED.pr_state, \
+           is_draft = EXCLUDED.is_draft, is_empty = EXCLUDED.is_empty, updated_at = now() \
          RETURNING *",
     )
     .bind(task_id)
@@ -2500,6 +2509,8 @@ pub async fn upsert_task_pr(
     .bind(head_sha)
     .bind(ci_state)
     .bind(pr_state)
+    .bind(is_draft)
+    .bind(is_empty)
     .fetch_one(pool)
     .await
 }

@@ -202,10 +202,20 @@ pub struct PrStatus {
     pub lifecycle: PrLifecycle,
     pub title: String,
     pub head_sha: String,
+    /// Whether the PR is a draft. GitHub refuses to merge a draft.
+    pub draft: bool,
+    /// Whether the PR's net diff vs base is empty (zero changed files). GitHub
+    /// cannot squash-merge a zero-change PR, so the review sweep treats such a PR
+    /// as parked rather than merge-attempting it (issue #304).
+    pub is_empty: bool,
 }
 
 /// Looks up one PR by number, to learn whether it's still open (and its head) or
-/// was merged (counts toward the task) vs just closed (abandoned).
+/// was merged (counts toward the task) vs just closed (abandoned), plus whether it
+/// is a draft and whether its diff is empty (for the parked-empty-draft guard).
+///
+/// `draft` and `changed_files` come from the single-PR GET (the list endpoint
+/// omits the diff counts), so this is the right call to read emptiness from.
 pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) -> Result<PrStatus> {
     #[derive(Deserialize)]
     struct Head {
@@ -218,6 +228,10 @@ pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) ->
         merged: bool,
         #[serde(default)]
         title: String,
+        #[serde(default)]
+        draft: bool,
+        #[serde(default)]
+        changed_files: u64,
         head: Head,
     }
     let pull: Pull = octo
@@ -235,6 +249,8 @@ pub async fn pr_status(octo: &Octocrab, owner: &str, repo: &str, number: u64) ->
         lifecycle,
         title: pull.title,
         head_sha: pull.head.sha,
+        draft: pull.draft,
+        is_empty: pull.changed_files == 0,
     })
 }
 
