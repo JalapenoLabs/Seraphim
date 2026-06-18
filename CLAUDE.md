@@ -584,6 +584,15 @@ Playwright MCP, check layout via computed styles at 375px and 1280px).
 
 ## Conventions & gotchas
 
+- **Search with `rg`, not `grep` (issue #295).** The agent shell's `grep` is a
+  Claude Code wrapper backed by ripgrep with `-I` (skip files it deems binary) and
+  `--ignore-files` (respect `.gitignore`). So `grep` silently returns no matches
+  for a file with a stray NUL byte (it looks binary) or any ignored file, which
+  reads as "empty" when it is not. Prefer `rg` for code search; if a file ever
+  looks un-searchable, check it for NUL bytes
+  (`python3 -c "print(open(p,'rb').read().count(0))"`) rather than trusting an
+  empty `grep`. A literal NUL in a `.rs`/`.ts` source is a defect (usually a paste
+  artifact in a comment or string) and should be removed, not worked around.
 - **Rust toolchain is pinned to 1.88** (`api/rust-toolchain.toml`) because some
   transitive deps ship edition2024 crates. The host default may be older — always
   use `cargo +1.88`.
