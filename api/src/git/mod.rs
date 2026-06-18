@@ -278,6 +278,32 @@ pub struct PrReviewStatus {
     pub changes_requested: bool,
 }
 
+/// The GraphQL query backing [`pr_review_status`]: a PR's `reviewDecision` plus
+/// the first 100 review threads (first comment of each).
+///
+/// Kept at module scope so a unit test can assert its field names stay
+/// whitespace-separated. The Rust string-continuation `\` swallows the newline AND
+/// the next line's indentation, so a missing trailing space silently fuses two
+/// adjacent field names (e.g. `reviewDecisionreviewThreads`), which GitHub's
+/// GraphQL API rejects. That collapses every review-status read to `Unknown`, which
+/// holds reviewed PRs without ever handing them back to be addressed.
+const REVIEW_STATUS_QUERY: &str = "\
+    query($owner:String!,$repo:String!,$number:Int!){\
+      repository(owner:$owner,name:$repo){\
+        pullRequest(number:$number){\
+          reviewDecision \
+          reviewThreads(first:100){\
+            nodes{\
+              id isResolved \
+              comments(first:1){\
+                nodes{ databaseId path line originalLine body author{login} }\
+              }\
+            }\
+          }\
+        }\
+      }\
+    }";
+
 /// Reads a pull request's review gate inputs (its unresolved review threads and
 /// whether a standing review requests changes), from bots and humans alike, in a
 /// single GraphQL round trip.
@@ -296,29 +322,9 @@ pub async fn pr_review_status(
     repo: &str,
     number: u64,
 ) -> Result<PrReviewStatus> {
-    // First 100 threads, first comment of each: the originating comment carries
-    // the file/line/author/body the agent needs to act, plus the handles to reply
-    // and resolve. `reviewDecision` is GitHub's own roll-up of reviewer states.
-    const QUERY: &str = "\
-        query($owner:String!,$repo:String!,$number:Int!){\
-          repository(owner:$owner,name:$repo){\
-            pullRequest(number:$number){\
-              reviewDecision\
-              reviewThreads(first:100){\
-                nodes{\
-                  id isResolved\
-                  comments(first:1){\
-                    nodes{ databaseId path line originalLine body author{login} }\
-                  }\
-                }\
-              }\
-            }\
-          }\
-        }";
-
     let response: ReviewThreadsResponse = octo
         .graphql(&json!({
-            "query": QUERY,
+            "query": REVIEW_STATUS_QUERY,
             "variables": { "owner": owner, "repo": repo, "number": number },
         }))
         .await
@@ -1034,11 +1040,27 @@ pub async fn add_issue_comment(
 
 #[cfg(test)]
 mod tests {
-    use super::{review_status_from_response, strip_log_timestamp, ReviewThreadsResponse};
+    use super::{
+        review_status_from_response, strip_log_timestamp, ReviewThreadsResponse,
+        REVIEW_STATUS_QUERY,
+    };
     use serde_json::{from_value, json};
 
     fn response(value: serde_json::Value) -> ReviewThreadsResponse {
         from_value(value).expect("review-status payload should deserialize")
+    }
+
+    // The query is assembled with Rust string-continuation `\`, which drops the
+    // newline AND the next line's indentation. A missing trailing space fuses two
+    // field names (e.g. `reviewDecisionreviewThreads`); GitHub then rejects the
+    // query and every review-status read collapses to Unknown, holding reviewed PRs
+    // forever without addressing them. Lock the field names apart.
+    #[test]
+    fn review_status_query_keeps_field_names_separated() {
+        assert!(REVIEW_STATUS_QUERY.contains("reviewDecision reviewThreads"));
+        assert!(REVIEW_STATUS_QUERY.contains("isResolved comments"));
+        assert!(!REVIEW_STATUS_QUERY.contains("reviewDecisionreviewThreads"));
+        assert!(!REVIEW_STATUS_QUERY.contains("isResolvedcomments"));
     }
 
     fn unresolved_thread(id: &str) -> serde_json::Value {
