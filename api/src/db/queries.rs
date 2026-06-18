@@ -2731,7 +2731,7 @@ pub async fn append_event(
     event_type: &str,
     mut payload: Value,
 ) -> sqlx::Result<()> {
-    // Postgres JSONB rejects the NUL escape ( ), so a tool result carrying a
+    // Postgres JSONB rejects the NUL escape (\0), so a tool result carrying a
     // null byte (e.g. binary output) would otherwise fail the insert and abort
     // the whole turn. Strip NULs from every string first.
     strip_nul(&mut payload);
@@ -2745,7 +2745,7 @@ pub async fn append_event(
     Ok(())
 }
 
-/// Removes NUL (` `) characters from every string in a JSON value.
+/// Removes NUL (`\0`) characters from every string in a JSON value.
 ///
 /// Postgres JSONB (and TEXT) cannot store NUL, and Claude's tool output can
 /// carry one (binary reads, odd command output). Dropping them keeps the event
