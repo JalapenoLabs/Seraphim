@@ -96,9 +96,10 @@ export function createInternalTask(body: {
   return apiClient.post('tasks', { json: body }).json<Task>()
 }
 
-// Set the repos an internal ticket targets (priority order; the first is the
-// primary one the agent branches in), or clear them with an empty list. Only
-// valid for internal tickets. Returns the updated task.
+// Set the repos an internal or Jira ticket targets (priority order; the first is
+// the primary one the agent branches in), or clear them with an empty list. Only
+// valid for internal and Jira tickets; a GitHub task's repo is its issue's own.
+// Returns the updated task.
 export function setTaskRepos(taskId: string, repoIds: string[]) {
   return apiClient.post(`tasks/${taskId}/repo`, { json: { repo_ids: repoIds } }).json<Task>()
 }

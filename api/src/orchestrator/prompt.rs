@@ -47,10 +47,15 @@ pub fn build(
     let mut prompt = context_header(settings, repo, task, comments);
 
     // A GitHub task's PR should reference its issue (so it links/closes on merge);
+    // a Jira task's PR should carry its key so the work traces back to the ticket;
     // an internal task has no upstream issue, so the PR is opened without one.
     let issue_reference = match task.source_kind {
         SourceKind::Github => format!(", referencing issue #{}", task.external_id),
-        _ => String::new(),
+        SourceKind::Jira => format!(
+            ", referencing the Jira ticket {} in the PR title or description",
+            task.external_id
+        ),
+        SourceKind::Internal => String::new(),
     };
 
     prompt.push_str(&format!(
@@ -454,20 +459,28 @@ fn context_header(
     } else {
         task.body_snapshot.trim()
     };
-    // A GitHub task carries an issue number and link; an internal task is just a
-    // brief in Seraphim, so it is described without a (meaningless) issue number.
-    match task.source_kind {
-        SourceKind::Github => prompt.push_str(&format!(
+    // A GitHub task carries an issue number and link; a Jira task carries its key
+    // and a browse link; an internal task is just a brief in Seraphim, so it is
+    // described without a (meaningless) issue number.
+    let brief = match task.source_kind {
+        SourceKind::Github => format!(
             "Work issue #{number}: {title}\n\nIssue description:\n{body}\n\nIssue link: {url}\n\n",
             number = task.external_id,
             title = task.title,
             url = task.url,
-        )),
-        _ => prompt.push_str(&format!(
+        ),
+        SourceKind::Jira => format!(
+            "Work Jira ticket {key}: {title}\n\nTicket description:\n{body}\n\nTicket link: {url}\n\n",
+            key = task.external_id,
+            title = task.title,
+            url = task.url,
+        ),
+        SourceKind::Internal => format!(
             "Work this task: {title}\n\nTask description:\n{body}\n\n",
             title = task.title,
-        )),
-    }
+        ),
+    };
+    prompt.push_str(&brief);
 
     // The full discussion (when any), so the agent treats comments as part of the
     // brief rather than only the title and description.
@@ -679,10 +692,12 @@ const ASKING_FOR_HELP: &str = "\n\
 /// before delivering the answers.
 pub fn build_resume(repo: &Repository, task: &Task, branch: &str, answers: &[Question]) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
-    // GitHub tasks re-orient by their issue number; internal tasks by their title.
+    // GitHub tasks re-orient by their issue number, Jira tasks by their key, and
+    // internal tasks by their title.
     let reference = match task.source_kind {
         SourceKind::Github => format!("issue #{} (\"{}\")", task.external_id, task.title),
-        _ => format!("task \"{}\"", task.title),
+        SourceKind::Jira => format!("Jira ticket {} (\"{}\")", task.external_id, task.title),
+        SourceKind::Internal => format!("task \"{}\"", task.title),
     };
     let mut prompt = format!(
         "You are resuming work on {reference} in `{repo}` at `{repo_path}`, \
@@ -913,6 +928,36 @@ mod tests {
         );
         assert!(prompt.contains("Work issue #57"));
         assert!(prompt.contains("referencing issue #57"));
+    }
+
+    #[test]
+    fn jira_task_prompt_uses_the_ticket_key_and_link() {
+        // A Jira ticket with a target repo is worked like a GitHub issue (issue
+        // #290): the brief names the Jira key + link, and the PR step asks the
+        // agent to reference the key so the work traces back to the ticket.
+        let mut task = sample_task();
+        task.source_kind = SourceKind::Jira;
+        task.external_id = "BUG-42".to_string();
+        task.title = "Crash on empty input".to_string();
+        task.body_snapshot = "The parser panics when given an empty file.".to_string();
+        task.url = "https://acme.atlassian.net/browse/BUG-42".to_string();
+
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &task,
+            "seraphim/bug-42",
+            &[],
+            &[],
+            &[],
+        );
+
+        assert!(prompt.contains("Work Jira ticket BUG-42: Crash on empty input"));
+        assert!(prompt.contains("The parser panics when given an empty file."));
+        assert!(prompt.contains("https://acme.atlassian.net/browse/BUG-42"));
+        assert!(prompt.contains("referencing the Jira ticket BUG-42"));
+        // It is not mistaken for a GitHub issue (no "issue #BUG-42" phrasing).
+        assert!(!prompt.contains("Work issue #"));
     }
 
     #[test]

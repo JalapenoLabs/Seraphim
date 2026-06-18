@@ -12,7 +12,7 @@
 ## What it is
 
 Seraphim is a **self-hosted autonomous developer agent**. It runs on one machine,
-watches an issue board (GitHub now, Jira later), and works tickets like a real
+watches an issue board (GitHub and Jira), and works tickets like a real
 developer: picks up the next issue, writes code inside a persistent Docker
 workspace, opens a pull request, and follows per-repo review rules. A human
 curates and orders the work on a kanban board; the agent just keeps going.
@@ -597,15 +597,23 @@ Playwright MCP, check layout via computed styles at 375px and 1280px).
 - **Real end-to-end run is unproven** — a full Claude turn → PR → auto-merge needs
   `CLAUDE_CODE_OAUTH_TOKEN` + `GH_TOKEN` set. SSH cloning of a real private repo
   (`yearloom`) is already verified.
-- **Jira source** — foundation in place (`api/src/jira/`, migration `0016`):
-  a dual-mode (Cloud + Server/DC) client, connection config + secret token on the
-  `settings` row, followed `jira_boards` with a status->column map and a repo set,
-  board auto-discovery, ticket sync into tasks, and a two-way status transition
-  when a Jira card moves columns. **Not yet:** the agent auto-coding Jira tickets.
-  That needs the multi-repo execution model (a "BUG" board ticket can span several
-  repos), so `pick_next_todo` is GitHub-only for now; Jira tickets sync, map, and
-  transition but are not auto-pulled to be worked. Posting agent comments back to
-  Jira is also future.
+- **Jira source (now first-class, issue #290)** — `api/src/jira/` (migration
+  `0016`): a dual-mode (Cloud + Server/DC) client, connection config + secret token
+  on the `settings` row, followed `jira_boards` with a status->column map and a repo
+  set, board auto-discovery, and ticket sync into tasks. A Jira ticket is now
+  **auto-pulled and worked exactly like a GitHub issue**: it inherits its board's
+  repo set as default target repos (seeded on first sync, operator-overridable on
+  the card via the same set-repo path internal tickets use, never clobbered by a
+  later sync), `pick_next_todo` pulls any Jira ticket with a target repo, the prompt
+  renders the Jira key + summary + description + link, and the same branch -> PR ->
+  review-gate -> merge flow runs (multi-repo: a PR per target repo, all-merge-to-
+  Done via `task_pull_requests`). A repo-less Jira ticket stays on the board,
+  skipped, until a repo is assigned. On PR open and on Done the agent posts a
+  comment back to the Jira issue (PR link(s) + outcome) via `JiraClient::add_comment`,
+  and the agent-driven move to Done transitions the ticket through the board's
+  column->status map (`orchestrator::transition_jira_to_column`, shared with the
+  manual board-move path). **Not yet:** an in-app Jira comment-thread view (the
+  conversation panel is GitHub/internal only), and assignee write-back.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
 - **Rate-limit handling** — surface `rate_limit` events and auto-pause (planned).
