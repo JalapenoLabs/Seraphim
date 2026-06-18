@@ -1499,10 +1499,12 @@ async fn build_fresh_prompt(
     // the agent merges them in rather than rediscovering and re-implementing them
     // (issue #256).
     let dependencies = resolve_dependency_branches(state, task).await;
-    // Pull a Jira ticket's attachments into ticket data (issue #291) so the brief
-    // carries its screenshots/logs, then load every stored attachment (operator
-    // uploads and pulled ones alike) for the prompt.
+    // Pull a Jira ticket's attachments (issue #291) and a GitHub issue's embedded
+    // image/file attachments (issue #300) into ticket data so the brief carries
+    // their screenshots/logs, then load every stored attachment (operator uploads
+    // and pulled ones alike) for the prompt.
     capture_jira_attachments(state, task).await;
+    capture_github_attachments(state, task, &comments).await;
     let attachments = load_attachments(state, task).await;
     prompt::build(
         settings,
@@ -1673,6 +1675,80 @@ async fn capture_jira_attachments(state: &AppState, task: &Task) {
         .await
         {
             warn!(error = %error, task_id = %task.id, "could not store a Jira attachment");
+        }
+    }
+}
+
+/// Pulls a GitHub issue's image/file attachments into ticket data (issue #300):
+/// parses attachment links from the issue body and every comment, then downloads +
+/// stores each one not already captured (deduped by URL), so a UI bug's
+/// screenshots are viewable in the task view and reach the prompt like Jira's,
+/// rather than only as Markdown links the agent must fetch with `gh` auth.
+///
+/// Best-effort and GitHub-only: a non-GitHub task, a missing token, an oversized
+/// file, or any per-attachment failure is logged and skipped, never failing the
+/// caller. `comments` is the already-fetched thread, so this adds no extra issue
+/// fetch.
+async fn capture_github_attachments(state: &AppState, task: &Task, comments: &[git::IssueComment]) {
+    if task.source_kind != SourceKind::Github {
+        return;
+    }
+    // Gather the Markdown to scan: the issue body plus every comment body.
+    let mut markdown = task.body_snapshot.clone();
+    for comment in comments {
+        if let Some(body) = &comment.body {
+            markdown.push('\n');
+            markdown.push_str(body);
+        }
+    }
+    let links = git::extract_attachment_urls(&markdown);
+    if links.is_empty() {
+        return;
+    }
+    let token = match queries::get_github_token(&state.db).await {
+        Ok(token) if !token.trim().is_empty() => token,
+        Ok(_) => return,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not read the GitHub token for attachments");
+            return;
+        }
+    };
+
+    for link in links {
+        // Skip ones already stored (deduped by the attachment URL), so a re-run is
+        // cheap and never re-downloads.
+        match queries::source_attachment_exists(&state.db, task.id, "github", &link.url).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "could not check an existing GitHub attachment");
+                continue;
+            }
+        }
+        let Some((data, content_type)) = git::download_attachment(&token, &link.url).await else {
+            continue;
+        };
+        // A 200 that returns HTML is a login/error page, not the asset; don't store
+        // it. (A genuine non-`image/*` attachment, e.g. a log, has its own type.)
+        if content_type.starts_with("text/html") {
+            continue;
+        }
+        if data.len() > crate::http::attachments::MAX_ATTACHMENT_BYTES {
+            info!(task_id = %task.id, file = %link.file_name, "skipping oversized GitHub attachment");
+            continue;
+        }
+        if let Err(error) = queries::create_attachment(
+            &state.db,
+            task.id,
+            "github",
+            Some(&link.url),
+            &link.file_name,
+            &content_type,
+            &data,
+        )
+        .await
+        {
+            warn!(error = %error, task_id = %task.id, "could not store a GitHub attachment");
         }
     }
 }
