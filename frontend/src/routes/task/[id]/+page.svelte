@@ -6,6 +6,7 @@
     Question,
     Repository,
     Task,
+    TaskAttachment,
     TaskPullRequest,
     TaskScreenshot
   } from '$lib/types'
@@ -21,6 +22,7 @@
     ExternalLink,
     GitPullRequest,
     NotebookPen,
+    Paperclip,
     Pause,
     Play,
     RotateCcw
@@ -35,7 +37,8 @@
     setTaskBlocking,
     setTaskHold,
     setTaskNotes,
-    setTaskRepos
+    setTaskRepos,
+    uploadTaskAttachment
   } from '$lib/api'
   import { STATUS_BADGE, STATUS_LABELS } from '$lib/types'
   import { PaneGroup, type PaneGroupAPI } from 'paneforge'
@@ -75,6 +78,9 @@
   let questions = $state<Question[]>([])
   let pullRequests = $state<TaskPullRequest[]>([])
   let screenshots = $state<TaskScreenshot[]>([])
+  let attachments = $state<TaskAttachment[]>([])
+  // Operator attachment upload (issue #291): in-flight flag for the file picker.
+  let uploadingAttachments = $state(false)
   let eventSource: EventSource | null = null
 
   // The fullscreen screenshot viewer (issue #249): the set to page through and the
@@ -117,6 +123,42 @@
     task = await setTaskRepos(task.id, targetRepoIds)
     targetRepoIds = [...task.target_repo_ids]
     toast.success(targetRepoIds.length ? 'Target repos saved' : 'Target repos cleared')
+  }
+
+  // Operator attachment upload (issue #291): each selected file is uploaded as its
+  // own request (matching the backend's one-file-per-request route), then appended
+  // to the list so it shows immediately without a full reload.
+  async function uploadAttachments(event: Event) {
+    const input = event.target as HTMLInputElement
+    const files = input.files
+    if (!task || !files?.length) {
+      return
+    }
+    uploadingAttachments = true
+    try {
+      for (const file of Array.from(files)) {
+        const stored = await uploadTaskAttachment(task.id, file)
+        attachments = [...attachments, stored]
+      }
+      toast.success(files.length === 1 ? 'Attachment uploaded' : `${files.length} attachments uploaded`)
+    } catch {
+      toast.error('Could not upload the attachment')
+    } finally {
+      uploadingAttachments = false
+      // Clear the picker so re-selecting the same file fires the change event again.
+      input.value = ''
+    }
+  }
+
+  // A compact human-readable byte size for the attachment list.
+  function formatBytes(bytes: number): string {
+    if (bytes >= 1024 * 1024) {
+      return `${Math.round(bytes / (1024 * 1024))} MB`
+    }
+    if (bytes >= 1024) {
+      return `${Math.round(bytes / 1024)} KB`
+    }
+    return `${bytes} B`
   }
 
   // A one-word status for a PR row, combining its lifecycle and (while open) its
@@ -350,6 +392,7 @@
     questions = detail.questions
     pullRequests = detail.pull_requests
     screenshots = detail.screenshots
+    attachments = detail.attachments
     // Seed the notepad once, and open it if there is already something to read.
     if (!notesInitialized) {
       notes = detail.task.notes
@@ -656,6 +699,85 @@
         '🧹 Follow-up work',
         'Work the agent noticed but kept out of this task (dead code, tech debt, security, deprecations). Check one off, or one-click it into a ticket; unchecked ones stay loud on the board.'
       )}
+    {/if}
+
+    {#if attachments.length || task.source_kind === 'internal'}
+      <!-- Ticket attachments (issue #291): operator uploads on an internal ticket
+           and source-ticket files (e.g. Jira) pulled in on sync. Metadata rides in
+           the task payload; the bytes stream from a dedicated endpoint and are
+           lazy-loaded. Images preview as thumbnails; other files are download
+           links. The agent gets the same content in its prompt. -->
+      <section class="rounded-lg border border-border bg-card p-3">
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="flex items-center gap-1.5 text-sm font-semibold">
+            <Paperclip class="size-4 text-muted-foreground" />
+            Attachments
+            {#if attachments.length}
+              <span class="text-xs font-normal text-muted-foreground">({attachments.length})</span>
+            {/if}
+          </h2>
+          {#if task.source_kind === 'internal'}
+            <label
+              class={buttonVariants({ variant: 'outline', size: 'sm' }) + ' cursor-pointer'}
+              title="Attach images or files to this ticket"
+            >
+              {uploadingAttachments ? 'Uploading…' : 'Add files'}
+              <input
+                type="file"
+                multiple
+                class="hidden"
+                disabled={uploadingAttachments}
+                onchange={uploadAttachments}
+              />
+            </label>
+          {/if}
+        </div>
+        {#if task.source_kind === 'internal' && !attachments.length}
+          <p class="mt-1 text-xs text-muted-foreground">
+            Attach a screenshot or a log file. The agent sees images as openable refs and inlines
+            small text/log files into its brief.
+          </p>
+        {/if}
+        {#if attachments.length}
+          <ul class="mt-2 flex flex-col gap-2">
+            {#each attachments as attachment (attachment.id)}
+              <li class="flex items-center gap-2">
+                {#if attachment.mime.startsWith('image/')}
+                  <a
+                    href={`/api/v1/attachments/${attachment.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    class="block flex-none overflow-hidden rounded border border-border hover:border-primary"
+                  >
+                    <img
+                      src={`/api/v1/attachments/${attachment.id}`}
+                      alt={attachment.file_name}
+                      loading="lazy"
+                      class="size-10 bg-muted object-cover"
+                    />
+                  </a>
+                {:else}
+                  <Paperclip class="size-4 flex-none text-muted-foreground" />
+                {/if}
+                <a
+                  href={`/api/v1/attachments/${attachment.id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  class="min-w-0 flex-1 truncate text-sm hover:underline"
+                  title={attachment.file_name}
+                >
+                  {attachment.file_name}
+                </a>
+                <span class="flex-none text-xs text-muted-foreground">
+                  {formatBytes(attachment.byte_size)}{attachment.source !== 'operator'
+                    ? ` · ${attachment.source}`
+                    : ''}
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
 
     {#if screenshots.length}

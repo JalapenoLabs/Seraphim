@@ -212,6 +212,30 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   dev/test-data screenshots only, since the bytes persist in Postgres (respect
   at-rest disk encryption as with the other blobs/secrets). The optional
   GitHub-issue/PR attachment toggle is not built yet (left to a follow-up).
+- **`task_attachments`** (issue #291) — files attached to a ticket so the agent
+  actually sees them: operator uploads on an internal ticket, plus source-ticket
+  attachments (Jira) pulled into ticket data on sync/work. One shared table keyed
+  by `task_id`, carrying a `source` (`operator` | `jira` | `github`) and, for
+  pulled ones, the source tracker's `external_id` (deduped via a partial unique
+  index so a re-pull never duplicates). The bytes live as `bytea` and are NEVER
+  returned in task/board JSON, mirroring `task_screenshots`: an operator uploads
+  one file per request to `POST /tasks/:id/attachments` (raw body = bytes,
+  Content-Type = MIME, `?filename=`; no multipart dep, like screenshots),
+  `GET /attachments/:id` streams them (immutable cache, `Content-Disposition`
+  carries the file name), and `TaskDetail.attachments` carries metadata only. The
+  task view shows images as thumbnails and other files as download links, with an
+  "Add files" control on internal tickets; the create-issue form uploads selected
+  files right after the ticket exists. **Jira capture:** on a Jira ticket's first
+  sync, and again when the agent works it, `orchestrator::capture_jira_attachments`
+  lists the issue's attachments (`JiraClient::list_attachments`) and downloads +
+  stores each not-already-stored one (`download_attachment`, deduped on the Jira
+  attachment id), so its screenshots/logs are captured with no manual Jira CLI
+  fetch (best-effort; oversized files past `MAX_ATTACHMENT_BYTES` are skipped).
+  **Prompt:** `prompt::build` renders an `# Attachments` section
+  (`render_attachments`): small text/log files are inlined head/tail-capped
+  (`ATTACHMENT_INLINE_TEXT_CAP`), images/binaries are listed as openable refs the
+  agent fetches with `curl "$SERAPHIM_API_URL/api/v1/attachments/<id>"`. Same
+  at-rest-encryption caveat as the other blobs.
 - **`heart_attacks`** — recorded "heart attacks" (turns that died mid-flight),
   written by the defibrillator loop (see above), never by a request. Each holds a
   task snapshot, the status at death, the diagnostic `detail` (error logs kept for

@@ -682,14 +682,16 @@ pub async fn upsert_jira_issue(
     // key is globally unique, so existence and the placement are both keyed on the
     // key alone. An already-tracked card is left to the operator's curation. With
     // no placement (the common case) the default upsert runs exactly as before.
-    let pending = match queries::find_jira_task(&state.db, &issue.key).await? {
-        Some(_) => None,
-        None => {
-            queries::take_pending_placement(&state.db, SourceKind::Jira, None, &issue.key).await?
-        }
+    let is_new = queries::find_jira_task(&state.db, &issue.key)
+        .await?
+        .is_none();
+    let pending = if is_new {
+        queries::take_pending_placement(&state.db, SourceKind::Jira, None, &issue.key).await?
+    } else {
+        None
     };
 
-    match placement::resolve(pending.as_ref()) {
+    let task = match placement::resolve(pending.as_ref()) {
         placement::Placement::Default => {
             queries::upsert_jira_task(
                 &state.db,
@@ -703,7 +705,7 @@ pub async fn upsert_jira_issue(
                 column,
                 position,
             )
-            .await?;
+            .await?
         }
         placement::Placement::Placed {
             column: placed_column,
@@ -726,8 +728,16 @@ pub async fn upsert_jira_issue(
                 placed_position,
                 railway_id,
             )
-            .await?;
+            .await?
         }
+    };
+
+    // On the ticket's first sync, pull its attachments into ticket data (issue
+    // #291) so its screenshots/logs are stored and viewable on the board without a
+    // manual Jira fetch. Deduped and best-effort; only on first sync so a steady-
+    // state poll never re-lists attachments for every tracked ticket.
+    if is_new {
+        capture_jira_attachments(state, &task).await;
     }
     Ok(())
 }
@@ -1425,6 +1435,201 @@ async fn load_target_repos(state: &AppState, task: &Task) -> Vec<Repository> {
     repos
 }
 
+/// Assembles the fresh-work brief for a task: its discussion, target repos,
+/// stacked dependencies, and attachments (operator uploads plus any pulled from a
+/// Jira ticket, issue #291), all of which are best-effort and never block the
+/// turn. Extracted from `work_fresh` to keep that function focused.
+async fn build_fresh_prompt(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+    repo: &Repository,
+    task: &Task,
+    branch: &str,
+) -> String {
+    let comments = fetch_issue_comments(state, repo, task).await;
+    let target_repos = load_target_repos(state, task).await;
+    // Stack the ticket on any open (unmerged) dependency PR branches it names, so
+    // the agent merges them in rather than rediscovering and re-implementing them
+    // (issue #256).
+    let dependencies = resolve_dependency_branches(state, task).await;
+    // Pull a Jira ticket's attachments into ticket data (issue #291) so the brief
+    // carries its screenshots/logs, then load every stored attachment (operator
+    // uploads and pulled ones alike) for the prompt.
+    capture_jira_attachments(state, task).await;
+    let attachments = load_attachments(state, task).await;
+    prompt::build(
+        settings,
+        repo,
+        task,
+        branch,
+        &comments,
+        &target_repos,
+        &dependencies,
+        &attachments,
+    )
+}
+
+/// The byte budget for inlining a text/log attachment's content into the brief
+/// (issue #291). Beyond this the content is head/tail truncated with a marker;
+/// far larger files are listed as fetchable refs instead of inlined at all.
+const ATTACHMENT_INLINE_TEXT_CAP: usize = 40 * 1024;
+
+/// Loads a task's stored attachments for the prompt (issue #291): metadata for
+/// every attachment, with small text/log files inlined (head/tail capped) so the
+/// agent reads them directly and images/binaries left as fetchable refs.
+///
+/// Best-effort: a list or read failure drops attachments (or their inline text)
+/// rather than failing the turn.
+async fn load_attachments(state: &AppState, task: &Task) -> Vec<prompt::Attachment> {
+    let metas = match queries::list_attachments_for_task(&state.db, task.id).await {
+        Ok(metas) => metas,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not list task attachments for the prompt");
+            return Vec::new();
+        }
+    };
+
+    let mut attachments = Vec::with_capacity(metas.len());
+    for meta in metas {
+        let inline_text = if is_inlineable_text(&meta.file_name, &meta.mime, meta.byte_size) {
+            match queries::get_attachment_data(&state.db, meta.id).await {
+                Ok(Some((data, _, _))) => Some(inline_attachment_text(&data)),
+                Ok(None) => None,
+                Err(error) => {
+                    warn!(error = %error, attachment = %meta.id, "could not read an attachment for inlining");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        attachments.push(prompt::Attachment {
+            file_name: meta.file_name,
+            mime: meta.mime,
+            byte_size: meta.byte_size,
+            id: meta.id.to_string(),
+            inline_text,
+        });
+    }
+    attachments
+}
+
+/// Whether an attachment is small, text-like content worth inlining into the brief
+/// rather than listing as a fetchable ref (issue #291). Reads a little past the
+/// inline cap so a slightly-over file still contributes its head/tail; anything
+/// far larger is treated as a ref.
+fn is_inlineable_text(file_name: &str, mime: &str, byte_size: i64) -> bool {
+    let read_cap = i64::try_from(ATTACHMENT_INLINE_TEXT_CAP.saturating_mul(4)).unwrap_or(i64::MAX);
+    if byte_size > read_cap {
+        return false;
+    }
+    let extension = std::path::Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    mime.starts_with("text/")
+        || matches!(mime, "application/json" | "application/xml")
+        || matches!(extension.as_deref(), Some("log" | "txt" | "csv" | "json"))
+}
+
+/// Decodes attachment bytes to text and, when longer than the inline cap, keeps
+/// the head and tail with a truncation marker between them, so a long log still
+/// shows its start and end. Slices on char counts so multi-byte UTF-8 is never
+/// split mid-character.
+fn inline_attachment_text(data: &[u8]) -> String {
+    let text = String::from_utf8_lossy(data);
+    if text.len() <= ATTACHMENT_INLINE_TEXT_CAP {
+        return text.into_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let head_chars = ATTACHMENT_INLINE_TEXT_CAP * 6 / 10;
+    let tail_chars = ATTACHMENT_INLINE_TEXT_CAP - head_chars;
+    if chars.len() <= head_chars + tail_chars {
+        return text.into_owned();
+    }
+    let head: String = chars[..head_chars].iter().collect();
+    let tail: String = chars[chars.len() - tail_chars..].iter().collect();
+    let elided = chars.len() - head_chars - tail_chars;
+    format!("{head}\n\n...[truncated {elided} characters]...\n\n{tail}")
+}
+
+/// Pulls a Jira ticket's attachments into ticket data (issue #291): lists them and
+/// downloads + stores each one not already captured (deduped by the Jira
+/// attachment id), so the agent sees its screenshots/logs without a manual Jira
+/// fetch. Best-effort and Jira-only: a non-Jira task, unconfigured Jira, an
+/// oversized file, or any per-attachment failure is logged and skipped, never
+/// failing the caller.
+async fn capture_jira_attachments(state: &AppState, task: &Task) {
+    if task.source_kind != SourceKind::Jira || task.external_id.trim().is_empty() {
+        return;
+    }
+    let jira = match state.jira().await {
+        Ok(Some(jira)) => jira,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not build a Jira client for attachments");
+            return;
+        }
+    };
+    let attachments = match jira.list_attachments(&task.external_id).await {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not list Jira attachments");
+            return;
+        }
+    };
+
+    let cap = i64::try_from(crate::http::attachments::MAX_ATTACHMENT_BYTES).unwrap_or(i64::MAX);
+    for attachment in attachments {
+        // Skip ones already stored (deduped by the Jira attachment id), so a re-pull
+        // is cheap and never re-downloads.
+        match queries::source_attachment_exists(&state.db, task.id, "jira", &attachment.id).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "could not check an existing Jira attachment");
+                continue;
+            }
+        }
+        // Store images/logs/binaries up to the cap; skip anything larger (declared
+        // size first, so we never start the download).
+        if attachment.size > cap {
+            info!(task_id = %task.id, file = %attachment.filename, "skipping oversized Jira attachment");
+            continue;
+        }
+        let (data, content_type) = match jira.download_attachment(&attachment.content_url).await {
+            Ok(downloaded) => downloaded,
+            Err(error) => {
+                warn!(error = %error, task_id = %task.id, "could not download a Jira attachment");
+                continue;
+            }
+        };
+        if data.len() > crate::http::attachments::MAX_ATTACHMENT_BYTES {
+            info!(task_id = %task.id, file = %attachment.filename, "skipping oversized Jira attachment");
+            continue;
+        }
+        // Prefer Jira's declared MIME; fall back to the download's content type.
+        let mime = if attachment.mime_type.is_empty() {
+            content_type.as_str()
+        } else {
+            attachment.mime_type.as_str()
+        };
+        if let Err(error) = queries::create_attachment(
+            &state.db,
+            task.id,
+            "jira",
+            Some(&attachment.id),
+            &attachment.filename,
+            mime,
+            &data,
+        )
+        .await
+        {
+            warn!(error = %error, task_id = %task.id, "could not store a Jira attachment");
+        }
+    }
+}
+
 /// Resolves the open (unmerged) dependency PR branches a fresh ticket should build
 /// on top of (issue #256).
 ///
@@ -1558,21 +1763,7 @@ async fn work_fresh(
         queries::acknowledge_answers(&state.db, task.id).await?;
         prompt
     } else {
-        let comments = fetch_issue_comments(state, &repo, &task).await;
-        let target_repos = load_target_repos(state, &task).await;
-        // Stack the ticket on any open (unmerged) dependency PR branches it names,
-        // so the agent merges them in rather than rediscovering and re-implementing
-        // them (issue #256).
-        let dependencies = resolve_dependency_branches(state, &task).await;
-        prompt::build(
-            &settings,
-            &repo,
-            &task,
-            &branch,
-            &comments,
-            &target_repos,
-            &dependencies,
-        )
+        build_fresh_prompt(state, &settings, &repo, &task, &branch).await
     };
     let outcome = run_agent_turn(state, handle, &settings, &task, prompt).await?;
     persist_session(state, handle, &outcome).await?;

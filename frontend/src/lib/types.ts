@@ -549,6 +549,19 @@ export type TaskScreenshot = {
   created_at: string
 }
 
+// A ticket attachment (issue #291): an operator upload on an internal ticket, or
+// a source-ticket file (e.g. Jira) pulled into the ticket. Metadata only; the
+// bytes stream from `/attachments/:id`. `source` is 'operator' | 'jira' | 'github'.
+export type TaskAttachment = {
+  id: string
+  task_id: string
+  source: string
+  file_name: string
+  mime: string
+  byte_size: number
+  created_at: string
+}
+
 export type TaskDetail = {
   task: Task
   events: AgentEvent[]
@@ -556,6 +569,7 @@ export type TaskDetail = {
   questions: Question[]
   pull_requests: TaskPullRequest[]
   screenshots: TaskScreenshot[]
+  attachments: TaskAttachment[]
 }
 
 // The kanban lanes, in display order, with human-readable labels.

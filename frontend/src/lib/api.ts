@@ -37,6 +37,7 @@ import type {
   TailscaleActionResponse,
   TailscaleStatus,
   Task,
+  TaskAttachment,
   TaskColumn,
   TaskDetail
 } from './types'
@@ -101,6 +102,19 @@ export function createInternalTask(body: {
 // valid for internal tickets. Returns the updated task.
 export function setTaskRepos(taskId: string, repoIds: string[]) {
   return apiClient.post(`tasks/${taskId}/repo`, { json: { repo_ids: repoIds } }).json<Task>()
+}
+
+// Upload one attachment to a ticket (issue #291). The raw file is the request
+// body and its type becomes the stored MIME; the file name rides as a query param.
+// One call per file. Returns the new attachment's metadata.
+export function uploadTaskAttachment(taskId: string, file: File) {
+  return apiClient
+    .post(`tasks/${taskId}/attachments`, {
+      body: file,
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      searchParams: { filename: file.name }
+    })
+    .json<TaskAttachment>()
 }
 
 // --- Live statistics ---------------------------------------------------------
