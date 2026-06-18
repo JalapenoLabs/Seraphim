@@ -645,8 +645,14 @@ Playwright MCP, check layout via computed styles at 375px and 1280px).
   comment back to the Jira issue (PR link(s) + outcome) via `JiraClient::add_comment`,
   and the agent-driven move to Done transitions the ticket through the board's
   column->status map (`orchestrator::transition_jira_to_column`, shared with the
-  manual board-move path). **Not yet:** an in-app Jira comment-thread view (the
-  conversation panel is GitHub/internal only), and assignee write-back.
+  manual board-move path). The task page's conversation view also renders a Jira
+  ticket's discussion (issue #294): `GET /tasks/:id/issue` reads the issue +
+  comments from the Jira REST API (`JiraClient::fetch_thread`) into the same
+  `IssueThread` shape GitHub/internal use, and a reply posts back to Jira via the
+  existing `add_comment` path. The thread shows the workflow status verbatim (Jira
+  has no open/closed binary) and offers only the comment box (status is changed by
+  moving the card on the board, not from the thread). **Not yet:** assignee
+  write-back.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
 - **Subscription usage auto-pause** — when `usage_limit_pause_enabled`, a Claude

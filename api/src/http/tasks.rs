@@ -49,6 +49,44 @@ fn internal_issue_detail(task: &Task, state: &str) -> IssueDetail {
     }
 }
 
+/// An `IssueUser` for a Jira participant, identified by display name (issue #294);
+/// Jira's avatar/profile URLs are not surfaced here.
+fn jira_user(display_name: String) -> IssueUser {
+    let login = if display_name.trim().is_empty() {
+        "Jira user".to_string()
+    } else {
+        display_name
+    };
+    IssueUser {
+        login,
+        avatar_url: String::new(),
+        html_url: String::new(),
+    }
+}
+
+/// The issue header for a Jira ticket, built from a fetched [`crate::jira::JiraThread`].
+/// `number` is 0 (Jira keys are not numeric; the UI shows the key from the task),
+/// and `state` carries the workflow status name rather than open/closed.
+fn jira_issue_detail(task: &Task, thread: &crate::jira::JiraThread) -> IssueDetail {
+    let title = if thread.summary.trim().is_empty() {
+        task.title.clone()
+    } else {
+        thread.summary.clone()
+    };
+    IssueDetail {
+        number: 0,
+        title,
+        state: thread.status.clone(),
+        user: jira_user(thread.reporter.clone()),
+        body: Some(thread.description.clone()),
+        created_at: thread.created.clone(),
+        author_association: String::new(),
+        labels: Vec::new(),
+        assignees: Vec::new(),
+        milestone: None,
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TaskDetail {
     pub task: Task,
@@ -293,6 +331,31 @@ pub async fn get_issue(State(state): State<AppState>, Path(id): Path<Uuid>) -> A
                 comments,
             };
             return Ok(Json(thread).into_response());
+        }
+        // Jira: read the issue + comments from the Jira REST API so the operator
+        // sees the discussion in the UI like a GitHub thread (issue #294). Replies
+        // post back to Jira via the existing `add_comment` path.
+        if task.source_kind == SourceKind::Jira {
+            let Some(jira) = state.jira().await? else {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Jira is not configured" })),
+                )
+                    .into_response());
+            };
+            let fetched = jira.fetch_thread(&task.external_id).await?;
+            let issue = jira_issue_detail(&task, &fetched);
+            let comments = fetched
+                .comments
+                .into_iter()
+                .map(|comment| IssueComment {
+                    user: jira_user(comment.author),
+                    body: Some(comment.body),
+                    created_at: comment.created,
+                    author_association: String::new(),
+                })
+                .collect();
+            return Ok(Json(IssueThread { issue, comments }).into_response());
         }
     }
 

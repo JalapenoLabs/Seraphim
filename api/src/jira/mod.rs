@@ -216,6 +216,30 @@ pub struct JiraIssue {
     pub description: String,
 }
 
+/// A Jira issue plus its comments, for the in-app conversation view (issue #294).
+/// Timestamps are normalized to RFC 3339; the description and comment bodies are
+/// flattened to plain text (ADF on Cloud, plain on Server).
+#[derive(Debug, Clone)]
+pub struct JiraThread {
+    pub summary: String,
+    /// The workflow status name (e.g. `In Progress`), shown verbatim since Jira
+    /// has no open/closed binary.
+    pub status: String,
+    pub description: String,
+    /// The reporter's display name, or empty when Jira omits it.
+    pub reporter: String,
+    pub created: String,
+    pub comments: Vec<JiraComment>,
+}
+
+/// One comment on a Jira issue, for [`JiraThread`].
+#[derive(Debug, Clone)]
+pub struct JiraComment {
+    pub author: String,
+    pub body: String,
+    pub created: String,
+}
+
 /// One attachment on a Jira issue (issue #291), as listed by the REST API. The
 /// bytes are fetched separately from `content` with the configured auth.
 #[derive(Debug, Clone)]
@@ -450,6 +474,47 @@ impl JiraClient {
         Ok(())
     }
 
+    /// Fetches an issue plus its comments for the in-app conversation view (issue
+    /// #294), so the operator can read a Jira ticket's discussion in the UI like a
+    /// GitHub thread. Comments come back oldest first (Jira's default order), in a
+    /// single inline page, matching the GitHub thread view's first-page approach.
+    pub async fn fetch_thread(&self, issue_key: &str) -> Result<JiraThread> {
+        let url = format!(
+            "{}{}/issue/{issue_key}?fields=summary,status,description,reporter,created,comment",
+            self.config.base_url,
+            self.config.api_base()
+        );
+        let raw: RawThreadIssue = self.get_json(&url).await?;
+        let fields = raw.fields;
+
+        let comments = fields
+            .comment
+            .map(|page| page.comments)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|comment| JiraComment {
+                author: comment
+                    .author
+                    .and_then(|user| user.display_name)
+                    .unwrap_or_default(),
+                body: description_to_text(comment.body.as_ref()),
+                created: normalize_timestamp(&comment.created.unwrap_or_default()),
+            })
+            .collect();
+
+        Ok(JiraThread {
+            summary: fields.summary.unwrap_or_default(),
+            status: fields.status.map(|status| status.name).unwrap_or_default(),
+            description: description_to_text(fields.description.as_ref()),
+            reporter: fields
+                .reporter
+                .and_then(|user| user.display_name)
+                .unwrap_or_default(),
+            created: normalize_timestamp(&fields.created.unwrap_or_default()),
+            comments,
+        })
+    }
+
     /// Creates a `Task`-type issue in `project_key` and returns its key + URL.
     /// Cloud (REST v3) takes the description as Atlassian Document Format; Server
     /// (v2) takes plain text, so the description is encoded per deployment.
@@ -627,6 +692,14 @@ fn description_to_text(value: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Normalizes a Jira timestamp (e.g. `2026-06-18T19:10:53.873+0000`) to RFC 3339
+/// so the browser's `Date` parses it reliably; returns the input unchanged when it
+/// does not match Jira's format (so a surprise shape still renders something).
+fn normalize_timestamp(raw: &str) -> String {
+    chrono::DateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.3f%z")
+        .map_or_else(|_| raw.to_string(), |when| when.to_rfc3339())
+}
+
 // --- Wire DTOs (private) -----------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -688,6 +761,40 @@ struct IssueStatus {
 }
 
 #[derive(Debug, Deserialize)]
+struct RawThreadIssue {
+    fields: ThreadFields,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadFields {
+    summary: Option<String>,
+    status: Option<IssueStatus>,
+    description: Option<serde_json::Value>,
+    reporter: Option<RawUser>,
+    created: Option<String>,
+    comment: Option<RawCommentPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUser {
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCommentPage {
+    #[serde(default)]
+    comments: Vec<RawComment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawComment {
+    author: Option<RawUser>,
+    body: Option<serde_json::Value>,
+    created: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TransitionsResponse {
     #[serde(default)]
     transitions: Vec<Transition>,
@@ -732,6 +839,17 @@ mod tests {
         let server = config(JiraDeployment::Server);
         assert_eq!(server.api_base(), "/rest/api/2");
         assert_eq!(server.auth_header(), "Bearer secret-token");
+    }
+
+    #[test]
+    fn normalizes_jira_timestamp_to_rfc3339() {
+        // Jira's `+0000` offset (no colon) is not reliably parsed by JS `Date`, so
+        // the thread view normalizes it to RFC 3339 (issue #294).
+        let normalized = normalize_timestamp("2026-06-18T19:10:53.873+0000");
+        assert!(normalized.starts_with("2026-06-18T19:10:53.873"));
+        assert!(chrono::DateTime::parse_from_rfc3339(&normalized).is_ok());
+        // A non-Jira / surprise shape is returned unchanged so it still renders.
+        assert_eq!(normalize_timestamp("not a date"), "not a date");
     }
 
     #[test]

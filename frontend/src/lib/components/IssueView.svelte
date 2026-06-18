@@ -57,9 +57,14 @@
   let posting = $state(false)
 
   const isGithub = $derived(task.source_kind === 'github')
-  // GitHub and internal tickets both render the conversation view (the backend
-  // synthesizes a thread for internal tickets from our DB). Jira stays body-only.
-  const hasThread = $derived(task.source_kind === 'github' || task.source_kind === 'internal')
+  const isJira = $derived(task.source_kind === 'jira')
+  // GitHub, internal, and Jira tickets all render the conversation view: GitHub
+  // and Jira are read from their REST APIs, internal from our DB (issue #294).
+  const hasThread = $derived(
+    task.source_kind === 'github' ||
+      task.source_kind === 'internal' ||
+      task.source_kind === 'jira'
+  )
 
   // Everyone who appears in the thread, de-duplicated, for the Participants list.
   const participants = $derived.by(() => {
@@ -189,7 +194,9 @@
         <SourceIcon source={task.source_kind} class="size-5 flex-none text-muted-foreground" />
         <span class="min-w-0">
           {(thread?.issue.title ?? task.title)}
-          <span class="font-normal text-muted-foreground">#{task.external_id}</span>
+          <span class="font-normal text-muted-foreground">
+            {isJira ? task.external_id : `#${task.external_id}`}
+          </span>
         </span>
       </h1>
       <div class="flex flex-none items-center gap-2">
@@ -212,7 +219,12 @@
     </div>
     {#if thread}
       <div class="mt-3 flex flex-wrap items-center gap-3">
-        {#if thread.issue.state === 'open'}
+        {#if isJira}
+          <!-- Jira has no open/closed binary; show the workflow status verbatim. -->
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1 text-sm font-medium text-muted-foreground">
+            <CircleDot class="size-4" /> {thread.issue.state}
+          </span>
+        {:else if thread.issue.state === 'open'}
           <span class="inline-flex items-center gap-1.5 rounded-full bg-success px-3 py-1 text-sm font-medium text-success-foreground">
             <CircleDot class="size-4" /> Open
           </span>
@@ -262,7 +274,11 @@
             class="resize-y font-mono text-sm"
           />
           <div class="mt-2 flex flex-wrap items-center justify-end gap-2">
-            {#if thread.issue.state === 'open' && !isGithub}
+            <!-- Jira status is changed by moving the card on the board, not here, so
+                 a Jira thread offers only the comment box (issue #294). -->
+            {#if isJira}
+              <!-- no close/reopen control -->
+            {:else if thread.issue.state === 'open' && !isGithub}
               <!-- Internal tickets close plainly; no GitHub "reason" choices. -->
               <Button
                 variant="outline"
