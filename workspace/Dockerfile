@@ -151,34 +151,41 @@ RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
 #
 # The MCP bundles its OWN Playwright, pinned to a different Chromium than the #215
 # stable build: `@playwright/mcp@0.0.76` -> playwright 1.61.0-alpha -> Chromium
-# revision 1226, NOT the 1228 baked above. The matching headless shell is baked here
-# with the MCP's own Playwright, so a turn never downloads a browser at runtime
-# (offline / network-restricted safe). Only the headless shell is needed: the MCP
-# runs `--headless`, which uses the shell, so the full chromium-1226 build is skipped
-# to keep the image lean. Size delta: ~280MB (262MB browser + ~18MB of packages).
+# revision 1226, NOT the 1228 baked above. We bake that exact build here with the
+# MCP's own Playwright, so a turn never downloads a browser at runtime (offline /
+# network-restricted safe).
+#
+# It must be the FULL chromium build, not the headless shell (issue #299): in this
+# MCP/Playwright version `--browser chromium` resolves to the `chrome-for-testing`
+# channel, which launches the full Chrome-for-Testing build (dir `chromium-1226`)
+# even under `--headless`. An earlier revision of this file baked only
+# `chromium-headless-shell-1226`, so the MCP failed at runtime with
+# `Browser "chrome-for-testing" is not installed` and visual self-review was
+# skipped. We install via the MCP's own `install-browser` (the command its error
+# prescribes) so we get exactly what it launches. Size delta vs the shell-only bake
+# is ~70MB; correctness wins. Bumping PLAYWRIGHT_MCP_VERSION may change the revision
+# asserted below.
 ARG PLAYWRIGHT_MCP_VERSION=0.0.76
 USER codespace
 RUN bash -lc "npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && npm cache clean --force"
 USER root
 RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
     && ln -sf "$node_dir/playwright-mcp" /usr/local/bin/playwright-mcp \
-    && groot="$(runuser -l codespace -c 'npm root -g')" \
-    && PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-       node "$groot/@playwright/mcp/node_modules/playwright-core/cli.js" install chromium-headless-shell \
+    && PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright-mcp install-browser chrome-for-testing \
     # Only the newly-installed browser dir is chmod-ed, NOT all of /ms-playwright:
     # a recursive chmod over #215's browsers (from an earlier layer) would copy them
     # up into this layer and add ~650MB of duplicate bloat. The shared path itself is
     # already world-writable from #215, so a later version bump can still download.
-    && chmod -R a+w /ms-playwright/chromium_headless_shell-1226 \
+    && chmod -R a+w /ms-playwright/chromium-1226 \
     && rm -rf /home/codespace/.npm/_npx /tmp/*
 
 # Fail the build if the MCP bin didn't land on PATH (a dangling symlink) or the
-# matching Chromium 1226 headless shell wasn't baked, so a broken wiring can't ship
+# matching Chromium 1226 full build wasn't baked, so a broken wiring can't ship
 # silently (mirrors the actionlint gate above). The pinned revision is coupled to
 # PLAYWRIGHT_MCP_VERSION; bumping the MCP means updating the revision asserted here.
 RUN test -x /usr/local/bin/playwright-mcp \
     && runuser -l codespace -c 'command -v playwright-mcp >/dev/null' \
-    && ls -d /ms-playwright/chromium_headless_shell-1226 >/dev/null
+    && ls -d /ms-playwright/chromium-1226 >/dev/null
 
 # --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest

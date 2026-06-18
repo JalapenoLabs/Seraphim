@@ -372,17 +372,22 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   build arg, pinned `0.0.76`) is installed globally and its `playwright-mcp` bin
   symlinked onto `/usr/local/bin`. The MCP bundles its OWN Playwright, pinned to a
   DIFFERENT Chromium than the #215 stable build (alpha -> revision 1226, vs 1228), so
-  the Dockerfile bakes the matching `chromium-headless-shell` (rev 1226) with the
-  MCP's own Playwright into `/ms-playwright`; a turn never downloads a browser at
-  runtime. Only the headless shell is baked (`--headless` uses it), and only its own
-  dir is chmod-ed (a recursive chmod over `/ms-playwright` would copy #215's browsers
-  up into the layer and add ~650MB). Net image delta: **~290MB**. The entrypoint
-  registers the server at **user scope** in `CLAUDE_CONFIG_DIR/.claude.json`
+  the Dockerfile bakes that exact build (rev 1226) with the MCP's own Playwright into
+  `/ms-playwright`; a turn never downloads a browser at runtime. It must be the FULL
+  Chromium build, not the headless shell (issue #299): in this MCP/Playwright version
+  `--browser chromium` resolves to the `chrome-for-testing` channel, which launches
+  the full Chrome-for-Testing build (`chromium-1226`) even under `--headless`, so a
+  shell-only bake left it failing at runtime with `Browser "chrome-for-testing" is
+  not installed` and visual self-review was skipped. It is installed via the MCP's
+  own `playwright-mcp install-browser chrome-for-testing` (the command its own error
+  prescribes), and only that browser dir is chmod-ed (a recursive chmod over
+  `/ms-playwright` would copy #215's browsers up into the layer and add ~650MB). The
+  entrypoint registers the server at **user scope** in `CLAUDE_CONFIG_DIR/.claude.json`
   (`claude mcp add -s user playwright -- playwright-mcp --headless --browser chromium
   --no-sandbox --isolated`), idempotently (remove-then-add), so `claude -p
   --permission-mode bypassPermissions` loads it with NO per-task approval gate (a
   project `.mcp.json` would sit unapproved). A build-time gate fails the image if the
-  bin or the rev-1226 browser is missing. `docker compose build workspace` needs a
+  bin or the rev-1226 full build is missing. `docker compose build workspace` needs a
   populated `.env` (the compose volume interpolation), so a bare checkout builds the
   image directly with `docker build ./workspace`.
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
