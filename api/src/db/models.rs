@@ -629,6 +629,22 @@ pub struct TaskScreenshot {
     pub created_at: DateTime<Utc>,
 }
 
+/// A ticket attachment (issue #291): an operator upload on an internal ticket, or
+/// a source-ticket attachment (e.g. Jira) pulled into the ticket. As the API
+/// exposes it: metadata only. The `data` bytea is deliberately NOT a field here,
+/// so it never rides along in a task/board payload; a dedicated endpoint streams
+/// the bytes by id. `source` is `operator` | `jira` | `github`.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct TaskAttachment {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub source: String,
+    pub file_name: String,
+    pub mime: String,
+    pub byte_size: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 /// One Claude Code invocation against a task.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Turn {

@@ -4,6 +4,9 @@
 //! turns an `eyre` error into a 500 with a JSON body, so the happy path stays
 //! free of error plumbing.
 
+// Crate-visible so the orchestrator can reuse the shared attachment size cap when
+// it pulls source-ticket attachments (issue #291).
+pub(crate) mod attachments;
 mod automation;
 mod board;
 mod compose;
@@ -115,6 +118,17 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route("/screenshots/:id", get(screenshots::serve))
+        // Ticket attachments (issue #291): operator uploads on a ticket. The raw
+        // file is the request body, so the upload route raises axum's 2MB default
+        // body limit to the attachment cap. The serve route streams any stored
+        // attachment (operator uploads and pulled Jira attachments alike) by id.
+        .route(
+            "/tasks/:id/attachments",
+            post(attachments::create).layer(axum::extract::DefaultBodyLimit::max(
+                attachments::MAX_ATTACHMENT_BYTES,
+            )),
+        )
+        .route("/attachments/:id", get(attachments::serve))
         .route("/agent/questions", post(questions::ask))
         .route("/questions/pending", get(questions::pending))
         .route("/questions/:id/answer", post(questions::answer))
