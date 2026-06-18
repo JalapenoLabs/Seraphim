@@ -41,6 +41,12 @@ pub enum PrReview {
     Merged,
     /// Closed without merging (the agent or a human abandoned this repo's PR).
     Closed,
+    /// Open but with an empty net diff vs base (a parked-by-design empty draft
+    /// documenting a blocker, or an empty-by-accident PR). GitHub cannot squash a
+    /// zero-change PR, so it is never merged, fixed, or re-dispatched; it just
+    /// holds the task in review until a human or unblock event acts on it. This is
+    /// the guard against the empty-BLOCKED-draft re-dispatch loop (issue #304).
+    Parked,
 }
 
 /// What the review loop should do with the task this tick.
@@ -159,13 +165,18 @@ pub fn decide(prs: &[PrReview], review_attempts_remaining: bool) -> ReviewDecisi
         return ReviewDecision::Merge(to_merge);
     }
 
-    // Nothing failing/pending/auto-mergeable. Any open PR left needs a human.
-    if prs.iter().any(|pr| matches!(pr, PrReview::Open { .. })) {
+    // Nothing failing/pending/auto-mergeable. Any open PR left needs a human, and a
+    // parked (empty) PR likewise holds the task in review: it is unmergeable by
+    // design, so the task is not Done while it is unresolved (issue #304).
+    if prs
+        .iter()
+        .any(|pr| matches!(pr, PrReview::Open { .. } | PrReview::Parked))
+    {
         return ReviewDecision::Hold;
     }
 
-    // Nothing open. Done once at least one PR merged; an all-closed task just
-    // holds (no work landed) rather than being marked complete.
+    // Nothing open or parked. Done once at least one PR merged; an all-closed task
+    // just holds (no work landed) rather than being marked complete.
     if prs.iter().any(|pr| matches!(pr, PrReview::Merged)) {
         ReviewDecision::Done
     } else {
@@ -318,6 +329,31 @@ mod tests {
                 open_with_comments(PrCi::Passing, true),
             ]),
             ReviewDecision::AddressReview
+        );
+    }
+
+    #[test]
+    fn a_parked_empty_pr_holds_and_is_never_merged_or_redispatched() {
+        // A lone parked (empty draft) PR just holds in review; it is never fixed,
+        // addressed, merged, or re-dispatched, no matter what CI would say.
+        assert_eq!(decide_ready(&[PrReview::Parked]), ReviewDecision::Hold);
+        // Budget exhausted changes nothing: a parked PR has no review work to spend
+        // attempts on, so it still simply holds.
+        assert_eq!(decide(&[PrReview::Parked], false), ReviewDecision::Hold);
+    }
+
+    #[test]
+    fn a_parked_pr_does_not_block_merging_a_sibling_and_never_completes_the_task() {
+        // The real PR in another repo still merges; the parked one is left alone.
+        assert_eq!(
+            decide_ready(&[PrReview::Parked, open(PrCi::Passing, true)]),
+            ReviewDecision::Merge(vec![1])
+        );
+        // Once the sibling has merged, the task is NOT Done while a parked PR
+        // remains: it holds for a human or an unblock event to act on the park.
+        assert_eq!(
+            decide_ready(&[PrReview::Parked, PrReview::Merged]),
+            ReviewDecision::Hold
         );
     }
 

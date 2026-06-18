@@ -607,6 +607,15 @@ pub struct TaskPullRequest {
     pub head_sha: String,
     pub ci_state: String,
     pub pr_state: String,
+    /// Whether the PR is a draft. GitHub will not merge a draft, so the review
+    /// sweep never auto-merges one (issue #304).
+    pub is_draft: bool,
+    /// Whether the PR's net diff vs its base is empty (zero changed files). An
+    /// empty draft is a parked-by-design blocker the agent documented and could not
+    /// resolve in scope; an empty non-draft is an anomaly. Either way GitHub cannot
+    /// squash-merge it, so the review sweep leaves it parked in review rather than
+    /// merge-attempting and re-dispatching it forever (issue #304).
+    pub is_empty: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
