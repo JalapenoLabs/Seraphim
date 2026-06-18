@@ -1038,11 +1038,153 @@ pub async fn add_issue_comment(
     Ok(comment)
 }
 
+// --- GitHub attachment capture (issue #300) ----------------------------------
+
+/// An image/file attachment referenced in issue or comment Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentLink {
+    /// The canonical attachment URL as authored in the Markdown (stable, so it
+    /// dedupes cleanly across re-syncs).
+    pub url: String,
+    /// A display/file name: the link's alt or label text when present (GitHub sets
+    /// it to the original filename on upload), else the URL's last path segment.
+    pub file_name: String,
+}
+
+/// Whether a URL points at a GitHub-hosted attachment (issue #300).
+///
+/// Covers the modern `github.com/user-attachments/...` scheme (both pasted images
+/// and uploaded files) and the legacy user-image CDNs. Deliberately narrow so it
+/// never captures ordinary links (an issue/PR/blob URL is not an attachment).
+fn is_github_attachment_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://github.com/user-attachments/")
+        || lower.starts_with("https://user-images.githubusercontent.com/")
+        || lower.starts_with("https://private-user-images.githubusercontent.com/")
+}
+
+/// The file name for a captured attachment: the link's label/alt text when it is
+/// usable, else the URL's last path segment, else a generic fallback. Any path
+/// separators or quotes are stripped so it is safe as a stored file name.
+fn attachment_file_name(label: &str, url: &str) -> String {
+    let from_label = label.trim();
+    let candidate = if from_label.is_empty() {
+        url.rsplit('/')
+            .next()
+            .unwrap_or("")
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+    } else {
+        from_label
+    };
+    let cleaned: String = candidate
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | '"' | '\'') && !c.is_control())
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        "github-attachment".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// Extracts GitHub-hosted attachment links from issue/comment Markdown (issue
+/// #300), so their bytes can be downloaded and stored like Jira's.
+///
+/// Recognizes Markdown image/link syntax `![alt](url)` / `[label](url)` and HTML
+/// `<img src="url">`, keeping only URLs on GitHub's attachment hosts (see
+/// [`is_github_attachment_url`]). Deduplicates by URL, preserving first-seen order.
+/// Hand-rolled (no regex dependency), matching the rest of this crate.
+pub fn extract_attachment_urls(markdown: &str) -> Vec<AttachmentLink> {
+    let mut links: Vec<AttachmentLink> = Vec::new();
+    let mut push = |url: &str, label: &str| {
+        let url = url.trim();
+        if !is_github_attachment_url(url) {
+            return;
+        }
+        if links.iter().any(|existing| existing.url == url) {
+            return;
+        }
+        links.push(AttachmentLink {
+            url: url.to_string(),
+            file_name: attachment_file_name(label, url),
+        });
+    };
+
+    let bytes = markdown.as_bytes();
+    // Markdown link/image form: `](URL)`, optionally `[label]` or `![label]` before
+    // it. The URL runs until the closing `)`, whitespace, or a `"`-quoted title.
+    let mut search = 0;
+    while let Some(rel) = markdown[search..].find("](") {
+        let close_bracket = search + rel; // index of ']'
+        let url_start = close_bracket + 2; // just past `](`
+        let url_end = markdown[url_start..]
+            .find([')', ' ', '\t', '\n', '"'])
+            .map_or(markdown.len(), |offset| url_start + offset);
+        let url = &markdown[url_start..url_end];
+        // The label is between the matching `[` and this `]`.
+        let label = markdown[..close_bracket]
+            .rfind('[')
+            .map_or("", |open| &markdown[open + 1..close_bracket]);
+        push(url, label);
+        search = url_end;
+    }
+
+    // HTML image form: `<img ... src="URL" ...>` (single or double quoted).
+    for marker in ["src=\"", "src='"] {
+        let quote = marker.as_bytes()[marker.len() - 1];
+        let mut search = 0;
+        while let Some(rel) = markdown[search..].find(marker) {
+            let url_start = search + rel + marker.len();
+            let url_end = bytes[url_start..]
+                .iter()
+                .position(|&b| b == quote)
+                .map_or(markdown.len(), |offset| url_start + offset);
+            push(&markdown[url_start..url_end], "");
+            search = url_end;
+        }
+    }
+
+    links
+}
+
+/// Downloads a GitHub attachment (an image/file embedded in issue or comment
+/// Markdown) with the token, following the redirect to the signed blob URL, and
+/// returns the bytes plus the response content type (issue #300).
+///
+/// `reqwest` strips the `Authorization` header on a cross-host redirect, so the
+/// token only ever reaches `github.com`, never the CDN it redirects to. Returns
+/// `None` on any failure (a dead, private, or rate-limited link), so capture stays
+/// best-effort.
+pub async fn download_attachment(token: &str, url: &str) -> Option<(Vec<u8>, String)> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "seraphim")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        tracing::debug!(status = %response.status(), url, "github attachment not downloadable");
+        return None;
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = response.bytes().await.ok()?;
+    Some((bytes.to_vec(), content_type))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        review_status_from_response, strip_log_timestamp, ReviewThreadsResponse,
-        REVIEW_STATUS_QUERY,
+        extract_attachment_urls, review_status_from_response, strip_log_timestamp,
+        ReviewThreadsResponse, REVIEW_STATUS_QUERY,
     };
     use serde_json::{from_value, json};
 
@@ -1198,5 +1340,50 @@ mod tests {
             strip_log_timestamp("2026-06-15T21:00:00Z Fetched 31.1 MB in 3s (12.3 MB/s)"),
             "Fetched 31.1 MB in 3s (12.3 MB/s)"
         );
+    }
+
+    #[test]
+    fn extracts_github_attachment_links_and_skips_other_urls() {
+        let markdown = "\
+            The button overflows, see ![overflow.png](https://github.com/user-attachments/assets/abc-123).\n\
+            Legacy: ![old](https://user-images.githubusercontent.com/42/screenshot.png)\n\
+            Crash log: [crash.log](https://github.com/user-attachments/files/9/crash.log)\n\
+            Unrelated link: [#5](https://github.com/JalapenoLabs/Seraphim/issues/5)\n\
+            And a normal site: [docs](https://example.com/image.png)\n\
+            <img src=\"https://github.com/user-attachments/assets/html-1\" alt=\"x\">";
+        let links = extract_attachment_urls(markdown);
+        let urls: Vec<&str> = links.iter().map(|link| link.url.as_str()).collect();
+
+        // The three GitHub attachment hosts are captured, in first-seen order.
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/user-attachments/assets/abc-123",
+                "https://user-images.githubusercontent.com/42/screenshot.png",
+                "https://github.com/user-attachments/files/9/crash.log",
+                "https://github.com/user-attachments/assets/html-1",
+            ]
+        );
+        // Ordinary issue links and non-GitHub hosts are never treated as attachments.
+        assert!(!urls.iter().any(|url| url.contains("/issues/5")));
+        assert!(!urls.iter().any(|url| url.contains("example.com")));
+
+        // The alt/label text becomes the file name; a uuid asset keeps the alt name.
+        assert_eq!(links[0].file_name, "overflow.png");
+        // A files URL with no label falls back to its last path segment.
+        assert_eq!(links[2].file_name, "crash.log");
+    }
+
+    #[test]
+    fn dedupes_repeated_attachment_urls() {
+        let url = "https://github.com/user-attachments/assets/dup";
+        let markdown = format!("![a]({url}) and again ![b]({url})");
+        assert_eq!(extract_attachment_urls(&markdown).len(), 1);
+    }
+
+    #[test]
+    fn plain_markdown_with_no_attachments_yields_nothing() {
+        assert!(extract_attachment_urls("Just text, no images here.").is_empty());
+        assert!(extract_attachment_urls("").is_empty());
     }
 }
