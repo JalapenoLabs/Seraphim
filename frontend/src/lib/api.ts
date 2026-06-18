@@ -97,9 +97,10 @@ export function createInternalTask(body: {
   return apiClient.post('tasks', { json: body }).json<Task>()
 }
 
-// Set the repos an internal ticket targets (priority order; the first is the
-// primary one the agent branches in), or clear them with an empty list. Only
-// valid for internal tickets. Returns the updated task.
+// Set the repos an internal or Jira ticket targets (priority order; the first is
+// the primary one the agent branches in), or clear them with an empty list. Only
+// valid for internal and Jira tickets; a GitHub task's repo is its issue's own.
+// Returns the updated task.
 export function setTaskRepos(taskId: string, repoIds: string[]) {
   return apiClient.post(`tasks/${taskId}/repo`, { json: { repo_ids: repoIds } }).json<Task>()
 }
@@ -458,6 +459,12 @@ export function clearSound(kind: SoundKind) {
 
 export function setPaused(paused: boolean) {
   return apiClient.post('settings/pause', { json: { paused } }).json<Settings>()
+}
+
+// Manually lift an active subscription-usage auto-pause (issue #292), so the agent
+// resumes now instead of waiting for the window reset. Returns the updated settings.
+export function resumeUsage() {
+  return apiClient.post('settings/usage/resume').json<Settings>()
 }
 
 export type TokensRequest = {

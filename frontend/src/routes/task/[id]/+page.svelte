@@ -607,10 +607,11 @@
   {#if task}
     <Stats taskId={taskId} />
 
-    {#if task.source_kind === 'internal'}
-      <!-- Internal tickets have no upstream repo, so the operator picks where the
-           agent works. Until a repo is set the ticket is tracking-only and is not
-           auto-pulled from To Do. -->
+    {#if task.source_kind === 'internal' || task.source_kind === 'jira'}
+      <!-- Internal and Jira tickets have no single upstream repo, so the operator
+           picks where the agent works (a Jira ticket defaults to its board's repo
+           set). Until a repo is set the ticket is tracking-only and is not
+           auto-pulled from To Do (issue #290). -->
       <section class="rounded-lg border border-border bg-card p-3">
         <h2 class="text-sm font-semibold">Target repositories</h2>
         <p class="mt-0.5 text-xs text-muted-foreground">

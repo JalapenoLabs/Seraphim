@@ -245,9 +245,10 @@ pub struct SetTaskRepoRequest {
     pub repo_id: Option<Uuid>,
 }
 
-/// `POST /api/v1/tasks/:id/repo` - set the repos an internal ticket targets (or
-/// clear them). Only valid for internal tickets; a GitHub task's repo is its
-/// issue's and is never reassigned.
+/// `POST /api/v1/tasks/:id/repo` - set the repos an internal or Jira ticket
+/// targets (or clear them). A Jira ticket defaults to its board's repo set but can
+/// be re-pointed here so it auto-works against the right repo(s) (issue #290). A
+/// GitHub task's repo is its issue's own and is never reassigned.
 pub async fn set_repo(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -258,14 +259,14 @@ pub async fn set_repo(
         .repo_ids
         .clone()
         .unwrap_or_else(|| payload.repo_id.into_iter().collect());
-    match queries::set_internal_task_repos(&state.db, id, &repo_ids).await? {
+    match queries::set_task_target_repos(&state.db, id, &repo_ids).await? {
         Some(task) => {
             state.notify_board();
             Ok(Json(task).into_response())
         }
         None => Ok((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "not an internal ticket" })),
+            Json(json!({ "error": "this ticket's repos cannot be set (only internal and Jira tickets)" })),
         )
             .into_response()),
     }
@@ -388,7 +389,8 @@ pub async fn add_comment(
             .into_response());
     }
 
-    // Internal tickets store comments in our DB rather than on a service.
+    // Internal tickets store comments in our DB rather than on a service; Jira
+    // tickets post the comment to the Jira issue (issue #290).
     if let Some(task) = queries::get_task(&state.db, id).await? {
         if task.source_kind == SourceKind::Internal {
             let author = match payload.author.as_deref() {
@@ -401,6 +403,27 @@ pub async fn add_comment(
                 user: internal_user(internal_login(&comment.author)),
                 body: Some(comment.body),
                 created_at: comment.created_at.to_rfc3339(),
+                author_association: String::new(),
+            };
+            return Ok(Json(view).into_response());
+        }
+        if task.source_kind == SourceKind::Jira {
+            let Some(jira) = state.jira().await? else {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Jira is not configured" })),
+                )
+                    .into_response());
+            };
+            jira.add_comment(&task.external_id, &payload.body).await?;
+            let author = match payload.author.as_deref() {
+                Some("agent") => "agent",
+                _ => "user",
+            };
+            let view = IssueComment {
+                user: internal_user(internal_login(author)),
+                body: Some(payload.body.clone()),
+                created_at: chrono::Utc::now().to_rfc3339(),
                 author_association: String::new(),
             };
             return Ok(Json(view).into_response());

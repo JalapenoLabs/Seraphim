@@ -71,6 +71,31 @@ fn window_pause(
     }
 }
 
+/// Whether an active usage auto-pause should be lifted now (issue #292), given the
+/// latest rate-limit `info` (if any), whether the auto-pause is still `enabled`,
+/// and the operator's current `threshold`.
+///
+/// The auto-pause keys only to the window reset time, so on its own it never
+/// re-evaluates a raised threshold or a disabled toggle. This is the escape hatch:
+/// it returns `true` (lift the pause) when the pause no longer applies, i.e.
+/// - the auto-pause was disabled, or
+/// - re-evaluating the latest signal at the current threshold no longer warrants
+///   pausing (e.g. the threshold was raised above current utilization).
+///
+/// A genuinely exhausted (`rejected`) window still warrants pausing regardless of
+/// the threshold, so [`pause_until`] still returns its reset and this returns
+/// `false`: the pause stands until the window resets, as it should. With no signal
+/// to re-judge (`info` is `None`), it leaves an enabled pause in place.
+pub fn should_lift_pause(info: Option<&Value>, enabled: bool, threshold: i32) -> bool {
+    if !enabled {
+        return true;
+    }
+    match info {
+        Some(info) => pause_until(info, threshold).is_none(),
+        None => false,
+    }
+}
+
 /// Normalizes `utilization` to a 0-100 percent, accepting either a fraction
 /// (`0.82`) or an already-scaled percent (`82`).
 fn parse_utilization(value: &Value) -> Option<f64> {
@@ -127,5 +152,39 @@ mod tests {
             "overageResetsAt": 2000
         });
         assert_eq!(pause_until(&info, 80), Some(2000));
+    }
+
+    #[test]
+    fn disabling_auto_pause_lifts_the_pause() {
+        // The signal still says "over threshold", but turning the feature off must
+        // lift any active pause (issue #292), regardless of the signal.
+        let info = json!({ "status": "allowed_warning", "utilization": 90, "resetsAt": 500 });
+        assert!(should_lift_pause(Some(&info), false, 80));
+    }
+
+    #[test]
+    fn raising_threshold_above_utilization_lifts_the_pause() {
+        // Paused at 83% under an 80% threshold; raising the threshold to 95% (above
+        // current utilization) lifts it now rather than waiting for the reset.
+        let info = json!({ "status": "allowed_warning", "utilization": 83, "resetsAt": 500 });
+        assert!(should_lift_pause(Some(&info), true, 95));
+        // Still below the (lower) threshold it was paused at: stays paused.
+        assert!(!should_lift_pause(Some(&info), true, 80));
+    }
+
+    #[test]
+    fn exhausted_window_stays_paused_even_if_threshold_raised() {
+        // A rejected (exhausted) window cannot be un-exhausted by raising the
+        // threshold; the pause must stand until the window resets.
+        let info = json!({ "status": "rejected", "resetsAt": 500 });
+        assert!(!should_lift_pause(Some(&info), true, 100));
+    }
+
+    #[test]
+    fn no_signal_leaves_an_enabled_pause_in_place() {
+        // With nothing to re-judge, an enabled pause is left to auto-clear at reset.
+        assert!(!should_lift_pause(None, true, 95));
+        // But a disabled toggle still lifts it without needing a signal.
+        assert!(should_lift_pause(None, false, 95));
     }
 }

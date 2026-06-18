@@ -674,9 +674,13 @@ pub async fn upsert_jira_issue(
     )
     .await?;
 
-    // A ticket can target several repos; the first is the primary one the agent
-    // would branch in (multi-repo execution is a follow-up).
+    // A Jira ticket inherits the followed board's repo set as its default target
+    // repos (issue #290): the first is the primary one the agent branches in, and
+    // the full set drives the same multi-repo execution internal tickets use. The
+    // operator can override per-card later; the upsert seeds this on first sync
+    // only and never clobbers a later override.
     let primary_repo = board.repo_ids.0.first().copied();
+    let target_repo_ids = &board.repo_ids.0;
 
     // Honor a route-planner placement only on the ticket's first sync in: a Jira
     // key is globally unique, so existence and the placement are both keyed on the
@@ -697,6 +701,7 @@ pub async fn upsert_jira_issue(
                 &state.db,
                 &issue.key,
                 primary_repo,
+                target_repo_ids,
                 board.id,
                 &issue.summary,
                 &issue.description,
@@ -719,6 +724,7 @@ pub async fn upsert_jira_issue(
                 &state.db,
                 &issue.key,
                 primary_repo,
+                target_repo_ids,
                 board.id,
                 &issue.summary,
                 &issue.description,
@@ -1315,6 +1321,47 @@ async fn agent_loop(state: AppState, handle: RailwayHandle) {
             }
         }
     }
+}
+
+/// Re-evaluates an active usage auto-pause after a settings change and lifts it if
+/// it no longer applies (issue #292).
+///
+/// The auto-pause keys only to the window reset time, so without this neither a
+/// raised `usage_limit_threshold` nor a disabled `usage_limit_pause_enabled` would
+/// take effect until the reset. Called on every settings update: when there is an
+/// active (future) pause and [`usage::should_lift_pause`] says it no longer holds
+/// (the feature was turned off, or the latest utilization is now under the raised
+/// threshold), it clears `usage_paused_until` so the agent resumes immediately. A
+/// genuinely exhausted window still stands until reset. Best-effort and idempotent;
+/// when no pause is active it does nothing.
+pub(crate) async fn reevaluate_usage_pause(
+    state: &AppState,
+    settings: &crate::db::models::Settings,
+) -> Result<()> {
+    let Some(until) = settings.usage_paused_until else {
+        return Ok(());
+    };
+    // An already-lapsed pause is cleared by the gate on the next tick; nothing to do.
+    if Utc::now() >= until {
+        return Ok(());
+    }
+    // Re-judge against the latest rate-limit signal at the current threshold. The
+    // stored payload may wrap the info under `rate_limit_info` (the event) or be the
+    // info object itself, so accept either shape.
+    let payload = queries::latest_rate_limit(&state.db).await?;
+    let info = payload
+        .as_ref()
+        .map(|value| value.get("rate_limit_info").unwrap_or(value));
+    if usage::should_lift_pause(
+        info,
+        settings.usage_limit_pause_enabled,
+        settings.usage_limit_threshold,
+    ) {
+        queries::set_usage_paused_until(&state.db, None).await?;
+        state.notify_board();
+        info!("usage auto-pause lifted after a settings change (disabled or threshold raised)");
+    }
+    Ok(())
 }
 
 /// The next card this railway should work and how, or `None` if paused, halted,
@@ -2532,6 +2579,9 @@ async fn review_task(
                     }
                 }
             }
+            // Wrap up a Jira-sourced ticket: comment with the merged PR links and
+            // transition it to the board's Done status (best-effort, issue #290).
+            complete_jira_ticket(state, task).await;
         }
     }
     Ok(())
@@ -2753,6 +2803,21 @@ async fn detect_task_prs(
     // tag reflects the whole task rather than detection order.
     if !opened.is_empty() {
         let multi = task_is_multi_repo(state, task.id).await;
+        // Report the new PR(s) back to a Jira-sourced ticket so the ticket links to
+        // the work the agent opened (issue #290). Best-effort; never blocks the feed.
+        if task.source_kind == SourceKind::Jira {
+            let links = opened
+                .iter()
+                .map(|(_, _, _, url)| url.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            post_jira_comment(
+                state,
+                task,
+                &format!("Seraphim opened a pull request for this ticket:\n{links}"),
+            )
+            .await;
+        }
         for (full_name, title, number, url) in opened {
             emit_lifecycle_event(
                 state,
@@ -3122,6 +3187,95 @@ async fn close_linked_issue(
         }
         Err(error) => {
             warn!(error = %error, task_id = %task.id, "failed to close the linked issue");
+        }
+    }
+}
+
+/// Transitions a Jira ticket to the status its target `column` maps to under its
+/// board's mapping, mirroring the new status onto the card. Returns whether a
+/// transition was actually performed.
+///
+/// A safe no-op (`Ok(false)`) when the task is not Jira, has no board, nothing
+/// maps to that column, or Jira is unconfigured. Shared by the board move handler
+/// (operator-driven) and the agent-driven move to Done (issue #290), so both
+/// paths transition the ticket identically.
+pub async fn transition_jira_to_column(
+    state: &AppState,
+    task: &Task,
+    column: TaskColumn,
+) -> Result<bool> {
+    if task.source_kind != SourceKind::Jira {
+        return Ok(false);
+    }
+    let Some(board_id) = task.jira_board_id else {
+        return Ok(false);
+    };
+    let Some(board) = queries::get_jira_board(&state.db, board_id).await? else {
+        return Ok(false);
+    };
+    let Some(target) = crate::jira::status_for_column(&board.status_map.0, column) else {
+        return Ok(false);
+    };
+    let Some(jira) = state.jira().await? else {
+        return Ok(false);
+    };
+    if jira.transition_issue(&task.external_id, &target).await? {
+        // Mirror the new status onto the card so the badge matches immediately.
+        queries::set_task_external_state(&state.db, task.id, &target).await?;
+        state.notify_board();
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Posts a comment to the Jira ticket a task came from (best-effort, issue #290).
+/// A non-Jira task or unconfigured Jira is a silent no-op; any error is logged and
+/// swallowed so it never affects the task's progress.
+async fn post_jira_comment(state: &AppState, task: &Task, body: &str) {
+    if task.source_kind != SourceKind::Jira || task.external_id.trim().is_empty() {
+        return;
+    }
+    let jira = match state.jira().await {
+        Ok(Some(jira)) => jira,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "could not build a Jira client to comment");
+            return;
+        }
+    };
+    if let Err(error) = jira.add_comment(&task.external_id, body).await {
+        warn!(error = %error, task_id = %task.id, "failed to post a comment back to Jira");
+    }
+}
+
+/// Wraps up a finished Jira-sourced task (issue #290): posts a closing comment
+/// with the merged PR links, then transitions the ticket to its board's Done
+/// status. Best-effort and Jira-only, mirroring `close_linked_issue` for GitHub;
+/// any failure is logged and never affects the completed task.
+async fn complete_jira_ticket(state: &AppState, task: &Task) {
+    if task.source_kind != SourceKind::Jira {
+        return;
+    }
+    let prs = queries::list_task_prs(&state.db, task.id)
+        .await
+        .unwrap_or_default();
+    let links = prs
+        .iter()
+        .map(|pr| pr.pr_url.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = if links.is_empty() {
+        "Seraphim finished this ticket and merged its work.".to_string()
+    } else {
+        format!("Seraphim finished this ticket. Merged pull request(s):\n{links}")
+    };
+    post_jira_comment(state, task, &body).await;
+
+    match transition_jira_to_column(state, task, TaskColumn::Done).await {
+        Ok(true) => info!(task_id = %task.id, "transitioned the Jira ticket to Done"),
+        Ok(false) => {}
+        Err(error) => {
+            warn!(error = %error, task_id = %task.id, "failed to transition the Jira ticket to Done");
         }
     }
 }
