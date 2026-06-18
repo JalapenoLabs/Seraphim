@@ -1,5 +1,6 @@
 //! Board read + card movement endpoints.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use axum::extract::{Path, State};
@@ -274,6 +275,147 @@ pub async fn bulk_status(
     Ok(Json(json!({ "updated": tasks.len() })).into_response())
 }
 
+/// The key a bulk "Sort selected" reorder (issue #274) orders by. Mirrors the
+/// per-column sort vocabulary on the frontend (`columnSort.ts`), minus `custom`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkSort {
+    IdAsc,
+    IdDesc,
+    CreatedAsc,
+    CreatedDesc,
+    UpdatedAsc,
+    UpdatedDesc,
+}
+
+impl BulkSort {
+    fn compare(self, a: &Task, b: &Task) -> Ordering {
+        match self {
+            Self::IdAsc => natural_cmp(&a.external_id, &b.external_id),
+            Self::IdDesc => natural_cmp(&b.external_id, &a.external_id),
+            Self::CreatedAsc => a.created_at.cmp(&b.created_at),
+            Self::CreatedDesc => b.created_at.cmp(&a.created_at),
+            Self::UpdatedAsc => a.updated_at.cmp(&b.updated_at),
+            Self::UpdatedDesc => b.updated_at.cmp(&a.updated_at),
+        }
+    }
+}
+
+/// Natural (numeric-aware, case-insensitive) compare of two external ids, so `2`
+/// sorts before `10` and `PROJ-2` before `PROJ-10` (matching the frontend's
+/// `localeCompare(..., { numeric: true })`). Digit runs compare by value, other
+/// characters lexicographically (lowercased).
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ca), Some(cb)) => {
+                if ca.is_ascii_digit() && cb.is_ascii_digit() {
+                    let na = take_digits(&mut ai);
+                    let nb = take_digits(&mut bi);
+                    // Strip leading zeros, then compare by length (magnitude) and
+                    // finally lexicographically, so 002 == 2 and 10 > 9.
+                    let na = na.trim_start_matches('0');
+                    let nb = nb.trim_start_matches('0');
+                    let ord = na.len().cmp(&nb.len()).then_with(|| na.cmp(nb));
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                } else {
+                    let ord = ca.to_ascii_lowercase().cmp(&cb.to_ascii_lowercase());
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                    ai.next();
+                    bi.next();
+                }
+            }
+        }
+    }
+}
+
+/// Consumes and returns the leading run of ASCII digits from `chars`.
+fn take_digits(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    let mut run = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_digit() {
+            run.push(ch);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    run
+}
+
+/// Computes the new positions for a sort-selected reorder (issue #274).
+///
+/// Within each `(railway, column)` group the selected tasks are sorted by `sort`
+/// and reassigned to the SLOTS they already occupy (their own current positions, in
+/// ascending order). So the selected cards reorder among themselves while every
+/// unselected card keeps its position. Returns `(id, new_position)` only for tasks
+/// whose position actually changes, so a no-op sort writes nothing.
+fn sorted_positions(tasks: &[Task], sort: BulkSort) -> Vec<(Uuid, f64)> {
+    // Distinct (railway, column) groups, in first-seen order (avoids needing Hash
+    // on TaskColumn; the group count is tiny).
+    let mut keys: Vec<(Uuid, TaskColumn)> = Vec::new();
+    for task in tasks {
+        let key = (task.railway_id, task.board_column);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    let mut updates = Vec::new();
+    for key in &keys {
+        let mut group: Vec<&Task> = tasks
+            .iter()
+            .filter(|task| (task.railway_id, task.board_column) == *key)
+            .collect();
+        // The slots this group occupies, ascending (smallest = top of the column).
+        let mut slots: Vec<f64> = group.iter().map(|task| task.position).collect();
+        slots.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        // The tasks in their new order, then dropped into the ascending slots.
+        group.sort_by(|a, b| sort.compare(a, b));
+        for (task, &position) in group.iter().zip(slots.iter()) {
+            // Slots are the tasks' own positions reassigned, so a card that keeps
+            // its slot is bit-identical; compare bits to skip those no-op writes.
+            if task.position.to_bits() != position.to_bits() {
+                updates.push((task.id, position));
+            }
+        }
+    }
+    updates
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkSortRequest {
+    pub ids: Vec<Uuid>,
+    pub sort: BulkSort,
+}
+
+/// `POST /api/v1/tasks/bulk/sort` - reorder ONLY the selected cards by a key
+/// (issue #274), within the slots they already occupy in each column. Unselected
+/// cards and the cards' columns are untouched; this never re-queues a card.
+pub async fn bulk_sort(
+    State(state): State<AppState>,
+    Json(body): Json<BulkSortRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tasks = queries::list_tasks_by_ids(&state.db, &body.ids).await?;
+    let updates = sorted_positions(&tasks, body.sort);
+    for (id, position) in &updates {
+        queries::set_task_position(&state.db, *id, *position).await?;
+    }
+    if !updates.is_empty() {
+        state.notify_board();
+    }
+    Ok(Json(json!({ "reordered": updates.len() })))
+}
+
 /// Reflects a card's new column onto its source ticket: closed when it lands in
 /// Done, open otherwise. A no-op when the ticket is already in the desired state.
 ///
@@ -381,5 +523,152 @@ mod tests {
             TaskStatus::AwaitingReview,
             TaskColumn::Done,
         ));
+    }
+
+    use chrono::{TimeZone, Utc};
+    use sqlx::types::Json;
+
+    fn task(
+        railway: Uuid,
+        external_id: &str,
+        column: TaskColumn,
+        position: f64,
+        created: i64,
+        updated: i64,
+    ) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            railway_id: railway,
+            source_kind: SourceKind::Github,
+            external_id: external_id.to_string(),
+            repo_id: None,
+            target_repo_ids: Json(Vec::new()),
+            jira_board_id: None,
+            title: String::new(),
+            body_snapshot: String::new(),
+            url: String::new(),
+            author_login: None,
+            author_avatar_url: None,
+            external_state: None,
+            board_column: column,
+            position,
+            status: TaskStatus::Queued,
+            branch: None,
+            pr_url: None,
+            error: None,
+            ci_fix_attempts: 0,
+            review_fix_attempts: 0,
+            hold: false,
+            blocking: false,
+            notes: String::new(),
+            session_id: None,
+            started_at: None,
+            finished_at: None,
+            last_activity_at: None,
+            stats_reset_at: None,
+            created_at: Utc.timestamp_opt(created, 0).single().unwrap(),
+            updated_at: Utc.timestamp_opt(updated, 0).single().unwrap(),
+        }
+    }
+
+    // Resolves the reorder back to the external_ids in their new top-to-bottom
+    // order (ascending position), so a test can assert the resulting sequence.
+    fn order_after(tasks: &[Task], sort: BulkSort) -> Vec<String> {
+        let updates = sorted_positions(tasks, sort);
+        // Start from each task's current position, then apply the moves.
+        let mut placed: Vec<(f64, String)> = tasks
+            .iter()
+            .map(|task| {
+                let position = updates
+                    .iter()
+                    .find(|(id, _)| *id == task.id)
+                    .map_or(task.position, |(_, position)| *position);
+                (position, task.external_id.clone())
+            })
+            .collect();
+        placed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        placed.into_iter().map(|(_, id)| id).collect()
+    }
+
+    #[test]
+    fn natural_cmp_orders_numbers_by_value_not_lexically() {
+        assert_eq!(natural_cmp("2", "10"), Ordering::Less);
+        assert_eq!(natural_cmp("10", "9"), Ordering::Greater);
+        assert_eq!(natural_cmp("PROJ-2", "PROJ-10"), Ordering::Less);
+        assert_eq!(natural_cmp("002", "2"), Ordering::Equal);
+        assert_eq!(natural_cmp("bug", "BUG"), Ordering::Equal);
+        assert_eq!(natural_cmp("7", "7"), Ordering::Equal);
+    }
+
+    #[test]
+    fn sort_reverses_a_descending_column_into_ascending() {
+        // The issue's case: a column holding 10,9,8,7,6,5 top-to-bottom.
+        let lane = Uuid::new_v4();
+        let tasks: Vec<Task> = ["10", "9", "8", "7", "6", "5"]
+            .iter()
+            .zip([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .map(|(id, position)| task(lane, id, TaskColumn::Todo, position, 0, 0))
+            .collect();
+        assert_eq!(
+            order_after(&tasks, BulkSort::IdAsc),
+            ["5", "6", "7", "8", "9", "10"]
+        );
+        assert_eq!(
+            order_after(&tasks, BulkSort::IdDesc),
+            ["10", "9", "8", "7", "6", "5"]
+        );
+    }
+
+    #[test]
+    fn sort_reuses_only_the_selected_cards_slots() {
+        // Selected cards sit at positions 1, 3, 5 (unselected ones at 2, 4 are not
+        // passed in). The reorder must keep those three slots, just reordered.
+        let lane = Uuid::new_v4();
+        let tasks = vec![
+            task(lane, "8", TaskColumn::Todo, 1.0, 0, 0),
+            task(lane, "3", TaskColumn::Todo, 3.0, 0, 0),
+            task(lane, "5", TaskColumn::Todo, 5.0, 0, 0),
+        ];
+        let updates = sorted_positions(&tasks, BulkSort::IdAsc);
+        let mut slots: Vec<f64> = updates.iter().map(|(_, position)| *position).collect();
+        slots.extend(
+            tasks
+                .iter()
+                .filter(|task| !updates.iter().any(|(id, _)| id == &task.id))
+                .map(|task| task.position),
+        );
+        slots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(slots, vec![1.0, 3.0, 5.0]); // same three slots, nothing new
+        assert_eq!(order_after(&tasks, BulkSort::IdAsc), ["3", "5", "8"]);
+    }
+
+    #[test]
+    fn sort_groups_by_column_and_skips_no_op() {
+        let lane = Uuid::new_v4();
+        let tasks = vec![
+            task(lane, "9", TaskColumn::Todo, 1.0, 0, 0),
+            task(lane, "4", TaskColumn::Todo, 2.0, 0, 0),
+            task(lane, "1", TaskColumn::Available, 1.0, 0, 0),
+            task(lane, "2", TaskColumn::Available, 2.0, 0, 0),
+        ];
+        // To Do reorders (9,4 -> 4,9); Available is already ascending -> untouched.
+        let updates = sorted_positions(&tasks, BulkSort::IdAsc);
+        assert_eq!(updates.len(), 2);
+        assert!(updates.iter().all(|(id, _)| tasks
+            .iter()
+            .any(|task| &task.id == id && task.board_column == TaskColumn::Todo)));
+    }
+
+    #[test]
+    fn sort_by_created_time_uses_timestamps() {
+        let lane = Uuid::new_v4();
+        // Ids are out of created-time order, so the two keys disagree.
+        let tasks = vec![
+            task(lane, "1", TaskColumn::Todo, 1.0, 300, 0),
+            task(lane, "2", TaskColumn::Todo, 2.0, 100, 0),
+            task(lane, "3", TaskColumn::Todo, 3.0, 200, 0),
+        ];
+        assert_eq!(order_after(&tasks, BulkSort::CreatedAsc), ["2", "3", "1"]);
+        assert_eq!(order_after(&tasks, BulkSort::CreatedDesc), ["1", "3", "2"]);
     }
 }
