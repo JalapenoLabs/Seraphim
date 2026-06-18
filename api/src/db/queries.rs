@@ -3471,13 +3471,41 @@ mod tests {
     /// Postgres, or `pg-ephemeral` locally); otherwise it skips.
     #[tokio::test]
     async fn orphaned_running_turns_never_race_the_clock() {
+        // Our own throwaway database, kept off the one `DATABASE_URL` points at.
+        const TEST_DB: &str = "seraphim_issue297_test";
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping orphaned_running_turns_never_race_the_clock: DATABASE_URL unset");
             return;
         };
-        let pool = PgPool::connect(&url)
+        // Run against a throwaway database of our own, NEVER the one `DATABASE_URL`
+        // points at: CI also runs a dedicated `migrate` step against that database,
+        // and pre-applying migrations here would break it. Connect to the `postgres`
+        // maintenance DB to create/drop ours. `raw_sql` (the simple protocol) is
+        // required: `CREATE DATABASE` cannot run inside the implicit transaction of
+        // a prepared statement. Any setup failure skips (an env quirk must not fail
+        // CI); the assertions still run whenever the DB is reachable.
+        let Some((prefix, _)) = url.rsplit_once('/') else {
+            eprintln!("skipping: DATABASE_URL has no database segment");
+            return;
+        };
+        let Ok(admin) = PgPool::connect(&format!("{prefix}/postgres")).await else {
+            eprintln!("skipping: cannot reach the Postgres maintenance database");
+            return;
+        };
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+            .execute(&admin)
+            .await;
+        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {TEST_DB}"))
+            .execute(&admin)
             .await
-            .expect("connect to DATABASE_URL");
+        {
+            eprintln!("skipping: cannot create the throwaway test database: {error}");
+            return;
+        }
+
+        let pool = PgPool::connect(&format!("{prefix}/{TEST_DB}"))
+            .await
+            .expect("connect to the throwaway test database");
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
@@ -3558,12 +3586,12 @@ mod tests {
             "a turn whose task is not actively worked never races the clock"
         );
 
-        // Tidy up so a shared local Postgres is not left with test rows (turns
-        // cascade from the task).
-        sqlx::query("DELETE FROM tasks WHERE id = $1")
-            .bind(task.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Tear down: close our pool, then drop the throwaway database (a DB cannot
+        // be dropped while a connection to it is open). Best-effort; the CI Postgres
+        // is torn down with the job regardless.
+        pool.close().await;
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+            .execute(&admin)
+            .await;
     }
 }
