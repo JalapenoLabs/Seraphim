@@ -150,42 +150,66 @@ RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
 # server binary and the exact browser build it needs.
 #
 # The MCP bundles its OWN Playwright, pinned to a different Chromium than the #215
-# stable build: `@playwright/mcp@0.0.76` -> playwright 1.61.0-alpha -> Chromium
-# revision 1226, NOT the 1228 baked above. We bake that exact build here with the
-# MCP's own Playwright, so a turn never downloads a browser at runtime (offline /
-# network-restricted safe).
+# stable build above (`@playwright/mcp@0.0.76` -> playwright 1.61.0-alpha ->
+# Chromium revision 1226, not the 1228 baked above). We bake that exact build here
+# with the MCP's own Playwright, so a turn never downloads a browser at runtime
+# (offline / network-restricted safe).
 #
 # It must be the FULL chromium build, not the headless shell (issue #299): in this
 # MCP/Playwright version `--browser chromium` resolves to the `chrome-for-testing`
-# channel, which launches the full Chrome-for-Testing build (dir `chromium-1226`)
-# even under `--headless`. An earlier revision of this file baked only
-# `chromium-headless-shell-1226`, so the MCP failed at runtime with
-# `Browser "chrome-for-testing" is not installed` and visual self-review was
-# skipped. We install via the MCP's own `install-browser` (the command its error
-# prescribes) so we get exactly what it launches. Size delta vs the shell-only bake
-# is ~70MB; correctness wins. Bumping PLAYWRIGHT_MCP_VERSION may change the revision
-# asserted below.
+# channel, which launches the full Chrome-for-Testing build (dir `chromium-<rev>`)
+# even under `--headless`. An earlier revision of this file baked only the headless
+# shell, so the MCP failed at runtime with `Browser "chrome-for-testing" is not
+# installed` and visual self-review was skipped. We install via the MCP's own
+# `install-browser` (the command its error prescribes) so we get exactly what it
+# launches.
+#
+# The Chromium revision is NOT hardcoded (issue #307). It is derived at build time
+# from the MCP's own bundled `playwright-core/browsers.json` (the `chromium` entry's
+# `revision`), the same source of truth Playwright itself uses. That one resolved
+# value drives both the chmod and the build-time assertion below, so bumping
+# PLAYWRIGHT_MCP_VERSION needs no manual revision edits: if the new MCP pins a
+# different Chromium, the resolved directory follows automatically.
 ARG PLAYWRIGHT_MCP_VERSION=0.0.76
 USER codespace
 RUN bash -lc "npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && npm cache clean --force"
 USER root
+# Symlink the bin onto PATH, install the exact Chromium the MCP launches, then
+# resolve that build's revision from the bundled playwright-core and use the single
+# resolved value to chmod and assert it. The build fails loudly (printing the
+# expected revision and the directories actually present under /ms-playwright) if
+# the wiring is broken, so it can never ship silently (mirrors the actionlint gate
+# above). Both the MCP and bundled playwright-core versions are logged to the build
+# output so a later break is attributable without opening the image.
 RUN node_dir="$(runuser -l codespace -c 'command -v node' | xargs dirname)" \
     && ln -sf "$node_dir/playwright-mcp" /usr/local/bin/playwright-mcp \
     && PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright-mcp install-browser chrome-for-testing \
-    # Only the newly-installed browser dir is chmod-ed, NOT all of /ms-playwright:
-    # a recursive chmod over #215's browsers (from an earlier layer) would copy them
-    # up into this layer and add ~650MB of duplicate bloat. The shared path itself is
-    # already world-writable from #215, so a later version bump can still download.
-    && chmod -R a+w /ms-playwright/chromium-1226 \
-    && rm -rf /home/codespace/.npm/_npx /tmp/*
-
-# Fail the build if the MCP bin didn't land on PATH (a dangling symlink) or the
-# matching Chromium 1226 full build wasn't baked, so a broken wiring can't ship
-# silently (mirrors the actionlint gate above). The pinned revision is coupled to
-# PLAYWRIGHT_MCP_VERSION; bumping the MCP means updating the revision asserted here.
-RUN test -x /usr/local/bin/playwright-mcp \
+    && global_root="$(runuser -l codespace -c 'npm root -g')" \
+    # Resolve the revision from the MCP's bundled playwright-core (single source of
+    # truth); the node call also logs the MCP and playwright-core versions to stderr.
+    && revision="$(NODE_PATH="$global_root" node -e 'const p=require("path");const mcpPkg=require.resolve("@playwright/mcp/package.json");const mcpDir=p.dirname(mcpPkg);const corePkg=require.resolve("playwright-core/package.json",{paths:[mcpDir]});const coreDir=p.dirname(corePkg);const chromium=require(p.join(coreDir,"browsers.json")).browsers.find((b)=>b.name==="chromium");if(!chromium||!chromium.revision){console.error("FATAL: no chromium revision in "+p.join(coreDir,"browsers.json"));process.exit(1);}console.error("[playwright-mcp] @playwright/mcp "+require(mcpPkg).version+", bundled playwright-core "+require(corePkg).version+", chromium revision "+chromium.revision);process.stdout.write(String(chromium.revision));')" \
+    && if [ -z "$revision" ]; then echo "ERROR: could not resolve the Playwright MCP Chromium revision from its bundled playwright-core" >&2; exit 1; fi \
+    && chromium_dir="/ms-playwright/chromium-${revision}" \
+    # Assert the exact executable we need (the chrome binary, found without assuming
+    # its sub-path, which differs across builds), not merely the directory: several
+    # chromium-* builds coexist here (#215's stable build plus this one).
+    && chromium_bin="$(find "$chromium_dir" -type f -name chrome 2>/dev/null | head -n1)" \
+    && if [ ! -x "$chromium_bin" ]; then \
+         echo "ERROR: expected the full Chromium revision ${revision} (resolved from the MCP's bundled playwright-core browsers.json) at ${chromium_dir} with a chrome executable, but it is missing." >&2; \
+         echo "Directories present under /ms-playwright:" >&2; \
+         ls -1 /ms-playwright >&2 || true; \
+         exit 1; \
+       fi \
+    # Only the resolved browser dir is chmod-ed, NOT all of /ms-playwright: a
+    # recursive chmod over #215's browsers (from an earlier layer) would copy them up
+    # into this layer and add ~650MB of bloat. The shared path itself is already
+    # world-writable from #215, so a later version bump can still download.
+    && chmod -R a+w "$chromium_dir" \
+    # The bin must resolve on PATH for root (the default docker exec user) and for the
+    # codespace agent user, so a dangling symlink can't ship silently either.
+    && test -x /usr/local/bin/playwright-mcp \
     && runuser -l codespace -c 'command -v playwright-mcp >/dev/null' \
-    && ls -d /ms-playwright/chromium-1226 >/dev/null
+    && rm -rf /home/codespace/.npm/_npx /tmp/*
 
 # --- Seraphim agent helpers (post to the API; env injected per turn) ---------
 COPY seraphim-suggest /usr/local/bin/seraphim-suggest

@@ -373,12 +373,12 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   build arg, pinned `0.0.76`) is installed globally and its `playwright-mcp` bin
   symlinked onto `/usr/local/bin`. The MCP bundles its OWN Playwright, pinned to a
   DIFFERENT Chromium than the #215 stable build (alpha -> revision 1226, vs 1228), so
-  the Dockerfile bakes that exact build (rev 1226) with the MCP's own Playwright into
+  the Dockerfile bakes that exact build (currently rev 1226) with the MCP's own Playwright into
   `/ms-playwright`; a turn never downloads a browser at runtime. It must be the FULL
   Chromium build, not the headless shell (issue #299): in this MCP/Playwright version
   `--browser chromium` resolves to the `chrome-for-testing` channel, which launches
-  the full Chrome-for-Testing build (`chromium-1226`) even under `--headless`, so a
-  shell-only bake left it failing at runtime with `Browser "chrome-for-testing" is
+  the full Chrome-for-Testing build (dir `chromium-<rev>`) even under `--headless`,
+  so a shell-only bake left it failing at runtime with `Browser "chrome-for-testing" is
   not installed` and visual self-review was skipped. It is installed via the MCP's
   own `playwright-mcp install-browser chrome-for-testing` (the command its own error
   prescribes), and only that browser dir is chmod-ed (a recursive chmod over
@@ -387,8 +387,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   (`claude mcp add -s user playwright -- playwright-mcp --headless --browser chromium
   --no-sandbox --isolated`), idempotently (remove-then-add), so `claude -p
   --permission-mode bypassPermissions` loads it with NO per-task approval gate (a
-  project `.mcp.json` would sit unapproved). A build-time gate fails the image if the
-  bin or the rev-1226 full build is missing. `docker compose build workspace` needs a
+  project `.mcp.json` would sit unapproved). The Chromium revision is NOT hardcoded
+  (issue #307): the Dockerfile derives it at build time from the MCP's bundled
+  `playwright-core/browsers.json` (the `chromium` entry's `revision`, currently
+  `1226`), so a `PLAYWRIGHT_MCP_VERSION` bump needs no manual revision edits. That one
+  resolved value drives both the chmod and a build-time gate that fails the image (and
+  prints the expected revision plus the dirs present under `/ms-playwright`) if the MCP
+  bin or the resolved `chromium-<rev>` chrome executable is missing; both the MCP and
+  bundled playwright-core versions are logged for attributability. `docker compose build workspace` needs a
   populated `.env` (the compose volume interpolation), so a bare checkout builds the
   image directly with `docker build ./workspace`.
 ### The orchestrator loops (`api/src/orchestrator/mod.rs`)
