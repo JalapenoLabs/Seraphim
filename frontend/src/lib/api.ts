@@ -447,6 +447,12 @@ export function setPaused(paused: boolean) {
   return apiClient.post('settings/pause', { json: { paused } }).json<Settings>()
 }
 
+// Manually lift an active subscription-usage auto-pause (issue #292), so the agent
+// resumes now instead of waiting for the window reset. Returns the updated settings.
+export function resumeUsage() {
+  return apiClient.post('settings/usage/resume').json<Settings>()
+}
+
 export type TokensRequest = {
   claude_oauth_token?: string
   github_token?: string

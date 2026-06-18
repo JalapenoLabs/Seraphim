@@ -44,6 +44,7 @@
     startClaudeOauth,
     finishClaudeOauth,
     setClaudeApiKey,
+    resumeUsage,
     testJira,
     updateJiraBoard,
     updateSettings,
@@ -485,6 +486,20 @@
       usage_limit_threshold: settings.usage_limit_threshold
     })
     usageSavedAt = new Date().toLocaleTimeString()
+  }
+
+  // Manually lift an active usage auto-pause (issue #292); the returned settings
+  // reflect the cleared pause, so the note below disappears at once.
+  async function resumeUsageNow() {
+    if (!settings) {
+      return
+    }
+    try {
+      settings = await resumeUsage()
+      toast.success('Resumed; the agent will pull new work')
+    } catch {
+      toast.error('Could not resume')
+    }
   }
 
   async function saveThoughts() {
@@ -1421,10 +1436,18 @@
           </div>
 
           {#if settings.usage_paused_until && new Date(settings.usage_paused_until).getTime() > Date.now()}
-            <div class="rounded-md border border-warning/40 bg-card p-3 text-sm">
-              Paused for usage until
-              <strong>{new Date(settings.usage_paused_until).toLocaleString()}</strong>. The agent
-              resumes automatically when the window resets.
+            <div
+              class="flex items-start justify-between gap-3 rounded-md border border-warning/40 bg-card p-3 text-sm"
+            >
+              <div class="min-w-0">
+                Paused for usage until
+                <strong>{new Date(settings.usage_paused_until).toLocaleString()}</strong>. The agent
+                resumes automatically when the window resets. Raising the threshold above current
+                usage above, or resuming now, lifts it sooner.
+              </div>
+              <Button variant="outline" size="sm" class="flex-none" onclick={resumeUsageNow}>
+                Resume now
+              </Button>
             </div>
           {/if}
         {/if}

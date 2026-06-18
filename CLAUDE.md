@@ -616,7 +616,17 @@ Playwright MCP, check layout via computed styles at 375px and 1280px).
   conversation panel is GitHub/internal only), and assignee write-back.
 - **MooreslabAI human-review commenting** — `GitHubSource::comment` exists but is
   unused (`#[expect(dead_code)]`).
-- **Rate-limit handling** — surface `rate_limit` events and auto-pause (planned).
+- **Subscription usage auto-pause** — when `usage_limit_pause_enabled`, a Claude
+  `rate_limit_event` that crosses `usage_limit_threshold` (or a rejected/exhausted
+  window) sets `settings.usage_paused_until` to the window's reset time (pure
+  decision in `orchestrator::usage::pause_until`); `next_actionable_task` holds all
+  new work until that time, then auto-clears it. Escape hatches (issue #292):
+  `POST /settings/usage/resume` clears the pause now (the board banner and the
+  Settings usage section each have a "Resume now" button), and every settings
+  update runs `orchestrator::reevaluate_usage_pause`, which lifts an active pause
+  when the toggle is turned off or the threshold is raised above the latest known
+  utilization (`usage::should_lift_pause`, re-judging the latest `rate_limit`
+  event). A genuinely exhausted window still stands until reset.
 
 ## Railways (planned)
 
