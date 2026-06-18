@@ -216,6 +216,19 @@ pub struct JiraIssue {
     pub description: String,
 }
 
+/// One attachment on a Jira issue (issue #291), as listed by the REST API. The
+/// bytes are fetched separately from `content` with the configured auth.
+#[derive(Debug, Clone)]
+pub struct JiraAttachment {
+    /// The Jira attachment id, used to dedupe re-pulls.
+    pub id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: i64,
+    /// The authenticated download URL for the raw bytes.
+    pub content_url: String,
+}
+
 // --- The async REST client ---------------------------------------------------
 
 /// A configured Jira client. Built on demand from the stored connection so a
@@ -491,6 +504,77 @@ impl JiraClient {
             url: format!("{}/browse/{}", self.config.base_url, created.key),
             key: created.key,
         })
+    }
+
+    /// Lists an issue's attachments (issue #291): filename, MIME, size, and the
+    /// authenticated download URL for each. Empty when the issue has none.
+    pub async fn list_attachments(&self, issue_key: &str) -> Result<Vec<JiraAttachment>> {
+        #[derive(Deserialize)]
+        struct IssueAttachments {
+            fields: AttachmentField,
+        }
+        #[derive(Deserialize)]
+        struct AttachmentField {
+            #[serde(default)]
+            attachment: Vec<RawAttachment>,
+        }
+        #[derive(Deserialize)]
+        struct RawAttachment {
+            id: String,
+            #[serde(default)]
+            filename: String,
+            #[serde(rename = "mimeType", default)]
+            mime_type: String,
+            #[serde(default)]
+            size: i64,
+            #[serde(default)]
+            content: String,
+        }
+
+        let url = format!(
+            "{}{}/issue/{issue_key}?fields=attachment",
+            self.config.base_url,
+            self.config.api_base()
+        );
+        let issue: IssueAttachments = self.get_json(&url).await?;
+        Ok(issue
+            .fields
+            .attachment
+            .into_iter()
+            .map(|raw| JiraAttachment {
+                id: raw.id,
+                filename: raw.filename,
+                mime_type: raw.mime_type,
+                size: raw.size,
+                content_url: raw.content,
+            })
+            .collect())
+    }
+
+    /// Downloads an attachment's raw bytes from its `content` URL with the
+    /// configured auth, returning the bytes and the server-reported content type.
+    pub async fn download_attachment(&self, content_url: &str) -> Result<(Vec<u8>, String)> {
+        let response = self
+            .http
+            .get(content_url)
+            .header("Authorization", self.config.auth_header())
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(eyre!(
+                "Jira attachment download {content_url} failed ({status}): {body}"
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = response.bytes().await?;
+        Ok((bytes.to_vec(), content_type))
     }
 }
 

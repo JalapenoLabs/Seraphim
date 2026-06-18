@@ -16,8 +16,8 @@ use super::models::{
     EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment,
     NetworkAccessLevel, PendingPlacement, PendingQuestion, Question, QuestionOption,
     QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings,
-    SourceKind, StatsAggregate, Task, TaskColumn, TaskPullRequest, TaskScreenshot, TaskStatus,
-    Turn,
+    SourceKind, StatsAggregate, Task, TaskAttachment, TaskColumn, TaskPullRequest, TaskScreenshot,
+    TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -2292,6 +2292,91 @@ pub async fn get_screenshot_image(
         .bind(id)
         .fetch_optional(pool)
         .await
+}
+
+// --- Ticket attachments (issue #291) -----------------------------------------
+
+/// The attachment metadata columns, every column EXCEPT the `data` bytea (and the
+/// internal `external_id` dedup key), so a `SELECT` for a list or RETURNING never
+/// drags the bytes into a JSON payload.
+const ATTACHMENT_COLUMNS: &str = "id, task_id, source, file_name, mime, byte_size, created_at";
+
+/// Stores one ticket attachment and returns its metadata (never the bytes).
+///
+/// `source` is `operator` | `jira` | `github`; `external_id` is the source
+/// tracker's own attachment id for pulled attachments (so a re-pull dedupes on the
+/// `task_attachments_source_uniq` index) and `None` for operator uploads.
+pub async fn create_attachment(
+    pool: &PgPool,
+    task_id: Uuid,
+    source: &str,
+    external_id: Option<&str>,
+    file_name: &str,
+    mime: &str,
+    data: &[u8],
+) -> sqlx::Result<TaskAttachment> {
+    sqlx::query_as::<_, TaskAttachment>(&format!(
+        "INSERT INTO task_attachments \
+         (task_id, source, external_id, file_name, mime, byte_size, data) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {ATTACHMENT_COLUMNS}"
+    ))
+    .bind(task_id)
+    .bind(source)
+    .bind(external_id)
+    .bind(file_name)
+    .bind(mime)
+    .bind(i64::try_from(data.len()).unwrap_or(i64::MAX))
+    .bind(data)
+    .fetch_one(pool)
+    .await
+}
+
+/// A task's attachments, oldest first, metadata only (the bytes are streamed by id).
+pub async fn list_attachments_for_task(
+    pool: &PgPool,
+    task_id: Uuid,
+) -> sqlx::Result<Vec<TaskAttachment>> {
+    sqlx::query_as::<_, TaskAttachment>(&format!(
+        "SELECT {ATTACHMENT_COLUMNS} FROM task_attachments \
+         WHERE task_id = $1 ORDER BY created_at"
+    ))
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// The raw bytes, MIME, and file name of one attachment, for the streaming
+/// endpoint. `None` when no attachment has that id.
+pub async fn get_attachment_data(
+    pool: &PgPool,
+    id: Uuid,
+) -> sqlx::Result<Option<(Vec<u8>, String, String)>> {
+    sqlx::query_as::<_, (Vec<u8>, String, String)>(
+        "SELECT data, mime, file_name FROM task_attachments WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Whether a pulled source attachment is already stored, so a re-sync can skip
+/// re-downloading it. Keyed on the source tracker's own attachment id.
+pub async fn source_attachment_exists(
+    pool: &PgPool,
+    task_id: Uuid,
+    source: &str,
+    external_id: &str,
+) -> sqlx::Result<bool> {
+    let exists: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM task_attachments \
+         WHERE task_id = $1 AND source = $2 AND external_id = $3 LIMIT 1",
+    )
+    .bind(task_id)
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(exists.is_some())
 }
 
 /// The id of a task's most recent turn, to associate an uploaded screenshot with

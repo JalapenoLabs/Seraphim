@@ -22,6 +22,21 @@ pub struct DependencyBranch {
     pub repos: Vec<String>,
 }
 
+/// A ticket attachment surfaced to the agent in the brief (issue #291).
+///
+/// `inline_text` is `Some` for a small text/log attachment whose content is
+/// inlined directly (already head/tail capped by the loader); it is `None` for an
+/// image or binary, which is listed as an openable ref the agent fetches by `id`
+/// (`GET $SERAPHIM_API_URL/api/v1/attachments/<id>`).
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub file_name: String,
+    pub mime: String,
+    pub byte_size: i64,
+    pub id: String,
+    pub inline_text: Option<String>,
+}
+
 /// Builds the instruction text for working `task` fresh on a new `branch`.
 ///
 /// `comments` is the issue's discussion thread (empty when there is none or it
@@ -34,6 +49,13 @@ pub struct DependencyBranch {
 /// `dependencies` are open dependency PR branches the ticket builds on top of
 /// (issue #256); when present, the agent is told to merge them in first rather
 /// than discovering and re-implementing them.
+/// `attachments` are the ticket's attachments (issue #291): small text/log files
+/// are inlined into the brief and images/binaries are listed as openable refs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fresh-work brief genuinely composes from all of these inputs; \
+              grouping them into a struct would only move the noise"
+)]
 pub fn build(
     settings: &Settings,
     repo: &Repository,
@@ -42,9 +64,10 @@ pub fn build(
     comments: &[IssueComment],
     target_repos: &[Repository],
     dependencies: &[DependencyBranch],
+    attachments: &[Attachment],
 ) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
-    let mut prompt = context_header(settings, repo, task, comments);
+    let mut prompt = context_header(settings, repo, task, comments, attachments);
 
     // A GitHub task's PR should reference its issue (so it links/closes on merge);
     // a Jira task's PR should carry its key so the work traces back to the ticket;
@@ -166,7 +189,7 @@ pub fn build_ci_fix(
     } else {
         failing_checks.join(", ")
     };
-    let mut prompt = context_header(settings, repo, task, comments);
+    let mut prompt = context_header(settings, repo, task, comments, &[]);
 
     prompt.push_str(&format!(
         "# Fixing CI\n\
@@ -219,7 +242,7 @@ pub fn build_merge_conflict(
     } else {
         reason.trim().to_string()
     };
-    let mut prompt = context_header(settings, repo, task, comments);
+    let mut prompt = context_header(settings, repo, task, comments, &[]);
 
     prompt.push_str(&format!(
         "# Resolving a merge conflict\n\
@@ -269,7 +292,7 @@ pub fn build_revisit(
     } else {
         reason.trim().to_string()
     };
-    let mut prompt = context_header(settings, repo, task, comments);
+    let mut prompt = context_header(settings, repo, task, comments, &[]);
 
     prompt.push_str(&format!(
         "# Revisiting a stuck pull request\n\
@@ -319,7 +342,7 @@ pub fn build_address_review(
     comments: &[IssueComment],
 ) -> String {
     let repo_path = format!("/workspace/{}", repo_dir_name(&repo.full_name));
-    let mut prompt = context_header(settings, repo, task, comments);
+    let mut prompt = context_header(settings, repo, task, comments, &[]);
 
     prompt.push_str(&format!(
         "# Addressing pull request review comments\n\
@@ -433,6 +456,7 @@ fn context_header(
     repo: &Repository,
     task: &Task,
     comments: &[IssueComment],
+    attachments: &[Attachment],
 ) -> String {
     let mut prompt = String::new();
 
@@ -485,6 +509,10 @@ fn context_header(
     // The full discussion (when any), so the agent treats comments as part of the
     // brief rather than only the title and description.
     prompt.push_str(&render_discussion(comments));
+
+    // Ticket attachments (issue #291): inlined logs and openable image/file refs,
+    // so a UI bug or a log-driven bug can be worked from the ticket alone.
+    prompt.push_str(&render_attachments(attachments));
 
     // Shared by every mode: noticing missing tooling can happen on any run, so
     // the recommend-improvements guidance lives in the common header.
@@ -550,6 +578,67 @@ fn render_discussion(comments: &[IssueComment]) -> String {
     }
 
     section
+}
+
+/// Renders the ticket's attachments for the brief (issue #291).
+///
+/// A small text/log attachment is inlined verbatim (its content already head/tail
+/// capped by the loader) so the agent reads it directly; an image or binary is
+/// listed as an openable ref the agent fetches from the API by id. Returns an
+/// empty string when there are no attachments, so a plain ticket's brief is
+/// unchanged.
+fn render_attachments(attachments: &[Attachment]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+
+    let mut section = format!(
+        "# Attachments\n\
+         This ticket has {count} attachment{plural}. Text and log files are inlined below. \
+         Image and binary files are stored in Seraphim; fetch one into your workspace with \
+         `curl -fsS \"$SERAPHIM_API_URL/api/v1/attachments/<id>\" -o <file>`, using the id given \
+         per file. A UI bug's screenshots and a crash's logs are part of the brief: review them.\n\n",
+        count = attachments.len(),
+        plural = if attachments.len() == 1 { "" } else { "s" },
+    );
+
+    for attachment in attachments {
+        // Build each entry as a local string, then push it: this keeps the loop off
+        // the `push_str(&format!(...))` form clippy flags as `format_push_string`.
+        let entry = match &attachment.inline_text {
+            Some(text) => format!(
+                "## {name} ({mime}, {size})\n```\n{text}\n```\n\n",
+                name = attachment.file_name,
+                mime = attachment.mime,
+                size = human_size(attachment.byte_size),
+            ),
+            None => format!(
+                "- {name} ({mime}, {size}) - id `{id}`: \
+                 `curl -fsS \"$SERAPHIM_API_URL/api/v1/attachments/{id}\" -o \"{name}\"`\n",
+                name = attachment.file_name,
+                mime = attachment.mime,
+                size = human_size(attachment.byte_size),
+                id = attachment.id,
+            ),
+        };
+        section.push_str(&entry);
+    }
+    section.push('\n');
+    section
+}
+
+/// A compact human-readable byte size (e.g. `4 KB`, `2 MB`), for the attachment
+/// listing. Integer division keeps it free of float casts.
+fn human_size(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = 1024 * 1024;
+    if bytes >= MB {
+        format!("{} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Guidance, shared by the conflict-resolution prompts, on keeping database
@@ -903,6 +992,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         // An internal ticket has no upstream issue, so the brief and the PR step
@@ -922,6 +1012,7 @@ mod tests {
             &sample_repo(),
             &sample_task(),
             "seraphim/issue-57",
+            &[],
             &[],
             &[],
             &[],
@@ -950,6 +1041,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!(prompt.contains("Work Jira ticket BUG-42: Crash on empty input"));
@@ -970,6 +1062,7 @@ mod tests {
             &sample_repo(),
             &sample_task(),
             "seraphim/issue-57",
+            &[],
             &[],
             &[],
             &[],
@@ -1002,6 +1095,7 @@ mod tests {
             &[],
             &targets,
             &[],
+            &[],
         );
 
         assert!(prompt.contains("This ticket targets multiple repositories"));
@@ -1019,8 +1113,64 @@ mod tests {
             &[],
             &[sample_repo()],
             &[],
+            &[],
         );
         assert!(!prompt.contains("targets multiple repositories"));
+    }
+
+    #[test]
+    fn attachments_inline_logs_and_list_image_refs() {
+        // Issue #291: a text/log attachment is inlined verbatim so the agent reads
+        // it directly, while an image is listed with a fetch recipe keyed by id.
+        let attachments = [
+            Attachment {
+                file_name: "crash.log".to_string(),
+                mime: "text/plain".to_string(),
+                byte_size: 42,
+                id: "11111111-1111-1111-1111-111111111111".to_string(),
+                inline_text: Some("panic: index out of bounds".to_string()),
+            },
+            Attachment {
+                file_name: "screen.png".to_string(),
+                mime: "image/png".to_string(),
+                byte_size: 2048,
+                id: "22222222-2222-2222-2222-222222222222".to_string(),
+                inline_text: None,
+            },
+        ];
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+            &attachments,
+        );
+
+        assert!(prompt.contains("# Attachments"));
+        // The log is inlined verbatim.
+        assert!(prompt.contains("crash.log"));
+        assert!(prompt.contains("panic: index out of bounds"));
+        // The image is a fetchable ref by id, not inlined.
+        assert!(prompt.contains("22222222-2222-2222-2222-222222222222"));
+        assert!(prompt.contains("$SERAPHIM_API_URL/api/v1/attachments/"));
+    }
+
+    #[test]
+    fn no_attachments_means_no_attachments_section() {
+        let prompt = build(
+            &sample_settings(),
+            &sample_repo(),
+            &sample_task(),
+            "seraphim/issue-57",
+            &[],
+            &[sample_repo()],
+            &[],
+            &[],
+        );
+        assert!(!prompt.contains("# Attachments"));
     }
 
     #[test]
@@ -1038,6 +1188,7 @@ mod tests {
             &[],
             &[sample_repo()],
             &dependencies,
+            &[],
         );
 
         assert!(prompt.contains("Stacked on unmerged dependencies"));
@@ -1060,6 +1211,7 @@ mod tests {
             &[],
             &[sample_repo()],
             &[],
+            &[],
         );
         assert!(!prompt.contains("Stacked on unmerged dependencies"));
     }
@@ -1076,6 +1228,7 @@ mod tests {
             "seraphim/issue-57",
             &[],
             &[sample_repo()],
+            &[],
             &[],
         );
         assert!(prompt.contains("seraphim-ask <<'JSON'"));
@@ -1098,6 +1251,7 @@ mod tests {
             &[],
             &[sample_repo()],
             &[],
+            &[],
         );
         assert!(prompt.contains("computed-style checks"));
         assert!(prompt.contains("/usr/local/share/seraphim/visual-checks.md"));
@@ -1119,6 +1273,7 @@ mod tests {
             &[],
             &[sample_repo()],
             &[],
+            &[],
         );
         assert!(prompt.contains("/usr/local/share/seraphim/visual-regression.md"));
         assert!(prompt.contains("opt-in per repo"));
@@ -1136,6 +1291,7 @@ mod tests {
             "seraphim/issue-57",
             &[],
             &[sample_repo()],
+            &[],
             &[],
         );
         assert!(prompt.contains("layout primitives"));

@@ -5,7 +5,7 @@
   import { goto } from '$app/navigation'
   import { toast } from 'svelte-sonner'
 
-  import { createInternalTask, listRepos } from '$lib/api'
+  import { createInternalTask, listRepos, uploadTaskAttachment } from '$lib/api'
   import * as Card from '$lib/components/ui/card'
   import { Button, buttonVariants } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -24,6 +24,14 @@
   let saving = $state(false)
   let repos = $state<Repository[]>([])
   let selectedRepoIds = $state<string[]>([])
+  // Files the operator attached (issue #291); uploaded to the ticket once it is
+  // created (attachments key on a task id, which only exists after creation).
+  let attachmentFiles = $state<File[]>([])
+
+  function onAttachmentsChange(event: Event) {
+    const input = event.target as HTMLInputElement
+    attachmentFiles = input.files ? Array.from(input.files) : []
+  }
 
   onMount(async () => {
     repos = await listRepos()
@@ -62,6 +70,10 @@
         state: open ? 'open' : 'closed',
         repo_ids: selectedRepoIds
       })
+      // Upload any attached files to the freshly created ticket (issue #291).
+      for (const file of attachmentFiles) {
+        await uploadTaskAttachment(task.id, file)
+      }
       toast.success('Issue created')
       goto(`/task/${task.id}`)
     } catch {
@@ -97,6 +109,24 @@
           bind:value={description}
           class="resize-y"
         />
+      </div>
+
+      <div class="grid gap-2">
+        <Label for="attachments">Attachments</Label>
+        <input
+          id="attachments"
+          type="file"
+          multiple
+          onchange={onAttachmentsChange}
+          class="text-sm file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-1.5 file:text-sm hover:file:bg-accent"
+        />
+        <span class="text-xs text-muted-foreground">
+          Attach screenshots or log files. The agent sees images as openable refs and inlines small
+          text/log files into its brief. Uploaded when the ticket is created.
+          {#if attachmentFiles.length}
+            <span class="text-foreground">{attachmentFiles.length} selected.</span>
+          {/if}
+        </span>
       </div>
 
       <div class="grid gap-2">

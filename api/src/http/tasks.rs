@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use super::ApiResult;
 use crate::db::models::{
-    EnvSuggestion, Event, Question, SourceKind, Task, TaskColumn, TaskPullRequest, TaskScreenshot,
+    EnvSuggestion, Event, Question, SourceKind, Task, TaskAttachment, TaskColumn, TaskPullRequest,
+    TaskScreenshot,
 };
 use crate::db::queries;
 use crate::git;
@@ -62,6 +63,10 @@ pub struct TaskDetail {
     /// Screenshots the agent captured during the task (issue #248), newest first,
     /// metadata only; the bytes stream from `/screenshots/:id`.
     pub screenshots: Vec<TaskScreenshot>,
+    /// Attachments on the ticket (issue #291): operator uploads and pulled
+    /// source-ticket files, oldest first, metadata only; the bytes stream from
+    /// `/attachments/:id`.
+    pub attachments: Vec<TaskAttachment>,
 }
 
 /// `GET /api/v1/tasks/:id` - the card, its conversation events, its environment
@@ -82,6 +87,7 @@ pub async fn get_task(
     let questions = queries::list_questions_for_task(&state.db, id).await?;
     let pull_requests = queries::list_task_prs(&state.db, id).await?;
     let screenshots = queries::list_screenshots_for_task(&state.db, id).await?;
+    let attachments = queries::list_attachments_for_task(&state.db, id).await?;
     Ok(Json(TaskDetail {
         task,
         events,
@@ -89,6 +95,7 @@ pub async fn get_task(
         questions,
         pull_requests,
         screenshots,
+        attachments,
     })
     .into_response())
 }
