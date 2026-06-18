@@ -244,7 +244,10 @@ pub async fn prepare_branch(
     let mut script = String::from("set -e\n");
     script.push_str(&prelude_agents(settings));
     // Ensure the focus repo exists (clone + setup on first sight), then branch.
-    script.push_str(&repo_block(repo, false));
+    // Repos opted into `setup_script_always_run` also re-run setup on the existing
+    // clone, so a stacked-dependency merge that added deps gets them reinstalled
+    // before this task's build/test (issue #275).
+    script.push_str(&repo_block(repo, repo.setup_script_always_run));
     script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
     script.push_str(reset_tree_snippet());
     script.push_str(&branch_prep_snippet(&repo.default_branch, branch));
@@ -288,8 +291,9 @@ pub async fn prepare_existing_branch(
     let mut script = String::from("set -e\n");
     script.push_str(&prelude_agents(settings));
     // Ensure the focus repo exists (clone on first sight), then sync to the
-    // remote branch tip CI actually tested.
-    script.push_str(&repo_block(repo, false));
+    // remote branch tip CI actually tested. Honor `setup_script_always_run` here
+    // too so a fix turn rebuilds deps if the branch's deps changed (issue #275).
+    script.push_str(&repo_block(repo, repo.setup_script_always_run));
     script.push_str(&format!("cd \"{dir}\"\n", dir = dir));
     script.push_str(reset_tree_snippet());
     script.push_str(&format!(
@@ -330,8 +334,10 @@ fn submodule_update_snippet(dir: &str) -> String {
     )
 }
 
-/// Bash to clone-or-update a single repo, write its CLAUDE.md, and (on a fresh
-/// clone, or always during a full provision) run its setup script.
+/// Bash to clone-or-update a single repo, write its CLAUDE.md, and run its setup
+/// script. Setup always runs on a fresh clone; on an existing clone it runs only
+/// when `always_setup` is set (a full provision, or a repo opted into
+/// `setup_script_always_run` for per-task re-runs, issue #275).
 fn repo_block(repo: &Repository, always_setup: bool) -> String {
     let dir = format!("/workspace/{}", repo_dir_name(&repo.full_name));
     let setup = repo.setup_script.trim();
@@ -345,7 +351,8 @@ fn repo_block(repo: &Repository, always_setup: bool) -> String {
         format!("(\ncd \"{dir}\"\n{setup}\n)\n")
     };
 
-    // Run setup after a fresh clone; during a full provision, run it every time.
+    // Run setup after a fresh clone; on an existing clone, only when the caller
+    // opted in (full provision, or a per-task re-run for an opted-in repo, #275).
     let clone_setup = setup_block.clone();
     let update_setup = if always_setup {
         setup_block
@@ -432,6 +439,7 @@ mod tests {
             enabled: true,
             sync_issues: false,
             issue_labels: Vec::new(),
+            setup_script_always_run: false,
             sync_error: None,
             sync_error_at: None,
             created_at: Utc::now(),
@@ -482,6 +490,24 @@ mod tests {
         assert!(script.contains("--get-regexp"));
         assert!(script.contains("BRAND_DEPLOY_KEY"));
         assert!(script.contains("exit 1"));
+    }
+
+    #[test]
+    fn repo_block_reruns_setup_on_existing_clone_only_when_opted_in() {
+        // A repo with a setup script. The marker is distinctive so we can count how
+        // many times the setup block is emitted across the clone/update branches.
+        let mut repo = repo();
+        repo.setup_script = "yarn install --frozen-lockfile".to_string();
+
+        // Per-task default (existing clone): setup runs on a fresh clone only, so
+        // the marker appears exactly once (issue #275: opted-out repos unchanged).
+        let once = repo_block(&repo, false);
+        assert_eq!(once.matches("yarn install --frozen-lockfile").count(), 1);
+
+        // Opted in (or a full provision): setup also runs on the existing clone, so
+        // the marker appears in both the clone and the update branch.
+        let twice = repo_block(&repo, true);
+        assert_eq!(twice.matches("yarn install --frozen-lockfile").count(), 2);
     }
 
     #[test]

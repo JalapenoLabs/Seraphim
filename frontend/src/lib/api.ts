@@ -282,6 +282,8 @@ export type UpsertRepoRequest = {
   enabled?: boolean
   sync_issues?: boolean
   issue_labels?: string[]
+  // Re-run the setup script before every task, not just on first clone (issue #275).
+  setup_script_always_run?: boolean
 }
 
 export function upsertRepo(body: UpsertRepoRequest) {

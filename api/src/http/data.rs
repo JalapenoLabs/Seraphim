@@ -117,6 +117,9 @@ pub struct RepoExport {
     pub enabled: bool,
     pub sync_issues: bool,
     pub issue_labels: Vec<String>,
+    // Re-run the setup script before every task (issue #275); omitted = off.
+    #[serde(default)]
+    pub setup_script_always_run: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -172,6 +175,7 @@ pub async fn export(State(state): State<AppState>) -> ApiResult<Json<ConfigBundl
                 enabled: repo.enabled,
                 sync_issues: repo.sync_issues,
                 issue_labels: repo.issue_labels,
+                setup_script_always_run: repo.setup_script_always_run,
             })
             .collect(),
     };
@@ -230,6 +234,7 @@ pub async fn import(
             repo.enabled,
             repo.sync_issues,
             &repo.issue_labels,
+            repo.setup_script_always_run,
         )
         .await?;
     }

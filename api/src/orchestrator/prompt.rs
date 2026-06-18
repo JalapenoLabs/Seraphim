@@ -828,6 +828,7 @@ mod tests {
             enabled: true,
             sync_issues: false,
             issue_labels: Vec::new(),
+            setup_script_always_run: false,
             sync_error: None,
             sync_error_at: None,
             created_at: chrono::Utc::now(),

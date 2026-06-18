@@ -292,6 +292,8 @@ export type Repository = {
   enabled: boolean
   sync_issues: boolean
   issue_labels: string[]
+  // Re-run the setup script before every task, not just on first clone (issue #275).
+  setup_script_always_run: boolean
   // The last issue-sync failure for this repo (issue #213), or null when the most
   // recent sync succeeded. Cleared automatically on the next successful sync.
   sync_error: string | null

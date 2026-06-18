@@ -147,7 +147,9 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
 - **`repositories`** — `full_name`, `clone_url`, `default_branch`,
   `branch_template`, `setup_script` (per-repo setup), `instructions`,
   `review_policy` (NULL = inherit default), `enabled`, `sync_issues` (poll this
-  repo for issues), `issue_labels` (label filter), and `sync_error` /
+  repo for issues), `issue_labels` (label filter), `setup_script_always_run`
+  (issue #275: re-run `setup_script` on the persistent clone before every task,
+  not just on first clone / full provision; off by default), and `sync_error` /
   `sync_error_at` (issue #213: the last issue-sync failure for the repo, NULL when
   the most recent sync succeeded; set when listing the repo's issues fails, cleared
   on the next clean sync). There is **no** separate issue-source entity; a repo
@@ -285,7 +287,13 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
     live in each repo under test, not here.
 - **Two-tier setup:** environment setup (`settings.base_setup_script`) runs once
   per provision/recreate (install CLIs/toolchains); per-repo setup
-  (`repositories.setup_script`) runs after each clone (e.g. `yarn install`).
+  (`repositories.setup_script`) runs after each clone (e.g. `yarn install`). A
+  repo can opt into `setup_script_always_run` (issue #275) to re-run its setup
+  script before *every* task on the persistent clone, not just on first clone,
+  so a stacked-dependency merge that adds new deps gets them reinstalled before
+  the task's build/test. The toggle flows through `provision::prepare_branch` /
+  `prepare_existing_branch` into `repo_block`'s `always_setup` (which already
+  governed the full-provision re-run); no "did the lockfile change" guard.
 - **Submodules (issue #251):** a cloned repo's git submodules are initialized
   automatically (`provision::submodule_update_snippet`, generic to any repo with a
   `.gitmodules`), before its setup script, on clone and after a branch checkout.

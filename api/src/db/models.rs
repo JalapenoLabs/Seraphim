@@ -385,6 +385,10 @@ pub struct Repository {
     pub sync_issues: bool,
     /// Only sync issues carrying all of these labels (empty = no filter).
     pub issue_labels: Vec<String>,
+    /// Re-run [`Self::setup_script`] on the persistent clone before every task,
+    /// not just on first clone / full provision (issue #275). Lets a repo
+    /// reinstall dependencies after a stacked-dependency merge adds new ones.
+    pub setup_script_always_run: bool,
     /// The last issue-sync failure for this repo (issue #213), or `None` when the
     /// most recent sync succeeded. Cleared on the next successful sync.
     pub sync_error: Option<String>,

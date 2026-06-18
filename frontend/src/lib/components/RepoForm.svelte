@@ -32,6 +32,7 @@
     review_policy: ReviewPolicy | ''
     instructions: string
     setup_script: string
+    setup_script_always_run: boolean
     enabled: boolean
     sync_issues: boolean
     issue_labels: string
@@ -39,7 +40,13 @@
 
   type FormPrefs = Pick<
     FormState,
-    'default_branch' | 'branch_template' | 'review_policy' | 'enabled' | 'sync_issues' | 'issue_labels'
+    | 'default_branch'
+    | 'branch_template'
+    | 'review_policy'
+    | 'enabled'
+    | 'sync_issues'
+    | 'issue_labels'
+    | 'setup_script_always_run'
   >
 
   function loadPrefs(): FormPrefs {
@@ -49,7 +56,8 @@
       review_policy: '',
       enabled: true,
       sync_issues: true,
-      issue_labels: ''
+      issue_labels: '',
+      setup_script_always_run: false
     }
     if (typeof localStorage === 'undefined') {
       return fallback
@@ -72,7 +80,8 @@
       review_policy: state.review_policy,
       enabled: state.enabled,
       sync_issues: state.sync_issues,
-      issue_labels: state.issue_labels
+      issue_labels: state.issue_labels,
+      setup_script_always_run: state.setup_script_always_run
     }
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
   }
@@ -87,6 +96,7 @@
         review_policy: repo.review_policy ?? '',
         instructions: repo.instructions,
         setup_script: repo.setup_script,
+        setup_script_always_run: repo.setup_script_always_run,
         enabled: repo.enabled,
         sync_issues: repo.sync_issues,
         issue_labels: repo.issue_labels.join(', ')
@@ -139,6 +149,7 @@
       review_policy: form.review_policy === '' ? null : form.review_policy,
       instructions: form.instructions,
       setup_script: form.setup_script,
+      setup_script_always_run: form.setup_script_always_run,
       enabled: form.enabled,
       sync_issues: form.sync_issues,
       issue_labels: labels
@@ -233,6 +244,18 @@
         sequentially, e.g. <code class="rounded bg-secondary px-1 py-0.5 text-xs">pnpm install</code> or
         <code class="rounded bg-secondary px-1 py-0.5 text-xs">yarn install</code>. pnpm, yarn, and npm are
         preinstalled, so skip <code class="rounded bg-secondary px-1 py-0.5 text-xs">corepack enable</code>.
+      </p>
+    </div>
+
+    <div class="space-y-1.5">
+      <div class="flex items-center gap-2">
+        <Switch id="rsetup-always" bind:checked={form.setup_script_always_run} />
+        <Label for="rsetup-always">Re-run the setup script before every task</Label>
+      </div>
+      <p class="text-xs leading-relaxed text-muted-foreground">
+        By default the setup script runs only on a fresh clone. Turn this on to re-run it before
+        every task, so dependencies are reinstalled after a stacked-dependency branch is merged in
+        (which can add new dev dependencies the persistent clone is missing).
       </p>
     </div>
 

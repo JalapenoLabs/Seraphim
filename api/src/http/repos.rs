@@ -107,6 +107,10 @@ pub struct UpsertRepoRequest {
     pub sync_issues: bool,
     #[serde(default)]
     pub issue_labels: Vec<String>,
+    /// Re-run the repo's setup script before every task, not just on first clone
+    /// (issue #275).
+    #[serde(default)]
+    pub setup_script_always_run: bool,
 }
 
 fn default_branch() -> String {
@@ -143,6 +147,7 @@ pub async fn upsert(
         body.enabled,
         body.sync_issues,
         &body.issue_labels,
+        body.setup_script_always_run,
     )
     .await?;
     state.notify_board();
@@ -169,6 +174,7 @@ pub async fn update(
         body.enabled,
         body.sync_issues,
         &body.issue_labels,
+        body.setup_script_always_run,
     )
     .await?;
     state.notify_board();

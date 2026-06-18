@@ -874,15 +874,16 @@ pub async fn upsert_repository(
     enabled: bool,
     sync_issues: bool,
     issue_labels: &[String],
+    setup_script_always_run: bool,
 ) -> sqlx::Result<Repository> {
     sqlx::query_as::<_, Repository>(
         // New repos default to the `main` railway (issue #201). Set via subquery
         // so the existing bound-parameter numbering is untouched.
         "INSERT INTO repositories \
          (railway_id, full_name, clone_url, default_branch, branch_template, setup_script, \
-          instructions, review_policy, enabled, sync_issues, issue_labels) \
+          instructions, review_policy, enabled, sync_issues, issue_labels, setup_script_always_run) \
          VALUES ((SELECT id FROM railways WHERE is_main), \
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (full_name) DO UPDATE SET \
          clone_url = EXCLUDED.clone_url, \
          default_branch = EXCLUDED.default_branch, \
@@ -893,6 +894,7 @@ pub async fn upsert_repository(
          enabled = EXCLUDED.enabled, \
          sync_issues = EXCLUDED.sync_issues, \
          issue_labels = EXCLUDED.issue_labels, \
+         setup_script_always_run = EXCLUDED.setup_script_always_run, \
          updated_at = now() \
          RETURNING *",
     )
@@ -906,6 +908,7 @@ pub async fn upsert_repository(
     .bind(enabled)
     .bind(sync_issues)
     .bind(issue_labels)
+    .bind(setup_script_always_run)
     .fetch_one(pool)
     .await
 }
@@ -929,12 +932,13 @@ pub async fn update_repository(
     enabled: bool,
     sync_issues: bool,
     issue_labels: &[String],
+    setup_script_always_run: bool,
 ) -> sqlx::Result<Repository> {
     sqlx::query_as::<_, Repository>(
         "UPDATE repositories SET \
          full_name = $2, clone_url = $3, default_branch = $4, branch_template = $5, \
          setup_script = $6, instructions = $7, review_policy = $8, enabled = $9, \
-         sync_issues = $10, issue_labels = $11, updated_at = now() \
+         sync_issues = $10, issue_labels = $11, setup_script_always_run = $12, updated_at = now() \
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
@@ -948,6 +952,7 @@ pub async fn update_repository(
     .bind(enabled)
     .bind(sync_issues)
     .bind(issue_labels)
+    .bind(setup_script_always_run)
     .fetch_one(pool)
     .await
 }
@@ -980,6 +985,9 @@ pub async fn create_repository_if_absent(
         true,
         sync_issues,
         issue_labels,
+        // Org-imported repos default to running setup only on first clone; the
+        // operator can opt a repo into per-task re-runs later (issue #275).
+        false,
     )
     .await
 }
