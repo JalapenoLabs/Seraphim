@@ -188,7 +188,13 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
   Follow-ups get a light de-dup: a normalized-title check (`suggestions::already_queued`,
   unit-tested) drops any whose title matches a task still on the board, so the agent
   never re-recommends queued work. Both standing instructions live in the shared
-  prompt header (`ENVIRONMENT_SUGGESTIONS`, `FOLLOW_UP_SUGGESTIONS`).
+  prompt header (`ENVIRONMENT_SUGGESTIONS`, `FOLLOW_UP_SUGGESTIONS`). Beyond the
+  per-task checkboxes, a top-nav **Suggestions** tab (`/suggestions`, issue #324)
+  aggregates every recommendation across all tasks for bulk triage:
+  `GET /suggestions` (`queries::list_all_suggestions`) returns each suggestion plus
+  its task's title/source/repo link (`AggregatedSuggestion`), and the page reuses
+  the same ack and create-issue actions, with open items on top and acknowledged
+  ones in a greyed, hover-revealed bottom section.
 - **`questions`** — decisions the agent escalated to the user, stored on the task
   (`prompt`, up to three suggested `options`, `status`, the chosen `answer`).
   Posted by the agent's `seraphim-ask` helper, answered in the task view, and

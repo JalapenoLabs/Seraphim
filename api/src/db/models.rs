@@ -717,6 +717,28 @@ pub struct EnvSuggestion {
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
+/// One suggestion plus the context of the task it came from, for the aggregated
+/// "Suggestions" management view (issue #324). Superset of [`EnvSuggestion`]: the
+/// extra fields let the list link back to the originating task and drive the same
+/// one-click create-issue button without a per-task fetch.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AggregatedSuggestion {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub title: String,
+    pub detail: String,
+    pub kind: String,
+    pub acknowledged: bool,
+    pub created_at: DateTime<Utc>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    /// The originating task's title, so the row names where the suggestion came from.
+    pub task_title: String,
+    /// The originating task's source, so the create-issue button defaults correctly.
+    pub task_source: SourceKind,
+    /// Whether that task has a linked repo (a GitHub issue needs one).
+    pub task_repo_linked: bool,
+}
+
 /// A recorded "heart attack": a turn that died mid-flight (the agent hung with no
 /// output, its stream broke, or the turn aborted internally). The defibrillator
 /// records one so the operator is alerted and the diagnostic detail survives for
