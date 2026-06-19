@@ -3160,12 +3160,59 @@ pub async fn latest_compose_session_id(pool: &PgPool) -> sqlx::Result<Option<Str
     .map(Option::flatten)
 }
 
-/// Whether a compose turn is currently running (so a second is rejected).
+/// How long a `running` compose turn may go without producing output before it is
+/// treated as a dead orphan rather than a live turn (issue #316).
+///
+/// The compose run loop (`orchestrator::compose`) bounds each wait for the next
+/// stream item by its 20-minute `HEARTBEAT_TIMEOUT` and finalizes the turn itself
+/// on a longer silence, so a `running` row whose latest activity is older than this
+/// can only be left by a crashed or interrupted process (compose has no
+/// defibrillator). A few minutes above the heartbeat, so a live-but-quiet turn is
+/// never prematurely judged stale (mirrors the agent watchdog's margin).
+const COMPOSE_STALE_AFTER_MINUTES: i64 = 25;
+
+/// A SQL predicate (on alias `t` = `compose_turns`) that holds only for a `running`
+/// compose turn that is genuinely live: it has produced output, or just started,
+/// within [`COMPOSE_STALE_AFTER_MINUTES`]. An orphan left by a crash fails it, so
+/// the live counters ignore stale rows (issue #316).
+fn compose_live_predicate() -> String {
+    format!(
+        "t.status = 'running' AND GREATEST(t.started_at, \
+         COALESCE((SELECT MAX(e.created_at) FROM compose_events e WHERE e.turn_id = t.id), \
+         t.started_at)) > now() - make_interval(mins => {COMPOSE_STALE_AFTER_MINUTES})"
+    )
+}
+
+/// Finalizes any still-`running` compose turn: marks it `failed` with
+/// `finished_at = started_at` (zero duration), so it never folds orphan time into
+/// the compose worked-time gauge. Mirrors [`reclaim_orphaned_turns`] /
+/// [`finalize_orphaned_agent_turns`] for the agent's `turns` (issue #316).
+///
+/// Compose is single-threaded and has no defibrillator, so a turn whose process
+/// dies or is interrupted mid-session would otherwise linger `running` forever,
+/// inflating the gauge and blocking new turns. This runs in two places: before a
+/// new turn starts (so a superseded turn never lingers) and at startup (so a turn
+/// orphaned by a restart is cleaned up). Returns how many it finalized.
+pub async fn finalize_orphaned_compose_turns(pool: &PgPool) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "UPDATE compose_turns SET status = 'failed', finished_at = started_at \
+         WHERE status = 'running'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Whether a compose turn is currently and genuinely running (so a second is
+/// rejected). A stale `running` row left by a crash is ignored (issue #316), so a
+/// leaked turn never blocks the assistant forever; the next turn supersedes it.
 pub async fn compose_turn_running(pool: &PgPool) -> sqlx::Result<bool> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM compose_turns WHERE status = 'running'")
-            .fetch_one(pool)
-            .await?;
+    let count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM compose_turns t WHERE {}",
+        compose_live_predicate()
+    ))
+    .fetch_one(pool)
+    .await?;
     Ok(count > 0)
 }
 
@@ -3175,6 +3222,10 @@ pub async fn create_compose_turn(
     prompt: &str,
     session_id: Option<&str>,
 ) -> sqlx::Result<Uuid> {
+    // Finalize any prior still-`running` compose turn before opening a new one, so a
+    // turn orphaned by a crash or interrupt never lingers (compose has no
+    // defibrillator) and inflates the gauge (issue #316).
+    finalize_orphaned_compose_turns(pool).await?;
     let next_idx: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(idx) + 1, 0) FROM compose_turns")
         .fetch_one(pool)
         .await?;
@@ -3251,12 +3302,15 @@ pub async fn compose_stats(pool: &PgPool) -> sqlx::Result<StatsAggregate> {
         .await
 }
 
-/// When the running compose turn started, for the live time ticker.
+/// When the genuinely-live compose turn started, for the live time ticker. A stale
+/// `running` row left by a crash is ignored, so the gauge never ticks forever on a
+/// leaked turn (issue #316).
 pub async fn compose_running_since(pool: &PgPool) -> sqlx::Result<Option<DateTime<Utc>>> {
-    sqlx::query_scalar(
-        "SELECT started_at FROM compose_turns WHERE status = 'running' \
-         ORDER BY started_at DESC LIMIT 1",
-    )
+    sqlx::query_scalar(&format!(
+        "SELECT t.started_at FROM compose_turns t WHERE {} \
+         ORDER BY t.started_at DESC LIMIT 1",
+        compose_live_predicate()
+    ))
     .fetch_optional(pool)
     .await
 }
@@ -3483,6 +3537,15 @@ mod tests {
         .unwrap()
     }
 
+    /// A raw count of `running` compose turns, with no staleness filter, to prove a
+    /// turn was actually finalized (not merely ignored by the live counters, #316).
+    async fn raw_running_compose_turns(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM compose_turns WHERE status = 'running'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     async fn set_task_active(pool: &PgPool, task_id: Uuid, active: bool) {
         let (column, status) = if active {
             (TaskColumn::InProgress, TaskStatus::Working)
@@ -3624,6 +3687,122 @@ mod tests {
         // Tear down: close our pool, then drop the throwaway database (a DB cannot
         // be dropped while a connection to it is open). Best-effort; the CI Postgres
         // is torn down with the job regardless.
+        pool.close().await;
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+            .execute(&admin)
+            .await;
+    }
+
+    /// The compose assistant's `running` turns get the same orphan guard as the
+    /// agent's (issue #316): a new turn supersedes a prior running one, and the live
+    /// counters ignore a stale row left by a crash, so a leaked turn never inflates
+    /// the compose gauge nor blocks the assistant forever.
+    ///
+    /// DB-gated like the #297 test: runs only when `DATABASE_URL` is set, against a
+    /// throwaway database of its own; otherwise it skips.
+    #[tokio::test]
+    async fn orphaned_running_compose_turns_never_race_the_gauge() {
+        const TEST_DB: &str = "seraphim_issue316_test";
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping orphaned_running_compose_turns_never_race_the_gauge: DATABASE_URL unset"
+            );
+            return;
+        };
+        let Some((prefix, _)) = url.rsplit_once('/') else {
+            eprintln!("skipping: DATABASE_URL has no database segment");
+            return;
+        };
+        let Ok(admin) = PgPool::connect(&format!("{prefix}/postgres")).await else {
+            eprintln!("skipping: cannot reach the Postgres maintenance database");
+            return;
+        };
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+            .execute(&admin)
+            .await;
+        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {TEST_DB}"))
+            .execute(&admin)
+            .await
+        {
+            eprintln!("skipping: cannot create the throwaway test database: {error}");
+            return;
+        }
+
+        let pool = PgPool::connect(&format!("{prefix}/{TEST_DB}"))
+            .await
+            .expect("connect to the throwaway test database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        // A fresh turn is live: the gauge counts it and a second turn is rejected.
+        let first = create_compose_turn(&pool, "draft some issues", None)
+            .await
+            .expect("first compose turn");
+        assert!(compose_turn_running(&pool).await.unwrap());
+        assert!(compose_running_since(&pool).await.unwrap().is_some());
+
+        // Supersede: starting a new turn finalizes the prior running one, so at most
+        // one compose turn is ever `running` (mirrors finalize-on-supersede, #297).
+        let second = create_compose_turn(&pool, "another batch", None)
+            .await
+            .expect("second compose turn");
+        assert_ne!(first, second);
+        assert_eq!(
+            raw_running_compose_turns(&pool).await,
+            1,
+            "starting a new compose turn must finalize the prior running one"
+        );
+        assert!(compose_turn_running(&pool).await.unwrap());
+
+        // Finalizing (a turn's normal end, or a startup reclaim) leaves nothing
+        // running, so the gauge reads idle.
+        finalize_orphaned_compose_turns(&pool)
+            .await
+            .expect("finalize");
+        assert_eq!(raw_running_compose_turns(&pool).await, 0);
+        assert!(!compose_turn_running(&pool).await.unwrap());
+        assert!(compose_running_since(&pool).await.unwrap().is_none());
+
+        // A stale `running` row left by a crash (old start, no recent activity) is a
+        // dead orphan: the live counters ignore it, so it neither inflates the gauge
+        // nor blocks new turns, even before it is finalized (issue #316).
+        let orphan_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compose_turns (idx, prompt, status, started_at) \
+             VALUES (100, 'orphan', 'running', now() - make_interval(mins => 90)) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert stale running turn");
+        assert_eq!(
+            raw_running_compose_turns(&pool).await,
+            1,
+            "the stale row is still 'running'"
+        );
+        assert!(
+            !compose_turn_running(&pool).await.unwrap(),
+            "a stale running compose turn must be ignored, not block the assistant"
+        );
+        assert!(compose_running_since(&pool).await.unwrap().is_none());
+
+        // Liveness is activity-based, not start-time-based: a turn that started long
+        // ago but produced output recently is still live (a genuinely long turn must
+        // not be misjudged stale). A recent event on the orphan makes it live again.
+        sqlx::query(
+            "INSERT INTO compose_events (turn_id, seq, type, payload, created_at) \
+             VALUES ($1, 0, 'assistant', '{}'::jsonb, now())",
+        )
+        .bind(orphan_id)
+        .execute(&pool)
+        .await
+        .expect("insert recent event");
+        assert!(
+            compose_turn_running(&pool).await.unwrap(),
+            "a long-running turn with recent activity is live, not stale"
+        );
+
+        // Tear down (see the #297 test for the rationale).
         pool.close().await;
         let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
             .execute(&admin)
