@@ -31,6 +31,7 @@ pub async fn board_stream(
                     ServerEvent::Task { .. }
                     | ServerEvent::Notification { .. }
                     | ServerEvent::RepoSyncError { .. }
+                    | ServerEvent::AnomalousEmptyPr { .. }
                     | ServerEvent::HeartAttack { .. }
                     | ServerEvent::TaskFinished { .. }
                     | ServerEvent::Compose { .. }
@@ -86,6 +87,16 @@ pub async fn notification_stream(
                     let payload = serde_json::json!({ "repo": repo, "message": message });
                     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                     yield Ok(Event::default().event("repo_sync_error").data(data));
+                }
+                Ok(ServerEvent::AnomalousEmptyPr { task_id, task_title, pr_ref, pr_url }) => {
+                    let payload = serde_json::json!({
+                        "task_id": task_id,
+                        "task_title": task_title,
+                        "pr_ref": pr_ref,
+                        "pr_url": pr_url,
+                    });
+                    let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("anomalous_empty_pr").data(data));
                 }
                 Ok(ServerEvent::Board) => {
                     yield Ok(Event::default().event("refresh").data("{}"));

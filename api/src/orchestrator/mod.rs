@@ -2612,17 +2612,11 @@ async fn review_task(
     for pr in &prs {
         // An empty open PR is parked-by-design (a blocker the agent documented):
         // it is never merged or re-dispatched, so skip the review-gate lookup
-        // entirely (issue #304). An empty PR that is NOT a draft is unexpected, so
-        // surface it as an anomaly rather than letting it sit silently; it is still
-        // held (never auto-merged), since GitHub cannot squash a zero-change PR.
+        // entirely (issue #304). A non-draft empty PR is unexpected; it is still held
+        // here (never auto-merged, since GitHub cannot squash a zero-change PR) and is
+        // surfaced as a one-time board anomaly by `refresh_task_prs` (issue #314),
+        // not by a warning that repeats every review tick.
         if pr.pr_state == "open" && pr.is_empty {
-            if !pr.is_draft {
-                warn!(
-                    task_id = %task.id,
-                    pr = %pr.pr_url,
-                    "open pull request has no changes and is not a draft; holding it as an anomaly rather than auto-merging"
-                );
-            }
             views.push(pr_review_of(pr, false, ReviewState::Clean));
             continue;
         }
@@ -3048,6 +3042,33 @@ async fn refresh_task_prs(
                 multi,
             )
             .await?;
+        }
+
+        // Surface a newly-anomalous PR once (issue #314): an open PR with an empty
+        // net diff that is NOT a draft is unexpected (a draft empty PR is a
+        // parked-by-design blocker, issue #304, and never surfaces here). The board's
+        // self-clearing banner carries the ongoing state; the one-time toast fires
+        // only on the transition into the anomaly, so the operator is not pinged
+        // every review tick. `pr` holds the pre-refresh row, so comparing it to the
+        // values just written gives the transition. Nudge the board whenever the
+        // anomaly appears or clears so the banner stays in sync.
+        let was_anomalous = pr.is_empty && !pr.is_draft;
+        let now_anomalous = pr_state == "open" && is_empty && !is_draft;
+        if now_anomalous && !was_anomalous {
+            warn!(
+                task_id = %task.id,
+                pr = %pr.pr_url,
+                "open pull request has no changes and is not a draft; surfacing it as a board anomaly"
+            );
+            state.notify_anomalous_empty_pr(
+                task.id,
+                task.title.clone(),
+                format!("{}#{}", short_repo_name(&pr.repo_full_name), pr.pr_number),
+                pr.pr_url.clone(),
+            );
+        }
+        if now_anomalous != was_anomalous {
+            state.notify_board();
         }
     }
     Ok(queries::list_task_prs(&state.db, task.id).await?)

@@ -310,6 +310,16 @@ export type RepoSyncError = {
   sync_error_at: string
 }
 
+// An open, non-draft PR with an empty net diff (issue #314): an anomaly the board
+// surfaces in a banner. Self-clearing once the PR gains changes, closes, or drafts.
+export type AnomalousEmptyPr = {
+  task_id: string
+  task_title: string
+  repo_full_name: string
+  pr_number: number
+  pr_url: string
+}
+
 // What deleting a repository will purge, shown in the delete confirmation.
 export type RepoDeletionImpact = {
   tasks: number
@@ -515,6 +525,8 @@ export type BoardResponse = {
   heart_attacks: HeartAttack[]
   // Repos whose last issue sync failed (issue #213), for a persistent banner.
   repo_sync_errors: RepoSyncError[]
+  // Open, non-draft empty PRs (issue #314), for the self-clearing anomaly banner.
+  anomalous_empty_prs: AnomalousEmptyPr[]
 }
 
 // A pull request the task has opened. A task may span several repos, so it can

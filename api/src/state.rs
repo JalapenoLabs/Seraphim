@@ -42,6 +42,17 @@ pub enum ServerEvent {
     /// #213); drives a one-time alert toast and native notification. The ongoing
     /// state is carried by the persistent board banner, not repeated per cycle.
     RepoSyncError { repo: String, message: String },
+    /// An open, non-draft pull request was first seen with an empty net diff (issue
+    /// #314), an anomaly. Fires once on that transition (not every review tick) to
+    /// drive a one-time toast + native notification; the ongoing state is carried by
+    /// the board's self-clearing anomaly banner.
+    AnomalousEmptyPr {
+        task_id: Uuid,
+        task_title: String,
+        /// `repo#number` of the offending PR, for the toast line.
+        pr_ref: String,
+        pr_url: String,
+    },
     /// A turn died mid-flight (a "heart attack") and the defibrillator handled it;
     /// drives an alert toast and native notification so the operator notices.
     HeartAttack {
@@ -397,6 +408,24 @@ impl AppState {
         let _ = self
             .events
             .send(ServerEvent::RepoSyncError { repo, message });
+    }
+
+    /// Announces that an open, non-draft PR was first seen empty (issue #314), so
+    /// the UI alerts the operator once on that transition. The self-clearing board
+    /// anomaly banner (driven by [`Self::notify_board`]) carries the ongoing state.
+    pub fn notify_anomalous_empty_pr(
+        &self,
+        task_id: Uuid,
+        task_title: String,
+        pr_ref: String,
+        pr_url: String,
+    ) {
+        let _ = self.events.send(ServerEvent::AnomalousEmptyPr {
+            task_id,
+            task_title,
+            pr_ref,
+            pr_url,
+        });
     }
 
     /// Announces a heart attack so the UI alerts the operator immediately, in

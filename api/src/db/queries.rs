@@ -12,12 +12,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials, DependencyCandidate,
-    EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment, JiraBoard, JiraDeployment,
-    NetworkAccessLevel, PendingPlacement, PendingQuestion, Question, QuestionOption,
-    QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository, ReviewPolicy, Settings,
-    SourceKind, StatsAggregate, Task, TaskAttachment, TaskColumn, TaskPullRequest, TaskScreenshot,
-    TaskStatus, Turn,
+    AnomalousEmptyPr, AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials,
+    DependencyCandidate, EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment,
+    JiraBoard, JiraDeployment, NetworkAccessLevel, PendingPlacement, PendingQuestion, Question,
+    QuestionOption, QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository,
+    ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskAttachment, TaskColumn,
+    TaskPullRequest, TaskScreenshot, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -2438,6 +2438,22 @@ pub async fn list_task_prs(pool: &PgPool, task_id: Uuid) -> sqlx::Result<Vec<Tas
 pub async fn list_open_task_prs(pool: &PgPool) -> sqlx::Result<Vec<TaskPullRequest>> {
     sqlx::query_as::<_, TaskPullRequest>(
         "SELECT * FROM task_pull_requests WHERE pr_state = 'open' ORDER BY task_id, created_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Open, non-draft pull requests whose net diff is empty, across all tasks, for the
+/// board's anomaly banner (issue #314). A draft empty PR is a parked-by-design
+/// blocker (issue #304) and is excluded; only the unexpected ones surface. Derived
+/// live from the tracked PR rows, so the banner clears itself the moment a PR gains
+/// changes, is closed, or is marked draft, with no separate state to reconcile.
+pub async fn list_anomalous_empty_prs(pool: &PgPool) -> sqlx::Result<Vec<AnomalousEmptyPr>> {
+    sqlx::query_as::<_, AnomalousEmptyPr>(
+        "SELECT pr.task_id, t.title AS task_title, pr.repo_full_name, pr.pr_number, pr.pr_url \
+         FROM task_pull_requests pr JOIN tasks t ON t.id = pr.task_id \
+         WHERE pr.pr_state = 'open' AND pr.is_empty = TRUE AND pr.is_draft = FALSE \
+         ORDER BY pr.updated_at DESC",
     )
     .fetch_all(pool)
     .await
