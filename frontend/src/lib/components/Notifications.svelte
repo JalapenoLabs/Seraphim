@@ -26,8 +26,9 @@
     taskTitle: string
     prompt: string
     // 'question' is the agent asking for input; 'heart_attack' is a dead turn;
-    // 'repo_sync_error' is a repo whose issue sync started failing (issue #213).
-    kind: 'question' | 'heart_attack' | 'repo_sync_error'
+    // 'repo_sync_error' is a repo whose issue sync started failing (issue #213);
+    // 'anomalous_empty_pr' is an open non-draft PR with no changes (issue #314).
+    kind: 'question' | 'heart_attack' | 'repo_sync_error' | 'anomalous_empty_pr'
   }
 
   function loadIds(key: string): Set<string> {
@@ -213,6 +214,22 @@
     playSound('attention')
   }
 
+  // An open, non-draft PR was first seen with no changes (issue #314). Fires once on
+  // that transition; the board's self-clearing anomaly banner carries the ongoing
+  // state. Clicking the toast opens the task.
+  function handleAnomalousEmptyPr(event: MessageEvent) {
+    const data = JSON.parse(event.data) as {
+      task_id: string
+      task_title: string
+      pr_ref: string
+      pr_url: string
+    }
+    const detail = `${data.pr_ref} has no changes and cannot be merged; close it or push the intended changes.`
+    pushToast(data.task_id, data.task_title, detail, 'anomalous_empty_pr')
+    notifyNatively(`Empty pull request: ${data.pr_ref}`, data.task_title)
+    playSound('attention')
+  }
+
   // A task finished (auto-merged to Done). Sound-only: the board already reflects
   // it, so no toast, just the completion chime.
   function handleTaskFinished() {
@@ -234,6 +251,7 @@
     eventSource.addEventListener('notification', handleNotification)
     eventSource.addEventListener('heart_attack', handleHeartAttack)
     eventSource.addEventListener('repo_sync_error', handleRepoSyncError)
+    eventSource.addEventListener('anomalous_empty_pr', handleAnomalousEmptyPr)
     eventSource.addEventListener('task_finished', handleTaskFinished)
     eventSource.addEventListener('refresh', () => {
       refresh()
@@ -331,7 +349,7 @@
   {#each toasts as toast (toast.id)}
     <div
       class="pointer-events-auto flex items-start overflow-hidden rounded-lg border bg-card shadow-2xl {toast.kind ===
-        'heart_attack' || toast.kind === 'repo_sync_error'
+        'heart_attack' || toast.kind === 'repo_sync_error' || toast.kind === 'anomalous_empty_pr'
         ? 'border-destructive/60'
         : 'border-warning/50'}"
     >
@@ -347,6 +365,10 @@
         {:else if toast.kind === 'repo_sync_error'}
           <span class="text-[10px] font-bold uppercase tracking-wide text-destructive"
             >Issue sync failed</span
+          >
+        {:else if toast.kind === 'anomalous_empty_pr'}
+          <span class="text-[10px] font-bold uppercase tracking-wide text-destructive"
+            >Empty pull request</span
           >
         {:else}
           <span class="text-[10px] font-bold uppercase tracking-wide text-warning"

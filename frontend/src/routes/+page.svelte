@@ -1,12 +1,13 @@
 <script lang="ts">
   import type { DndEvent } from 'svelte-dnd-action'
-  import type { HeartAttack, Railway, RepoSyncError, Settings, SourceKind, Task, TaskColumn } from '$lib/types'
+  import type { AnomalousEmptyPr, HeartAttack, Railway, RepoSyncError, Settings, SourceKind, Task, TaskColumn } from '$lib/types'
 
   import { onMount, onDestroy } from 'svelte'
   import { SvelteSet } from 'svelte/reactivity'
   import { dndzone } from 'svelte-dnd-action'
   import { toast } from 'svelte-sonner'
   import {
+    GitPullRequestArrow,
     HeartPulse,
     NotebookPen,
     RefreshCw,
@@ -76,6 +77,16 @@
   let dismissedSyncRepos = new SvelteSet<string>()
   const visibleSyncErrors = $derived(
     repoSyncErrors.filter((repo) => !dismissedSyncRepos.has(repo.full_name))
+  )
+  // Open, non-draft empty PRs (issue #314). Mirrors the sync-error banner: it
+  // persists while the PR is anomalous and self-clears once the PR gains changes,
+  // closes, or is marked draft; `dismissedEmptyPrs` (keyed by PR url) hides one the
+  // operator has read, and is forgotten once that PR is no longer anomalous so a
+  // later recurrence surfaces again. The one-time toast is driven via SSE.
+  let anomalousEmptyPrs = $state<AnomalousEmptyPr[]>([])
+  let dismissedEmptyPrs = new SvelteSet<string>()
+  const visibleEmptyPrs = $derived(
+    anomalousEmptyPrs.filter((pr) => !dismissedEmptyPrs.has(pr.pr_url))
   )
   // Every railway (swimlane), already ordered `main` first then by rank.
   let railways = $state<Railway[]>([])
@@ -417,6 +428,15 @@
     for (const name of dismissedSyncRepos) {
       if (!failing.has(name)) {
         dismissedSyncRepos.delete(name)
+      }
+    }
+    anomalousEmptyPrs = board.anomalous_empty_prs
+    // Same self-clearing dismissal: forget a dismissed PR once it is no longer
+    // anomalous, so a later recurrence on that PR raises the banner again.
+    const anomalous = new Set(anomalousEmptyPrs.map((pr) => pr.pr_url))
+    for (const url of dismissedEmptyPrs) {
+      if (!anomalous.has(url)) {
+        dismissedEmptyPrs.delete(url)
       }
     }
     repoNames = Object.fromEntries(repos.map((repo) => [repo.id, repo.full_name]))
@@ -957,6 +977,43 @@
         title="Dismiss"
         aria-label="Dismiss sync error"
         onclick={() => dismissedSyncRepos.add(repo.full_name)}
+      >
+        <X class="size-4" />
+      </Button>
+    </Alert.Root>
+  {/each}
+
+  {#each visibleEmptyPrs as pr (pr.pr_url)}
+    <!-- An open, non-draft PR has an empty net diff (issue #314). GitHub cannot
+         squash a zero-change PR and the agent did not deliberately park it as a
+         draft, so it is held in review and surfaced here. Self-clears when the PR
+         gains changes, is closed, or is marked draft; dismissible once read. -->
+    <Alert.Root variant="destructive" class="mx-6 mt-4 flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <Alert.Title class="flex items-center gap-1.5">
+          <GitPullRequestArrow class="size-4 flex-none" />
+          Empty pull request: {pr.repo_full_name}#{pr.pr_number}
+        </Alert.Title>
+        <Alert.Description class="break-words">
+          <span>
+            "{pr.task_title}" opened a pull request with no changes that is not a draft, so it
+            cannot be merged. It is held in review; close it or push the intended changes.
+          </span>
+          <a href={pr.pr_url} target="_blank" rel="noreferrer" class="mt-1 inline-block text-xs underline">
+            Open the pull request
+          </a>
+          <a href={`/task/${pr.task_id}`} class="mt-1 ml-3 inline-block text-xs underline">
+            Open the task
+          </a>
+        </Alert.Description>
+      </div>
+      <Button
+        variant="outline"
+        size="icon"
+        class="flex-none"
+        title="Dismiss"
+        aria-label="Dismiss empty pull request anomaly"
+        onclick={() => dismissedEmptyPrs.add(pr.pr_url)}
       >
         <X class="size-4" />
       </Button>
