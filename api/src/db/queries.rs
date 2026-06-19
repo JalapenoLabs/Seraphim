@@ -12,12 +12,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::{
-    AnomalousEmptyPr, AnswerKind, AutomationRule, AvailabilityWindow, ClaudeUsageCredentials,
-    DependencyCandidate, EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack, InternalComment,
-    JiraBoard, JiraDeployment, NetworkAccessLevel, PendingPlacement, PendingQuestion, Question,
-    QuestionOption, QuestionStatus, Railway, RepoDeletionImpact, RepoSyncError, Repository,
-    ReviewPolicy, Settings, SourceKind, StatsAggregate, Task, TaskAttachment, TaskColumn,
-    TaskPullRequest, TaskScreenshot, TaskStatus, Turn,
+    AggregatedSuggestion, AnomalousEmptyPr, AnswerKind, AutomationRule, AvailabilityWindow,
+    ClaudeUsageCredentials, DependencyCandidate, EnvSuggestion, EnvVar, EnvVarWrite, HeartAttack,
+    InternalComment, JiraBoard, JiraDeployment, NetworkAccessLevel, PendingPlacement,
+    PendingQuestion, Question, QuestionOption, QuestionStatus, Railway, RepoDeletionImpact,
+    RepoSyncError, Repository, ReviewPolicy, Settings, SourceKind, StatsAggregate, Task,
+    TaskAttachment, TaskColumn, TaskPullRequest, TaskScreenshot, TaskStatus, Turn,
 };
 use crate::automation::{RuleAction, RuleGroup, Trigger};
 
@@ -2916,6 +2916,23 @@ pub async fn list_suggestions_for_task(
         "SELECT * FROM environment_suggestions WHERE task_id = $1 ORDER BY created_at",
     )
     .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Every suggestion across all tasks, joined to its task for context, for the
+/// aggregated "Suggestions" management view (issue #324). Newest first; the page
+/// splits open vs done and greys out the done section. A suggestion whose task was
+/// deleted is dropped (the inner join), matching the per-task view.
+pub async fn list_all_suggestions(pool: &PgPool) -> sqlx::Result<Vec<AggregatedSuggestion>> {
+    sqlx::query_as::<_, AggregatedSuggestion>(
+        "SELECT s.id, s.task_id, s.title, s.detail, s.kind, s.acknowledged, \
+                s.created_at, s.acknowledged_at, \
+                t.title AS task_title, t.source_kind AS task_source, \
+                (t.repo_id IS NOT NULL) AS task_repo_linked \
+         FROM environment_suggestions s JOIN tasks t ON t.id = s.task_id \
+         ORDER BY s.created_at DESC",
+    )
     .fetch_all(pool)
     .await
 }

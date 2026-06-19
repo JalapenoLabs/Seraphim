@@ -16,13 +16,23 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ApiResult;
-use crate::db::models::{EnvSuggestion, EnvSuggestionWrite, Task, TaskColumn};
+use crate::db::models::{
+    AggregatedSuggestion, EnvSuggestion, EnvSuggestionWrite, Task, TaskColumn,
+};
 use crate::db::queries;
 use crate::git;
 use crate::state::AppState;
 
 /// The most suggestions a single post may record, to bound a runaway agent.
 const MAX_SUGGESTIONS: usize = 10;
+
+/// `GET /api/v1/suggestions` - every recommendation across all tasks, each with its
+/// originating task's title / source / repo link, for the aggregated "Suggestions"
+/// management view (issue #324). The same per-task ack and create-issue endpoints
+/// act on individual rows.
+pub async fn list_all(State(state): State<AppState>) -> ApiResult<Json<Vec<AggregatedSuggestion>>> {
+    Ok(Json(queries::list_all_suggestions(&state.db).await?))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SuggestRequest {

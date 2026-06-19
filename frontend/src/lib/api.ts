@@ -4,6 +4,7 @@
 import ky from 'ky'
 
 import type {
+  AggregatedSuggestion,
   AnswerKind,
   AutomationRule,
   AutomationTrigger,
@@ -257,6 +258,12 @@ export function hardResetTask(taskId: string) {
 }
 
 // --- Environment suggestions -------------------------------------------------
+
+// Every recommendation across all tasks, for the aggregated Suggestions tab
+// (issue #324). Each carries its originating task's title / source / repo link.
+export function listAllSuggestions() {
+  return apiClient.get('suggestions').json<AggregatedSuggestion[]>()
+}
 
 export function acknowledgeSuggestion(suggestionId: string, acknowledged: boolean) {
   return apiClient

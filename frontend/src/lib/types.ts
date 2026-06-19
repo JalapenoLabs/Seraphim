@@ -411,6 +411,15 @@ export type EnvSuggestion = {
   acknowledged_at: string | null
 }
 
+// A suggestion plus its originating task's context, for the aggregated
+// "Suggestions" management view (issue #324). A superset of EnvSuggestion, so it
+// can be passed straight to the shared create-issue button.
+export type AggregatedSuggestion = EnvSuggestion & {
+  task_title: string
+  task_source: SourceKind
+  task_repo_linked: boolean
+}
+
 // A decision the agent escalated to the user.
 export type QuestionStatus = 'pending' | 'answered' | 'declined'
 export type AnswerKind = 'option' | 'custom' | 'declined'

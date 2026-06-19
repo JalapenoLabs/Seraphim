@@ -18,6 +18,7 @@
 
   const links = [
     { href: '/', label: 'Board' },
+    { href: '/suggestions', label: 'Suggestions' },
     { href: '/watch', label: 'Watch' },
     { href: '/compose', label: 'Compose' },
     { href: '/automation', label: 'Automation' },

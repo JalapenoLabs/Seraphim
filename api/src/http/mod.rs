@@ -106,6 +106,7 @@ pub fn router(state: AppState) -> Router {
         .route("/compose/bulk-create", post(compose::bulk_create))
         .route("/compose/stats", get(stats::compose))
         .route("/compose/stream", get(sse::compose_stream))
+        .route("/suggestions", get(suggestions::list_all))
         .route("/agent/suggestions", post(suggestions::create))
         .route("/suggestions/:id/ack", post(suggestions::acknowledge))
         .route("/suggestions/:id/create", post(suggestions::create_issue))
