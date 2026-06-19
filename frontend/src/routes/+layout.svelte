@@ -108,8 +108,18 @@
   </main>
 {:else}
 <div class="flex h-screen flex-col">
-  <header class="flex items-center gap-4 border-b border-border bg-card px-6 py-3">
-    <a href="/" class="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
+  <!-- The header wraps on narrow screens (issue #326) so the eight nav tabs never
+       force a page-wide horizontal scrollbar: on mobile the logo + actions sit on
+       row 1, the tab strip scrolls horizontally on row 2, and the search takes row
+       3. From `sm` up it is the original single row (the `sm:` overrides restore
+       the desktop order, widths, and padding). -->
+  <header
+    class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-card px-4 py-3 sm:flex-nowrap sm:px-6"
+  >
+    <a
+      href="/"
+      class="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight text-foreground"
+    >
       <img
         src="/favicon.png"
         alt=""
@@ -118,11 +128,15 @@
       />
       Seraphim
     </a>
-    <nav class="flex gap-1">
+    <!-- The tab strip scrolls horizontally rather than squishing or forcing the
+         page wider: `min-w-0` lets it shrink within the row, `overflow-x-auto`
+         scrolls the `shrink-0` tabs. On mobile it is its own full-width row. -->
+    <nav class="order-2 flex w-full min-w-0 gap-1 overflow-x-auto sm:order-none sm:w-auto">
       {#each links as link}
         <a
           href={link.href}
-          class="rounded-md px-3 py-1.5 text-sm transition-colors {$page.url.pathname === link.href
+          class="shrink-0 rounded-md px-3 py-1.5 text-sm transition-colors {$page.url.pathname ===
+          link.href
             ? 'bg-secondary text-foreground'
             : 'text-muted-foreground hover:bg-secondary hover:text-foreground'}"
         >
@@ -131,12 +145,15 @@
       {/each}
     </nav>
 
-    <!-- Middle: fuzzy issue search over the live board. -->
-    <div class="flex flex-1 justify-center px-2">
+    <!-- Middle: fuzzy issue search over the live board. Its own full-width row on
+         mobile; the centered, growing middle column on desktop. -->
+    <div class="order-3 flex w-full min-w-0 justify-center sm:order-none sm:flex-1 sm:px-2">
       <SearchBar tasks={board?.tasks ?? []} />
     </div>
 
-    <div class="flex flex-none items-center gap-3">
+    <!-- Actions sit on the first row beside the logo on mobile (`order-1` +
+         `ml-auto`), and at the end of the single row on desktop. -->
+    <div class="order-1 ml-auto flex flex-none items-center gap-3 sm:order-none sm:ml-0">
       {#if status}
         <span
           class="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold {PILLS[
