@@ -486,7 +486,7 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    pushes nothing (genuinely unresolvable) or the budget is exhausted, it falls
    back to `ci_blocked` for a human. The single-PR case is just a one-row set, so
    its behavior is unchanged.
-   - **Parked unmergeable PRs (issues #304, #315):** an open PR GitHub cannot
+   - **Parked unmergeable PRs (issues #304, #314, #315):** an open PR GitHub cannot
      squash-merge is **held in review**, never merge-attempted or re-dispatched, so
      the merge-fails-then-flagged-a-conflict loop can't happen. Two cases qualify: an
      **empty net diff** (e.g. the agent parks a cross-repo blocker by opening a draft
@@ -500,8 +500,14 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
      (`review::decide` keeps the task out of Done while a parked PR remains).
      `merge_task_prs` also treats a `failed to squash-merge` on a now-empty-or-draft
      PR as benign ("not mergeable yet", leave parked), not a conflict. An empty PR
-     that is NOT a draft is unexpected, so it is also surfaced as an anomaly (a
-     warning). Non-empty, non-draft (ready) PRs follow the normal review-gate +
+     that is NOT a draft is unexpected, so it is also **surfaced on the board**
+     (issue #314), not just held: `refresh_task_prs` fires a one-time
+     `ServerEvent::AnomalousEmptyPr` (toast + native notification) on the transition
+     into the anomaly, and the board payload carries a derived, self-clearing
+     `anomalous_empty_prs` list (`queries::list_anomalous_empty_prs`, open +
+     `is_empty` + not `is_draft`) that drives a dismissible banner, mirroring the
+     repo-sync-error banner; it drops off once the PR gains changes, closes, or is
+     marked draft. Non-empty, non-draft (ready) PRs follow the normal review-gate +
      auto-merge flow.
    - **Review-comment gate (issues #255, #270):** a green PR is NEVER squash-merged
      while it carries review work, no matter its approval state. The merge gate is

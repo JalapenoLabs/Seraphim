@@ -15,7 +15,8 @@ use tracing::{info, warn};
 
 use super::ApiResult;
 use crate::db::models::{
-    HeartAttack, Railway, RepoSyncError, Settings, SourceKind, Task, TaskColumn, TaskStatus,
+    AnomalousEmptyPr, HeartAttack, Railway, RepoSyncError, Settings, SourceKind, Task, TaskColumn,
+    TaskStatus,
 };
 use crate::db::queries;
 use crate::git;
@@ -38,6 +39,10 @@ pub struct BoardResponse {
     /// Repos whose last issue sync failed (issue #213), so the board can show a
     /// persistent banner naming each failing repo and why until it recovers.
     pub repo_sync_errors: Vec<RepoSyncError>,
+    /// Open, non-draft PRs whose net diff is empty (issue #314): an anomaly the
+    /// board surfaces in a banner so it does not sit only in the logs. Self-clearing
+    /// (it drops off once the PR gains changes, closes, or is marked draft).
+    pub anomalous_empty_prs: Vec<AnomalousEmptyPr>,
 }
 
 /// `GET /api/v1/board` - every card, the org/pause settings, per-card counts of
@@ -54,6 +59,7 @@ pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardRes
         .collect();
     let heart_attacks = queries::list_unacknowledged_heart_attacks(&state.db).await?;
     let repo_sync_errors = queries::list_repo_sync_errors(&state.db).await?;
+    let anomalous_empty_prs = queries::list_anomalous_empty_prs(&state.db).await?;
     Ok(Json(BoardResponse {
         tasks,
         settings,
@@ -61,6 +67,7 @@ pub async fn get_board(State(state): State<AppState>) -> ApiResult<Json<BoardRes
         suggestion_counts,
         heart_attacks,
         repo_sync_errors,
+        anomalous_empty_prs,
     }))
 }
 

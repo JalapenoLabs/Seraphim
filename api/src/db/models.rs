@@ -407,6 +407,20 @@ pub struct RepoSyncError {
     pub sync_error_at: DateTime<Utc>,
 }
 
+/// An open, non-draft pull request whose net diff is empty (issue #314): an
+/// anomaly, since GitHub cannot squash-merge a zero-change PR and the agent did
+/// not deliberately park it as a draft. Surfaced as a self-clearing board banner
+/// (it drops off once the PR gains changes, is closed, or is marked draft), so the
+/// operator sees it without scanning the logs. Carries only what the banner needs.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AnomalousEmptyPr {
+    pub task_id: Uuid,
+    pub task_title: String,
+    pub repo_full_name: String,
+    pub pr_number: i64,
+    pub pr_url: String,
+}
+
 /// What a repository delete will purge, so the UI can spell it out before the
 /// user confirms. Counts the repo's tasks and everything that cascades from them.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
