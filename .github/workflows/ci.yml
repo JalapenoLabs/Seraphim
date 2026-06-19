@@ -93,10 +93,12 @@ jobs:
 
       - name: Test
         if: ${{ !cancelled() }}
-        # The throwaway Postgres (below) is also handed to the test step so the
-        # DB-gated regression test for orphaned `running` turns (issue #297) runs
-        # here; it self-applies the embedded migrations and skips when DATABASE_URL
-        # is unset. Pure tests ignore this env.
+        # Hand the throwaway Postgres (below) to the test step so the DB-gated
+        # integration tests run here as real regression guards, not just locally
+        # (issue #317). Each one creates and drops its OWN throwaway database via the
+        # `postgres` maintenance DB, so they never touch the shared `seraphim_test`
+        # the Migrate step uses, and they skip when DATABASE_URL is unset. Pure tests
+        # ignore this env.
         env:
           DATABASE_URL: postgres://seraphim:seraphim@localhost:5433/seraphim_test
         run: cargo test --all-features
