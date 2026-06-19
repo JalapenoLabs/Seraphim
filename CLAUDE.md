@@ -486,21 +486,23 @@ in `src/lib/components/`, pages in `src/routes/`. `src/hooks.server.ts` proxies
    pushes nothing (genuinely unresolvable) or the budget is exhausted, it falls
    back to `ci_blocked` for a human. The single-PR case is just a one-row set, so
    its behavior is unchanged.
-   - **Parked empty PRs (issue #304):** when the agent hits a cross-repo blocker it
-     cannot resolve in scope, it parks the ticket by opening a **draft PR with a
-     single empty commit** documenting the blocker. GitHub cannot squash-merge a
-     zero-change PR, so the sweep used to read the merge failure as a conflict and
-     re-dispatch the ticket forever. The refresh now records each PR's `is_draft` /
-     `is_empty` shape (`git::pr_status` reads `draft` + `changed_files`), and a PR
-     with an **empty net diff** maps to a new `review::PrReview::Parked` (in
-     `pr_review_of`, ahead of the CI/review checks): it is never merge-attempted,
-     CI-fixed, addressed, or re-dispatched, just **held in review** until a human or
-     an unblock event acts on it (`review::decide` keeps the task out of Done while
-     a parked PR remains). `merge_task_prs` also treats a `failed to squash-merge`
-     on a now-empty PR as benign ("nothing to merge", leave parked), not a conflict.
-     An empty PR that is NOT a draft is unexpected, so it is surfaced as an anomaly
-     (a warning) and still held rather than merged. Non-empty drafts and real PRs
-     follow the normal review-gate + auto-merge flow.
+   - **Parked unmergeable PRs (issues #304, #315):** an open PR GitHub cannot
+     squash-merge is **held in review**, never merge-attempted or re-dispatched, so
+     the merge-fails-then-flagged-a-conflict loop can't happen. Two cases qualify: an
+     **empty net diff** (e.g. the agent parks a cross-repo blocker by opening a draft
+     PR with a single empty commit documenting it, issue #304) and a **draft of any
+     size** (GitHub refuses to merge a draft until it is marked ready, issue #315).
+     The refresh records each PR's `is_draft` / `is_empty` shape (`git::pr_status`
+     reads `draft` + `changed_files`), and `pr_review_of` maps either to
+     `review::PrReview::Parked` ahead of the CI/review checks: it is never
+     merge-attempted, CI-fixed, addressed, or re-dispatched, just held until a human
+     or unblock event (a non-empty diff, a "ready for review") acts on it
+     (`review::decide` keeps the task out of Done while a parked PR remains).
+     `merge_task_prs` also treats a `failed to squash-merge` on a now-empty-or-draft
+     PR as benign ("not mergeable yet", leave parked), not a conflict. An empty PR
+     that is NOT a draft is unexpected, so it is also surfaced as an anomaly (a
+     warning). Non-empty, non-draft (ready) PRs follow the normal review-gate +
+     auto-merge flow.
    - **Review-comment gate (issues #255, #270):** a green PR is NEVER squash-merged
      while it carries review work, no matter its approval state. The merge gate is
      exactly **CI green AND zero unresolved review threads AND no outstanding

@@ -41,11 +41,13 @@ pub enum PrReview {
     Merged,
     /// Closed without merging (the agent or a human abandoned this repo's PR).
     Closed,
-    /// Open but with an empty net diff vs base (a parked-by-design empty draft
-    /// documenting a blocker, or an empty-by-accident PR). GitHub cannot squash a
-    /// zero-change PR, so it is never merged, fixed, or re-dispatched; it just
-    /// holds the task in review until a human or unblock event acts on it. This is
-    /// the guard against the empty-BLOCKED-draft re-dispatch loop (issue #304).
+    /// Open but not mergeable by GitHub, so it is never merged, fixed, or
+    /// re-dispatched; it just holds the task in review until a human or unblock
+    /// event acts on it. Two cases: an empty net diff vs base (a parked-by-design
+    /// empty draft documenting a blocker, or an empty-by-accident PR, issue #304),
+    /// and a draft of any size (GitHub refuses to merge a draft until it is marked
+    /// ready, issue #315). Both guard against the same merge-fails-then-re-dispatch
+    /// loop.
     Parked,
 }
 
@@ -166,8 +168,8 @@ pub fn decide(prs: &[PrReview], review_attempts_remaining: bool) -> ReviewDecisi
     }
 
     // Nothing failing/pending/auto-mergeable. Any open PR left needs a human, and a
-    // parked (empty) PR likewise holds the task in review: it is unmergeable by
-    // design, so the task is not Done while it is unresolved (issue #304).
+    // parked PR (empty, issue #304, or draft, issue #315) likewise holds the task in
+    // review: it is unmergeable, so the task is not Done while it is unresolved.
     if prs
         .iter()
         .any(|pr| matches!(pr, PrReview::Open { .. } | PrReview::Parked))

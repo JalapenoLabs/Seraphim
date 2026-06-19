@@ -2610,13 +2610,14 @@ async fn review_task(
 
     let mut views = Vec::with_capacity(prs.len());
     for pr in &prs {
-        // An empty open PR is parked-by-design (a blocker the agent documented):
-        // it is never merged or re-dispatched, so skip the review-gate lookup
-        // entirely (issue #304). An empty PR that is NOT a draft is unexpected, so
-        // surface it as an anomaly rather than letting it sit silently; it is still
-        // held (never auto-merged), since GitHub cannot squash a zero-change PR.
-        if pr.pr_state == "open" && pr.is_empty {
-            if !pr.is_draft {
+        // A PR GitHub cannot squash-merge is parked and held in review, never merged
+        // or re-dispatched, so skip the review-gate lookup entirely: an empty net
+        // diff (issue #304) or a draft (issue #315, GitHub refuses to merge a draft).
+        // An empty PR that is NOT a draft is unexpected, so surface it as an anomaly
+        // rather than letting it sit silently; a draft is a deliberate "not ready",
+        // so it just holds quietly until it is marked ready or a human acts.
+        if pr.pr_state == "open" && (pr.is_empty || pr.is_draft) {
+            if pr.is_empty && !pr.is_draft {
                 warn!(
                     task_id = %task.id,
                     pr = %pr.pr_url,
@@ -2759,21 +2760,21 @@ async fn merge_task_prs(
                 .await?;
             }
             Err(error) => {
-                // A zero-change PR cannot be squash-merged (GitHub rejects it). The
-                // review sweep already classifies empty PRs as parked and never
-                // selects them to merge, so reaching here with an empty PR means it
-                // went empty between the refresh and this merge. Treat it as benign
-                // ("nothing to merge") and leave it parked in review, rather than a
-                // conflict to re-dispatch forever (issue #304).
-                let empty = git::pr_status(github, owner, name, number)
+                // GitHub refuses to squash-merge a zero-change PR (issue #304) or any
+                // draft (issue #315). The review sweep already classifies both as
+                // parked and never selects them to merge, so reaching here means the
+                // PR changed shape (went empty, or was re-drafted) between the refresh
+                // and this merge. Treat it as benign ("not mergeable yet") and leave
+                // it parked in review, rather than a conflict to re-dispatch forever.
+                let unmergeable = git::pr_status(github, owner, name, number)
                     .await
-                    .map(|status| status.is_empty)
+                    .map(|status| status.is_empty || status.draft)
                     .unwrap_or(false);
-                if empty {
+                if unmergeable {
                     info!(
                         task_id = %task.id,
                         pr = %pr.pr_url,
-                        "auto-merge skipped: pull request has no changes; leaving it parked in review"
+                        "auto-merge skipped: pull request is a draft or has no changes; leaving it parked in review"
                     );
                     if task.status != TaskStatus::AwaitingReview {
                         queries::set_task_status(&state.db, task.id, TaskStatus::AwaitingReview)
@@ -3072,15 +3073,17 @@ async fn pr_repo_policy(
 /// Maps a stored PR row to the pure review view. `review` is the PR's review-gate
 /// state (only computed, and only meaningful, for a green open PR).
 ///
-/// An open PR with an empty net diff is mapped to `Parked` regardless of its CI or
-/// review state: GitHub cannot squash-merge a zero-change PR, so it is never a
-/// merge or fix candidate. This is the parked-by-design empty draft (a documented
-/// blocker) and keeps the sweep from re-dispatching it forever (issue #304).
+/// An open PR that GitHub cannot squash-merge is mapped to `Parked` regardless of
+/// its CI or review state, so it is never a merge or fix candidate, just held in
+/// review. Two cases qualify: an empty net diff (a parked-by-design blocker or an
+/// empty-by-accident PR, issue #304) and a draft (any draft, which GitHub refuses
+/// to merge until it is marked ready, issue #315). Both otherwise fall through to a
+/// merge attempt that fails and gets misread as a conflict to re-dispatch forever.
 fn pr_review_of(pr: &TaskPullRequest, auto_merge: bool, review: ReviewState) -> PrReview {
     match pr.pr_state.as_str() {
         "merged" => PrReview::Merged,
         "closed" => PrReview::Closed,
-        _ if pr.is_empty => PrReview::Parked,
+        _ if pr.is_empty || pr.is_draft => PrReview::Parked,
         _ => PrReview::Open {
             ci: match pr.ci_state.as_str() {
                 "passing" => PrCi::Passing,
@@ -3828,12 +3831,12 @@ mod tests {
     }
 
     #[test]
-    fn pr_review_of_maps_an_empty_open_pr_to_parked() {
-        // An open PR with an empty net diff is parked-by-design (issue #304): it
-        // maps to `Parked` regardless of CI, so the review decision never merges or
-        // re-dispatches it. A non-empty open PR keeps the normal Open view, and a
-        // merged/closed PR is unaffected by emptiness.
-        let pr = |pr_state: &str, ci_state: &str, is_empty: bool| TaskPullRequest {
+    fn pr_review_of_parks_an_unmergeable_open_pr() {
+        // An open PR GitHub cannot squash-merge maps to `Parked` regardless of CI, so
+        // the review decision never merges or re-dispatches it: an empty net diff
+        // (issue #304) or a draft of any size (issue #315). A non-empty, ready PR
+        // keeps the normal Open view, and a merged/closed PR is unaffected.
+        let pr = |pr_state: &str, ci_state: &str, is_draft: bool, is_empty: bool| TaskPullRequest {
             id: uuid::Uuid::new_v4(),
             task_id: uuid::Uuid::new_v4(),
             repo_id: None,
@@ -3843,38 +3846,60 @@ mod tests {
             head_sha: String::new(),
             ci_state: ci_state.to_string(),
             pr_state: pr_state.to_string(),
-            is_draft: false,
+            is_draft,
             is_empty,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
-        // Empty open PR with passing CI and auto-merge requested -> Parked, not Merge.
+        // Empty open PR (passing or failing CI) -> Parked, never merged or fixed.
         assert_eq!(
-            pr_review_of(&pr("open", "passing", true), true, ReviewState::Clean),
+            pr_review_of(
+                &pr("open", "passing", false, true),
+                true,
+                ReviewState::Clean
+            ),
             PrReview::Parked
         );
-        // Empty open PR with failing CI is still Parked (never re-dispatched to fix).
         assert_eq!(
-            pr_review_of(&pr("open", "failing", true), true, ReviewState::Clean),
+            pr_review_of(
+                &pr("open", "failing", false, true),
+                true,
+                ReviewState::Clean
+            ),
             PrReview::Parked
         );
-        // A non-empty open PR is unaffected: it keeps the normal Open view.
+        // A non-empty DRAFT PR is also unmergeable (issue #315) -> Parked, even with
+        // passing CI and auto-merge requested, so it is never merge-attempted.
         assert_eq!(
-            pr_review_of(&pr("open", "passing", false), true, ReviewState::Clean),
+            pr_review_of(
+                &pr("open", "passing", true, false),
+                true,
+                ReviewState::Clean
+            ),
+            PrReview::Parked
+        );
+        // A non-empty, non-draft (ready) PR is unaffected: it keeps the normal Open
+        // view and flows through the usual merge gate.
+        assert_eq!(
+            pr_review_of(
+                &pr("open", "passing", false, false),
+                true,
+                ReviewState::Clean
+            ),
             PrReview::Open {
                 ci: PrCi::Passing,
                 auto_merge: true,
                 review: ReviewState::Clean,
             }
         );
-        // Settled PRs ignore emptiness entirely.
+        // Settled PRs ignore draft/empty entirely.
         assert_eq!(
-            pr_review_of(&pr("merged", "", true), true, ReviewState::Clean),
+            pr_review_of(&pr("merged", "", true, true), true, ReviewState::Clean),
             PrReview::Merged
         );
         assert_eq!(
-            pr_review_of(&pr("closed", "", true), true, ReviewState::Clean),
+            pr_review_of(&pr("closed", "", true, false), true, ReviewState::Clean),
             PrReview::Closed
         );
     }
