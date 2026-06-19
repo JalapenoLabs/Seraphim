@@ -3524,6 +3524,111 @@ pub async fn prune_stale_pending_placements(pool: &PgPool, max_age_days: i32) ->
 mod tests {
     use super::*;
 
+    /// Whether the DB-gated tests must actually run, so an unreachable database is a
+    /// hard failure rather than a silent skip (issue #322).
+    ///
+    /// True in CI (`CI` / `GITHUB_ACTIONS` are set by the Actions runner and cannot
+    /// be accidentally dropped) or when `REQUIRE_DB_TESTS` is set as a local opt-in.
+    /// A plain local `cargo test` with none of these set stays lenient and skips, so
+    /// developers without a database are not blocked, while a CI regression (a
+    /// dropped `DATABASE_URL`, a Postgres service that never came up) can no longer
+    /// quietly disable these regression guards.
+    fn db_tests_required() -> bool {
+        ["REQUIRE_DB_TESTS", "CI", "GITHUB_ACTIONS"]
+            .iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .any(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "" | "0" | "false"
+                )
+            })
+    }
+
+    /// Skips a DB-gated test (returns `None`) when no database is reachable, unless
+    /// the environment requires it ([`db_tests_required`]), in which case it panics
+    /// so the missing database fails the build loudly instead of silently disabling
+    /// the guard (issue #322). `reason` explains which setup step could not proceed.
+    fn skip_or_fail(reason: &str) -> Option<TestDb> {
+        assert!(
+            !db_tests_required(),
+            "DB-gated test requires a reachable Postgres but {reason}; in CI the \
+             postgres service must be up and DATABASE_URL set on the Test step"
+        );
+        eprintln!("skipping DB-gated test: {reason}");
+        None
+    }
+
+    /// A throwaway database for one DB-gated test: a fresh, migrated database created
+    /// via the `postgres` maintenance DB and dropped on [`Self::teardown`]. Kept off
+    /// the database `DATABASE_URL` points at so it never collides with CI's separate
+    /// migrate step against the shared `seraphim_test`.
+    struct TestDb {
+        pool: PgPool,
+        admin: PgPool,
+        name: String,
+    }
+
+    impl TestDb {
+        /// Closes the pool, then drops the throwaway database (a database cannot be
+        /// dropped while a connection to it is open). Best-effort; the CI Postgres is
+        /// torn down with the job regardless.
+        async fn teardown(self) {
+            self.pool.close().await;
+            let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {}", self.name))
+                .execute(&self.admin)
+                .await;
+        }
+    }
+
+    /// Creates a fresh, migrated throwaway database `name` for a DB-gated test, or
+    /// returns `None` to skip when no database is reachable (see [`skip_or_fail`] for
+    /// the skip-vs-fail policy, issue #322). Centralizing setup here means every
+    /// DB-gated test, current and future, inherits the same isolation and CI guard.
+    ///
+    /// `raw_sql` (the simple protocol) is required: `CREATE`/`DROP DATABASE` cannot
+    /// run inside the implicit transaction of a prepared statement.
+    async fn setup_throwaway_db(name: &str) -> Option<TestDb> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return skip_or_fail("DATABASE_URL is unset");
+        };
+        let Some((prefix, _)) = url.rsplit_once('/') else {
+            return skip_or_fail("DATABASE_URL has no database segment");
+        };
+        let admin = match PgPool::connect(&format!("{prefix}/postgres")).await {
+            Ok(admin) => admin,
+            Err(error) => {
+                return skip_or_fail(&format!(
+                    "cannot reach the Postgres maintenance database: {error}"
+                ))
+            }
+        };
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {name}"))
+            .execute(&admin)
+            .await;
+        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {name}"))
+            .execute(&admin)
+            .await
+        {
+            return skip_or_fail(&format!(
+                "cannot create the throwaway test database: {error}"
+            ));
+        }
+
+        let pool = PgPool::connect(&format!("{prefix}/{name}"))
+            .await
+            .expect("connect to the throwaway test database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+        Some(TestDb {
+            pool,
+            admin,
+            name: name.to_string(),
+        })
+    }
+
     /// A task's still-`running` real agent turns (excludes the synthetic
     /// `[CI activity]` container), the thing that must stay bounded (issue #297).
     async fn running_agent_turns(pool: &PgPool, task_id: Uuid) -> i64 {
@@ -3569,45 +3674,10 @@ mod tests {
     /// Postgres, or `pg-ephemeral` locally); otherwise it skips.
     #[tokio::test]
     async fn orphaned_running_turns_never_race_the_clock() {
-        // Our own throwaway database, kept off the one `DATABASE_URL` points at.
-        const TEST_DB: &str = "seraphim_issue297_test";
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping orphaned_running_turns_never_race_the_clock: DATABASE_URL unset");
+        let Some(db) = setup_throwaway_db("seraphim_issue297_test").await else {
             return;
         };
-        // Run against a throwaway database of our own, NEVER the one `DATABASE_URL`
-        // points at: CI also runs a dedicated `migrate` step against that database,
-        // and pre-applying migrations here would break it. Connect to the `postgres`
-        // maintenance DB to create/drop ours. `raw_sql` (the simple protocol) is
-        // required: `CREATE DATABASE` cannot run inside the implicit transaction of
-        // a prepared statement. Any setup failure skips (an env quirk must not fail
-        // CI); the assertions still run whenever the DB is reachable.
-        let Some((prefix, _)) = url.rsplit_once('/') else {
-            eprintln!("skipping: DATABASE_URL has no database segment");
-            return;
-        };
-        let Ok(admin) = PgPool::connect(&format!("{prefix}/postgres")).await else {
-            eprintln!("skipping: cannot reach the Postgres maintenance database");
-            return;
-        };
-        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
-            .execute(&admin)
-            .await;
-        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {TEST_DB}"))
-            .execute(&admin)
-            .await
-        {
-            eprintln!("skipping: cannot create the throwaway test database: {error}");
-            return;
-        }
-
-        let pool = PgPool::connect(&format!("{prefix}/{TEST_DB}"))
-            .await
-            .expect("connect to the throwaway test database");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("apply migrations");
+        let pool = db.pool.clone();
 
         let task = create_internal_task(&pool, "issue-297 orphan turn test", "", "open", &[], 1.0)
             .await
@@ -3684,13 +3754,7 @@ mod tests {
             "a turn whose task is not actively worked never races the clock"
         );
 
-        // Tear down: close our pool, then drop the throwaway database (a DB cannot
-        // be dropped while a connection to it is open). Best-effort; the CI Postgres
-        // is torn down with the job regardless.
-        pool.close().await;
-        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
-            .execute(&admin)
-            .await;
+        db.teardown().await;
     }
 
     /// The compose assistant's `running` turns get the same orphan guard as the
@@ -3702,39 +3766,10 @@ mod tests {
     /// throwaway database of its own; otherwise it skips.
     #[tokio::test]
     async fn orphaned_running_compose_turns_never_race_the_gauge() {
-        const TEST_DB: &str = "seraphim_issue316_test";
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!(
-                "skipping orphaned_running_compose_turns_never_race_the_gauge: DATABASE_URL unset"
-            );
+        let Some(db) = setup_throwaway_db("seraphim_issue316_test").await else {
             return;
         };
-        let Some((prefix, _)) = url.rsplit_once('/') else {
-            eprintln!("skipping: DATABASE_URL has no database segment");
-            return;
-        };
-        let Ok(admin) = PgPool::connect(&format!("{prefix}/postgres")).await else {
-            eprintln!("skipping: cannot reach the Postgres maintenance database");
-            return;
-        };
-        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
-            .execute(&admin)
-            .await;
-        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {TEST_DB}"))
-            .execute(&admin)
-            .await
-        {
-            eprintln!("skipping: cannot create the throwaway test database: {error}");
-            return;
-        }
-
-        let pool = PgPool::connect(&format!("{prefix}/{TEST_DB}"))
-            .await
-            .expect("connect to the throwaway test database");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("apply migrations");
+        let pool = db.pool.clone();
 
         // A fresh turn is live: the gauge counts it and a second turn is rejected.
         let first = create_compose_turn(&pool, "draft some issues", None)
@@ -3802,11 +3837,7 @@ mod tests {
             "a long-running turn with recent activity is live, not stale"
         );
 
-        // Tear down (see the #297 test for the rationale).
-        pool.close().await;
-        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
-            .execute(&admin)
-            .await;
+        db.teardown().await;
     }
 
     /// A blocking task must keep the railway's queue serialized across its whole
@@ -3821,41 +3852,10 @@ mod tests {
     /// quirk must not fail the suite, and CI exercises the migrations separately.
     #[tokio::test]
     async fn blocking_task_gates_the_queue_until_its_pr_merges() {
-        const TEST_DB: &str = "seraphim_issue302_test";
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!(
-                "skipping blocking_task_gates_the_queue_until_its_pr_merges: DATABASE_URL unset"
-            );
+        let Some(db) = setup_throwaway_db("seraphim_issue302_test").await else {
             return;
         };
-        let Some((prefix, _)) = url.rsplit_once('/') else {
-            eprintln!("skipping: DATABASE_URL has no database segment");
-            return;
-        };
-        // `raw_sql` (the simple protocol) is required: CREATE/DROP DATABASE cannot
-        // run inside the implicit transaction of a prepared statement.
-        let Ok(admin) = PgPool::connect(&format!("{prefix}/postgres")).await else {
-            eprintln!("skipping: cannot reach the Postgres maintenance database");
-            return;
-        };
-        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
-            .execute(&admin)
-            .await;
-        if let Err(error) = sqlx::raw_sql(&format!("CREATE DATABASE {TEST_DB}"))
-            .execute(&admin)
-            .await
-        {
-            eprintln!("skipping: cannot create the throwaway test database: {error}");
-            return;
-        }
-
-        let pool = PgPool::connect(&format!("{prefix}/{TEST_DB}"))
-            .await
-            .expect("connect to the throwaway test database");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("apply migrations");
+        let pool = db.pool.clone();
 
         // Every freshly migrated database has a seeded `main` railway; both tasks
         // below land on it (no repo means "railway follows repo" falls back to main).
@@ -3921,11 +3921,6 @@ mod tests {
             "a non-blocking task in review must not gate the queue"
         );
 
-        // Tear down: close our pool, then drop the throwaway database (a database
-        // cannot be dropped while a connection to it is open). Best-effort.
-        pool.close().await;
-        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TEST_DB}"))
-            .execute(&admin)
-            .await;
+        db.teardown().await;
     }
 }
