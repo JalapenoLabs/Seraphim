@@ -208,6 +208,19 @@ async fn provision_on_startup(state: AppState) {
         Err(error) => warn!(error = %error, "failed to reclaim orphaned turns on startup"),
     }
 
+    // The compose assistant keeps its own `running` turns (`compose_turns`) with no
+    // defibrillator, so a restart mid-compose-turn leaves the same kind of orphan;
+    // clean it up too so the compose gauge doesn't inflate and a leaked row doesn't
+    // block new compose turns (issue #316).
+    match queries::finalize_orphaned_compose_turns(&state.db).await {
+        Ok(0) => {}
+        Ok(count) => warn!(
+            count,
+            "marked orphaned running compose turns as failed on startup"
+        ),
+        Err(error) => warn!(error = %error, "failed to reclaim orphaned compose turns on startup"),
+    }
+
     // Mark provisioning in-progress so the agent halts until the config repo is
     // verified this boot (only matters when a config repo is configured).
     if let Ok(settings) = queries::get_settings(&state.db).await {
