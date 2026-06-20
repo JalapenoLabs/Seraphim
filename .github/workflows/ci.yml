@@ -49,7 +49,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The runner is self-hosted, so $HOME survives between jobs while the
       # checked-out tree does not: actions/checkout runs `git clean -ffdx`, which
@@ -89,7 +89,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -115,7 +115,7 @@ jobs:
     name: Docker images
     runs-on: [self-hosted, Linux, X64, fedora]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `docker compose build` reads the file's variable interpolation; provide
       # placeholders so it parses cleanly. (Build needs no real secrets.)
