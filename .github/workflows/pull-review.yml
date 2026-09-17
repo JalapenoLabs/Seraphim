@@ -1,0 +1,71 @@
+name: Automated Claude & Codex PR reviews
+run-name: "Automated review · PR #${{ github.event.pull_request.number }} (${{ github.event.pull_request.title }})"
+
+# `pull_request_target` runs the base branch's copy of this file, so a pull
+# request cannot change how it is reviewed, or point the reviewer runner at
+# anything else, by editing this workflow.
+#
+# `ready_for_review` is listed because the default set is only `opened`,
+# `synchronize`, and `reopened`. The review skips drafts and picks one up when
+# its author marks it ready, which emits `ready_for_review` and nothing else.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+
+# A newer push supersedes the review in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Fork pull requests are not reviewed. The runner is self-hosted and holds
+    # the reviewers' credentials, so a fork's code must never be checked out
+    # on it.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, reviewer]
+    timeout-minutes: 45
+    steps:
+      # Full history so reviewers can `git log`, `git blame`, and `git show`
+      # earlier commits, and so the re-up detector can check ancestry. Pinned
+      # to the pull request head: `pull_request_target` otherwise checks out
+      # the base branch. Credentials stay configured because the re-up
+      # detector fetches the base branch, which a private repository needs.
+      - name: Check out the pull request
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # The review pipeline lives in the private JalapenoLabs/github-actions
+      # repository. It is checked out onto the runner for this job only and
+      # never committed here. Must come after the pull request checkout, which
+      # would otherwise clear it from the working tree.
+      - name: Check out the review pipeline
+        uses: actions/checkout@v6
+        with:
+          repository: JalapenoLabs/github-actions
+          ref: main
+          path: .reviewer
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          persist-credentials: false
+
+      - name: Review
+        uses: ./.reviewer/.github/actions/review-pr
+        with:
+          claude-code-oauth-token: ${{ secrets.ALEX_AUTOMATED_REVIEWER_CLAUDE_TOKEN }}
+          claude-app-id: ${{ vars.CLAUDE_REVIEWER_APP_ID }}
+          claude-app-private-key: ${{ secrets.CLAUDE_REVIEWER_APP_PRIVATE_KEY }}
+          codex-app-id: ${{ vars.CODEX_REVIEWER_APP_ID }}
+          codex-app-private-key: ${{ secrets.CODEX_REVIEWER_APP_PRIVATE_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          discord-webhook-url: ${{ secrets.REVIEWER_ALERTS_DISCORD_WEBHOOK }}
+          jira-url: ${{ vars.JIRA_URL }}
+          jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
