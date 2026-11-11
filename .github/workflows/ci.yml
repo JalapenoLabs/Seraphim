@@ -21,7 +21,7 @@ jobs:
 
   api:
     name: API (Rust)
-    runs-on: [self-hosted, Linux, X64, rocky9]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: api
@@ -31,10 +31,7 @@ jobs:
     # typo in an ALTER TABLE) compiles and tests green and only fails at API
     # boot on a real deploy. Applying the embedded migrations to a real database
     # here catches that in the PR. Only the container port is declared, so
-    # Docker picks a random free host port (read back via job.services below).
-    # A fixed port collides on the shared runner host: main and develop can run
-    # concurrently on two runners of the same machine, and a cancelled run can
-    # leak its service container, squatting the port for every later run.
+    # Docker picks a free host port, read back via job.services below.
     services:
       postgres:
         image: postgres:17
@@ -53,15 +50,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The runner is self-hosted, so $HOME survives between jobs while the
-      # checked-out tree does not: actions/checkout runs `git clean -ffdx`, which
-      # deletes the gitignored api/target every run. Point Cargo's build output at
-      # a stable path under $HOME so incremental compiles persist locally, with no
-      # multi-hundred-MB cache upload/download per run. ~/.cargo/{registry,git}
-      # already live in $HOME and persist for free. rust-toolchain.toml pins the
-      # channel (1.88); rustup installs it on the first cargo invocation.
-      - name: Persist Cargo build output outside the workspace
-        run: echo "CARGO_TARGET_DIR=$HOME/.cache/seraphim/cargo-target" >> "$GITHUB_ENV"
+      # rust-toolchain.toml pins the channel (1.88) and its components. Install
+      # them before the cache step, whose key includes the compiler version.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      # Hosted runners start cold every run, so restore the cargo registry and
+      # the compiled dependencies instead of rebuilding them from source.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: api
 
       - name: Format
         if: ${{ !cancelled() }}
@@ -86,7 +84,7 @@ jobs:
 
   frontend:
     name: Frontend (SvelteKit)
-    runs-on: [self-hosted, Linux, X64, rocky9]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
@@ -115,9 +113,17 @@ jobs:
 
   images:
     name: Docker images
-    runs-on: [self-hosted, Linux, X64, rocky9]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+
+      # The workspace image builds on devcontainers/universal, which unpacks to
+      # well over 10 GB. A hosted runner guarantees only 14 GB, so remove the
+      # preinstalled SDKs no job here uses (Android, .NET, Haskell, CodeQL).
+      - name: Free disk space for the workspace image
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
 
       # `docker compose build` reads the file's variable interpolation; provide
       # placeholders so it parses cleanly. (Build needs no real secrets.)
