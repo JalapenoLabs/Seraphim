@@ -38,7 +38,7 @@ jobs:
       # the base branch. Credentials stay configured because the re-up
       # detector fetches the base branch, which a private repository needs.
       - name: Check out the pull request
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -49,7 +49,7 @@ jobs:
       # never committed here. Must come after the pull request checkout, which
       # would otherwise clear it from the working tree.
       - name: Check out the review pipeline
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: JalapenoLabs/github-actions
           ref: main
